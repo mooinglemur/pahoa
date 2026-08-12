@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/pahoa",
     "crates/pahoa-multidata",
+    "crates/pahoa-net",
     "crates/pahoa-pickle",
     "crates/pahoa-proto",
     "crates/pahoa-pyrandom",

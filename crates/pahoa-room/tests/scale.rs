@@ -152,7 +152,7 @@ fn item_delivery_does_not_sweep_unaffected_clients() {
     // The receiver gets items; nobody else does. Bystanders still see the feed
     // line, which is a broadcast, not a per-client sweep.
     let items_to = |c| {
-        sink.packets_for(c)
+        sink.packets_for(c, &room)
             .into_iter()
             .filter(|p| matches!(p, pahoa_proto::ServerPacket::ReceivedItems(_)))
             .count()

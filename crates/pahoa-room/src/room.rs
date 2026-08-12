@@ -5,7 +5,7 @@
 //! pass in, no async.
 
 use crate::conn::{Client, ConnId, non_game_verb};
-use crate::effect::{CloseReason, EffectSink};
+use crate::effect::{CloseReason, EffectSink, Recipients};
 use crate::options::RoomOptions;
 use pahoa_multidata::{DataPackage as NameTables, MultiData, SlotType};
 use pahoa_proto::server::*;
@@ -133,9 +133,8 @@ impl Room {
                 self.slot_alias(key),
                 self.slot_game(client.slot),
             );
-            let recipients = self.text_recipients();
             out.broadcast(
-                &recipients,
+                Recipients::AllText,
                 &[ServerPacket::PrintJSON(PrintJson {
                     data: vec![JsonMessagePart::text(text)],
                     print_type: Some(PrintJsonType::Part),
@@ -320,9 +319,8 @@ impl Room {
             client.version,
             verb,
         );
-        let recipients = self.text_recipients();
         out.broadcast(
-            &recipients,
+            Recipients::AllText,
             &[ServerPacket::PrintJSON(PrintJson {
                 data: vec![JsonMessagePart::text(text)],
                 print_type: Some(PrintJsonType::Join),
@@ -500,9 +498,8 @@ impl Room {
                 self.slot_alias(key),
                 key.0 + 1
             );
-            let recipients = self.text_recipients();
             out.broadcast(
-                &recipients,
+                Recipients::AllText,
                 &[ServerPacket::PrintJSON(PrintJson {
                     data: vec![JsonMessagePart::text(text)],
                     print_type: Some(PrintJsonType::Goal),
@@ -593,7 +590,6 @@ impl Room {
 
         let mut dirty_slots: HashSet<u32> = HashSet::new();
         let mut feed: Vec<ServerPacket> = Vec::with_capacity(PRINT_JSON_CHUNK);
-        let recipients = self.text_recipients();
 
         for (receiver, item, location, flags) in sortable {
             let net = NetworkItem {
@@ -609,13 +605,13 @@ impl Room {
             }
 
             if feed.len() >= PRINT_JSON_CHUNK {
-                out.broadcast(&recipients, &feed);
+                out.broadcast(Recipients::AllText, &feed);
                 feed.clear();
             }
             feed.push(self.item_send_message(slot, receiver, net));
         }
         if !feed.is_empty() {
-            out.broadcast(&recipients, &feed);
+            out.broadcast(Recipients::AllText, &feed);
         }
 
         self.location_checks
@@ -627,10 +623,9 @@ impl Room {
 
         // Only the *new* checks go out here; the full list is sent by a separate
         // path. Same field name, two meanings — clients union rather than replace.
-        let conns = self.by_slot.get(&key).cloned().unwrap_or_default();
-        if !conns.is_empty() {
+        if self.by_slot.get(&key).is_some_and(|c| !c.is_empty()) {
             out.broadcast(
-                &conns,
+                Recipients::Slot(key),
                 &[ServerPacket::RoomUpdate(Box::new(RoomUpdate {
                     checked_locations: Some(fresh),
                     hint_points: Some(self.slot_points(key)),
@@ -891,28 +886,36 @@ impl Room {
 
     /// Connections that should receive text broadcasts, i.e. everyone
     /// authenticated without the `NoText` tag.
-    fn text_recipients(&self) -> Vec<ConnId> {
-        let mut v: Vec<ConnId> = self
-            .clients
-            .values()
-            .filter(|c| c.auth && !c.no_text)
-            .map(|c| c.id)
-            .collect();
-        // Deterministic order keeps effect streams comparable across runs.
+    /// Expand a [`Recipients`] into concrete connections.
+    ///
+    /// The production transport keeps its own membership indexes and expands
+    /// these off the actor's critical path; this exists for tests and for any
+    /// caller that only has the room. Sorted, so effect streams stay comparable
+    /// between runs.
+    pub fn resolve(&self, to: &Recipients) -> Vec<ConnId> {
+        let mut v: Vec<ConnId> = match to {
+            Recipients::All => self
+                .clients
+                .values()
+                .filter(|c| c.auth)
+                .map(|c| c.id)
+                .collect(),
+            Recipients::AllText => self
+                .clients
+                .values()
+                .filter(|c| c.auth && !c.no_text)
+                .map(|c| c.id)
+                .collect(),
+            Recipients::Slot(key) => self.by_slot.get(key).cloned().unwrap_or_default(),
+            Recipients::These(list) => list.clone(),
+        };
         v.sort_unstable();
         v
     }
 
     /// All authenticated connections.
     pub fn all_conns(&self) -> Vec<ConnId> {
-        let mut v: Vec<ConnId> = self
-            .clients
-            .values()
-            .filter(|c| c.auth)
-            .map(|c| c.id)
-            .collect();
-        v.sort_unstable();
-        v
+        self.resolve(&Recipients::All)
     }
 
     pub fn shutdown(&mut self, out: &mut dyn EffectSink) {

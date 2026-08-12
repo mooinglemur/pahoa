@@ -11,7 +11,29 @@
 //! receives a resolved `&[ConnId]`.
 
 use crate::conn::ConnId;
+use crate::room::SlotKey;
 use pahoa_proto::ServerPacket;
+
+/// Who a broadcast is for, described rather than enumerated.
+///
+/// This is deliberately *intent*, not a resolved `&[ConnId]`. Materialising a
+/// list would put an O(connections) walk in the room for every broadcast — at
+/// 6000 connections and ~3,500 broadcasts in a mass release, that is over 20
+/// million pushes of work the room should never be doing. Instead the transport
+/// keeps the membership indexes and expands these itself, in parallel, off the
+/// critical path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recipients {
+    /// Every authenticated connection.
+    All,
+    /// Every authenticated connection without the `NoText` tag.
+    AllText,
+    /// Every connection authenticated to one slot. Co-op means this can be
+    /// several.
+    Slot(SlotKey),
+    /// An explicit list, for the cases that genuinely need one.
+    These(Vec<ConnId>),
+}
 
 /// Why the room is dropping a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +55,7 @@ pub trait EffectSink {
     ///
     /// The transport encodes once and shares the bytes; that is the whole
     /// reason this is distinct from repeated [`EffectSink::send`].
-    fn broadcast(&mut self, to: &[ConnId], msgs: &[ServerPacket]);
+    fn broadcast(&mut self, to: Recipients, msgs: &[ServerPacket]);
 
     /// Drop a connection.
     fn close(&mut self, conn: ConnId, reason: CloseReason);
@@ -56,7 +78,7 @@ pub enum Event {
         msgs: Vec<ServerPacket>,
     },
     Broadcast {
-        to: Vec<ConnId>,
+        to: Recipients,
         msgs: Vec<ServerPacket>,
     },
     Close {
@@ -73,9 +95,9 @@ impl EffectSink for Recorder {
         });
     }
 
-    fn broadcast(&mut self, to: &[ConnId], msgs: &[ServerPacket]) {
+    fn broadcast(&mut self, to: Recipients, msgs: &[ServerPacket]) {
         self.events.push(Event::Broadcast {
-            to: to.to_vec(),
+            to,
             msgs: msgs.to_vec(),
         });
     }
@@ -91,12 +113,16 @@ impl EffectSink for Recorder {
 
 impl Recorder {
     /// Every packet sent to `conn`, whether directly or by broadcast.
-    pub fn packets_for(&self, conn: ConnId) -> Vec<&ServerPacket> {
+    ///
+    /// Needs the room because [`Recipients`] describes an audience rather than
+    /// listing it; resolving is the room's job (and, in production, the
+    /// transport's).
+    pub fn packets_for(&self, conn: ConnId, room: &crate::Room) -> Vec<&ServerPacket> {
         self.events
             .iter()
             .filter_map(|e| match e {
                 Event::Send { to, msgs } if *to == conn => Some(msgs),
-                Event::Broadcast { to, msgs } if to.contains(&conn) => Some(msgs),
+                Event::Broadcast { to, msgs } if room.resolve(to).contains(&conn) => Some(msgs),
                 _ => None,
             })
             .flatten()
@@ -114,7 +140,7 @@ impl Recorder {
             .sum()
     }
 
-    pub fn broadcasts(&self) -> impl Iterator<Item = (&Vec<ConnId>, &Vec<ServerPacket>)> {
+    pub fn broadcasts(&self) -> impl Iterator<Item = (&Recipients, &Vec<ServerPacket>)> {
         self.events.iter().filter_map(|e| match e {
             Event::Broadcast { to, msgs } => Some((to, msgs)),
             _ => None,
@@ -147,7 +173,7 @@ impl EffectSink for Counter {
         self.max_chunk = self.max_chunk.max(msgs.len());
     }
 
-    fn broadcast(&mut self, _to: &[ConnId], msgs: &[ServerPacket]) {
+    fn broadcast(&mut self, _to: Recipients, msgs: &[ServerPacket]) {
         self.broadcasts += 1;
         self.packets += msgs.len();
         self.max_chunk = self.max_chunk.max(msgs.len());

@@ -12,8 +12,12 @@ fn checks(locations: Vec<i64>) -> ClientPacket {
     ClientPacket::LocationChecks(cmd::LocationChecks { locations })
 }
 
-fn received(sink: &Recorder, conn: ConnId) -> Vec<&pahoa_proto::server::ReceivedItems> {
-    sink.packets_for(conn)
+fn received<'a>(
+    sink: &'a Recorder,
+    conn: ConnId,
+    room: &Room,
+) -> Vec<&'a pahoa_proto::server::ReceivedItems> {
+    sink.packets_for(conn, room)
         .into_iter()
         .filter_map(|p| match p {
             ServerPacket::ReceivedItems(r) => Some(r),
@@ -22,8 +26,12 @@ fn received(sink: &Recorder, conn: ConnId) -> Vec<&pahoa_proto::server::Received
         .collect()
 }
 
-fn room_update(sink: &Recorder, conn: ConnId) -> Vec<&pahoa_proto::server::RoomUpdate> {
-    sink.packets_for(conn)
+fn room_update<'a>(
+    sink: &'a Recorder,
+    conn: ConnId,
+    room: &Room,
+) -> Vec<&'a pahoa_proto::server::RoomUpdate> {
+    sink.packets_for(conn, room)
         .into_iter()
         .filter_map(|p| match p {
             ServerPacket::RoomUpdate(r) => Some(&**r),
@@ -52,7 +60,7 @@ fn checking_a_location_reports_it_back() {
     let mut sink = Recorder::default();
     room.handle(conn, checks(vec![first]), &mut sink);
 
-    let updates = room_update(&sink, conn);
+    let updates = room_update(&sink, conn, &room);
     assert_eq!(updates.len(), 1);
     // Only the new check is listed, not the whole set.
     assert_eq!(updates[0].checked_locations.as_deref(), Some(&[first][..]));
@@ -105,7 +113,7 @@ fn duplicate_ids_within_one_packet_are_collapsed() {
     let mut sink = Recorder::default();
     room.handle(conn, checks(vec![first, first, first]), &mut sink);
 
-    let updates = room_update(&sink, conn);
+    let updates = room_update(&sink, conn, &room);
     assert_eq!(updates[0].checked_locations.as_deref(), Some(&[first][..]));
 }
 
@@ -147,7 +155,7 @@ fn an_item_reaches_the_slot_it_is_destined_for() {
     let mut sink = Recorder::default();
     room.handle(sender_conn, checks(vec![location]), &mut sink);
 
-    let got = received(&sink, receiver_conn);
+    let got = received(&sink, receiver_conn, &room);
     assert_eq!(
         got.len(),
         1,
@@ -199,7 +207,7 @@ fn sync_resends_the_whole_inventory_from_index_zero() {
     sink.clear();
 
     room.handle(conn, ClientPacket::Sync, &mut sink);
-    let got = received(&sink, conn);
+    let got = received(&sink, conn, &room);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].index, 0, "Sync always restarts the stream");
 }
@@ -229,7 +237,7 @@ fn a_client_with_items_handling_zero_receives_nothing() {
     room.handle(conn, ClientPacket::Sync, &mut sink);
 
     assert!(
-        received(&sink, conn).is_empty(),
+        received(&sink, conn, &room).is_empty(),
         "no items should ever be sent"
     );
 }
@@ -266,7 +274,7 @@ fn a_tracker_may_not_check_locations() {
     room.handle(conn, checks(vec![first]), &mut sink);
 
     let invalid: Vec<_> = sink
-        .packets_for(conn)
+        .packets_for(conn, &room)
         .into_iter()
         .filter(|p| matches!(p, ServerPacket::InvalidPacket(_)))
         .collect();

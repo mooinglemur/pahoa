@@ -5,6 +5,7 @@
 //! server itself arrives at M4.
 
 mod inspect;
+mod serve;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,6 +20,9 @@ pahoa — Archipelago multiworld server
 USAGE:
     pahoa inspect <file.archipelago> [--snapshot <datapackage.json>]
                                        Summarise a multidata file
+    pahoa serve <file.archipelago> [--snapshot <datapackage.json>]
+                [--port <n>] [--bind <addr>] [--password <pw>]
+                                       Host a multiworld
     pahoa selftest                     Verify the build against known-answer tests
     pahoa --version
 
@@ -40,6 +44,31 @@ fn main() -> ExitCode {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
         }
+        Some("serve") => match args.get(1) {
+            Some(path) => {
+                let opt = |name: &str| {
+                    args.iter()
+                        .position(|a| a == name)
+                        .and_then(|i| args.get(i + 1))
+                        .cloned()
+                };
+                let snapshot = opt("--snapshot");
+                serve::run(serve::ServeArgs {
+                    multidata: Path::new(path),
+                    snapshot: snapshot.as_deref().map(Path::new),
+                    port: match opt("--port") {
+                        Some(p) => match p.parse() {
+                            Ok(v) => v,
+                            Err(_) => return report(Err(format!("bad --port {p:?}"))),
+                        },
+                        None => 38281,
+                    },
+                    bind: opt("--bind").unwrap_or_else(|| "0.0.0.0".to_string()),
+                    password: opt("--password"),
+                })
+            }
+            None => Err("serve needs a multidata path".to_string()),
+        },
         Some("selftest") => selftest(),
         Some("inspect") => match args.get(1) {
             Some(path) => {
@@ -55,6 +84,10 @@ fn main() -> ExitCode {
         Some(other) => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     };
 
+    report(result)
+}
+
+fn report(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

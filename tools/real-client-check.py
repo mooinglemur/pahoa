@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Drive a running pahoa server with Archipelago's own client code.
+
+This answers the one M4 question the Rust tests structurally cannot: the
+synthetic test client never offers `permessage-deflate`, so it says nothing
+about whether a *real* client — whose `websockets` library offers compression by
+default — tolerates having it declined. That answer decides whether M8
+(permessage-deflate) can be deferred or has to move up.
+
+Run it against Archipelago's checkout so `CommonClient` and `NetUtils` are the
+genuine articles rather than a reimplementation:
+
+    ~/src/Archipelago/.venv/bin/python tools/real-client-check.py \\
+        --archipelago ~/src/Archipelago \\
+        --host localhost --port 38281 --slot "SomeName" --game "Some Game"
+
+Exits non-zero on any failure, so it can gate a release.
+"""
+
+import argparse
+import asyncio
+import sys
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--archipelago", required=True)
+    ap.add_argument("--host", default="localhost")
+    ap.add_argument("--port", type=int, default=38281)
+    ap.add_argument("--slot", required=True)
+    ap.add_argument("--game", required=True)
+    ap.add_argument("--password", default=None)
+    ap.add_argument(
+        "--check",
+        type=int,
+        action="append",
+        default=[],
+        help="location id to check; may be repeated",
+    )
+    args = ap.parse_args()
+
+    sys.path.insert(0, args.archipelago)
+    sys.argv = [sys.argv[0]]  # Archipelago's modules parse argv on import
+
+    import ModuleUpdate
+
+    # Skip the interactive dependency installer; the venv is already prepared.
+    ModuleUpdate.update_ran = True
+
+    import websockets
+    from NetUtils import decode, encode
+
+    print(f"using websockets {websockets.version.version} from {args.archipelago}")
+
+    async def run():
+        uri = f"ws://{args.host}:{args.port}"
+
+        # Exactly how CommonClient connects (`CommonClient.py:872-874`):
+        # default extensions, which means permessage-deflate IS offered.
+        socket = await websockets.connect(
+            uri, ping_timeout=None, ping_interval=None, max_size=16 * 1024 * 1024
+        )
+
+        negotiated = [type(e).__name__ for e in (getattr(socket, "extensions", None) or [])]
+        print(f"negotiated extensions: {negotiated or '(none)'}")
+
+        async def recv():
+            raw = await asyncio.wait_for(socket.recv(), timeout=10)
+            return decode(raw)
+
+        async def send(packets):
+            await socket.send(encode(packets))
+
+        # 1. RoomInfo, unprompted.
+        room_info = None
+        for packet in await recv():
+            if packet["cmd"] == "RoomInfo":
+                room_info = packet
+        assert room_info is not None, "expected RoomInfo first"
+        print(f"RoomInfo: {len(room_info['games'])} games, seed {room_info['seed_name']}")
+        print(f"  server version {room_info['version']}")
+
+        # 2. DataPackage, decoded by Archipelago's own decoder.
+        # No `games` key at all, which asks for everything. (An explicit empty
+        # list means "no games" and is a different request; the reference server
+        # treats it the same way.)
+        await send([{"cmd": "GetDataPackage"}])
+        data_package = None
+        for _ in range(10):
+            for packet in await recv():
+                if packet["cmd"] == "DataPackage":
+                    data_package = packet
+            if data_package:
+                break
+        assert data_package is not None, "expected DataPackage"
+        print(f"DataPackage: {len(data_package['data']['games'])} games")
+
+        # 3. Connect, exactly as CommonClient does.
+        import Utils
+
+        await send(
+            [
+                {
+                    "cmd": "Connect",
+                    "password": args.password,
+                    "name": args.slot,
+                    "version": Utils.version_tuple,
+                    "tags": ["AP"],
+                    "items_handling": 0b111,
+                    "uuid": Utils.get_unique_identifier(),
+                    "game": args.game,
+                    "slot_data": True,
+                }
+            ]
+        )
+
+        connected = None
+        for _ in range(10):
+            for packet in await recv():
+                if packet["cmd"] == "ConnectionRefused":
+                    raise SystemExit(f"connection refused: {packet['errors']}")
+                if packet["cmd"] == "Connected":
+                    connected = packet
+            if connected:
+                break
+        assert connected is not None, "expected Connected"
+        print(
+            f"Connected: slot {connected['slot']}, "
+            f"{len(connected['missing_locations'])} missing, "
+            f"{len(connected['checked_locations'])} checked, "
+            f"{len(connected['players'])} players"
+        )
+
+        # NetworkSlot / NetworkPlayer must have been reconstructed by the
+        # allowlist in Archipelago's own decoder, not left as plain dicts.
+        players = connected["players"]
+        if players:
+            p = players[0]
+            assert hasattr(p, "name"), f"NetworkPlayer did not decode: {p!r}"
+            print(f"  first player decoded as {type(p).__name__}: {p.name}")
+        slot_info = connected["slot_info"]
+        if slot_info:
+            some = next(iter(slot_info.values()))
+            assert hasattr(some, "game"), f"NetworkSlot did not decode: {some!r}"
+            print(f"  slot_info decoded as {type(some).__name__}")
+
+        # 4. Check locations, if asked.
+        if args.check:
+            await send([{"cmd": "LocationChecks", "locations": args.check}])
+            saw_update = False
+            for _ in range(20):
+                for packet in await recv():
+                    if packet["cmd"] == "RoomUpdate" and "checked_locations" in packet:
+                        print(f"RoomUpdate: checked {packet['checked_locations']}")
+                        saw_update = True
+                    if packet["cmd"] == "PrintJSON":
+                        text = "".join(part.get("text", "") for part in packet["data"])
+                        print(f"PrintJSON[{packet.get('type')}]: {text}")
+                if saw_update:
+                    break
+            assert saw_update, "location check produced no RoomUpdate"
+
+        await socket.close()
+        print("OK")
+
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

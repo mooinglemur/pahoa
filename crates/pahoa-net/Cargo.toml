@@ -1,0 +1,31 @@
+[package]
+name = "pahoa-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebSocket transport and concurrency model for pahoa"
+
+[dependencies]
+pahoa-multidata = { path = "../pahoa-multidata" }
+pahoa-proto = { path = "../pahoa-proto" }
+pahoa-room = { path = "../pahoa-room" }
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
+    "macros",
+    "signal",
+] }
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+bytes = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+serde_json = "1"
+pahoa-multidata = { path = "../pahoa-multidata" }

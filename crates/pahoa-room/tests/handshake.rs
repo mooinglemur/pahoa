@@ -16,8 +16,8 @@ fn room(options: RoomOptions) -> Option<(Room, u32, String, String)> {
     Some((room_for(data, options), slot, name, game))
 }
 
-fn refusal(sink: &Recorder, conn: ConnId) -> Vec<Refused> {
-    sink.packets_for(conn)
+fn refusal(sink: &Recorder, conn: ConnId, room: &Room) -> Vec<Refused> {
+    sink.packets_for(conn, room)
         .into_iter()
         .filter_map(|p| match p {
             ServerPacket::ConnectionRefused(r) => Some(r.errors.clone()),
@@ -37,7 +37,7 @@ fn room_info_arrives_before_any_authentication() {
 
     room.on_connect(ConnId(1), &mut sink);
 
-    let packets = sink.packets_for(ConnId(1));
+    let packets = sink.packets_for(ConnId(1), &room);
     assert_eq!(packets.len(), 1);
     match packets[0] {
         ServerPacket::RoomInfo(info) => {
@@ -63,7 +63,7 @@ fn room_info_reports_whether_a_password_is_set() {
     let mut sink = Recorder::default();
     room.on_connect(ConnId(1), &mut sink);
 
-    match sink.packets_for(ConnId(1))[0] {
+    match sink.packets_for(ConnId(1), &room)[0] {
         ServerPacket::RoomInfo(info) => assert!(info.password),
         other => panic!("expected RoomInfo, got {}", packet_name(other)),
     }
@@ -83,7 +83,7 @@ fn a_valid_connect_is_accepted() {
     room.handle(conn, connect(&name, &game, 0b001), &mut sink);
 
     let connected = sink
-        .packets_for(conn)
+        .packets_for(conn, &room)
         .into_iter()
         .find_map(|p| match p {
             ServerPacket::Connected(c) => Some(c),
@@ -113,7 +113,7 @@ fn an_unknown_slot_name_is_refused() {
     sink.clear();
 
     room.handle(conn, connect("Nobody At All", &game, 0b001), &mut sink);
-    assert_eq!(refusal(&sink, conn), [Refused::InvalidSlot]);
+    assert_eq!(refusal(&sink, conn, &room), [Refused::InvalidSlot]);
     assert!(!room.client(conn).unwrap().auth);
 }
 
@@ -129,7 +129,7 @@ fn the_wrong_game_is_refused() {
     sink.clear();
 
     room.handle(conn, connect(&name, "Not A Real Game", 0b001), &mut sink);
-    assert_eq!(refusal(&sink, conn), [Refused::InvalidGame]);
+    assert_eq!(refusal(&sink, conn, &room), [Refused::InvalidGame]);
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn a_wrong_password_is_refused() {
     sink.clear();
 
     room.handle(conn, connect(&name, &game, 0b001), &mut sink);
-    assert_eq!(refusal(&sink, conn), [Refused::InvalidPassword]);
+    assert_eq!(refusal(&sink, conn, &room), [Refused::InvalidPassword]);
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn an_old_client_is_refused() {
     c.version = Version::new(0, 1, 0);
     room.handle(conn, ClientPacket::Connect(c), &mut sink);
 
-    assert_eq!(refusal(&sink, conn), [Refused::IncompatibleVersion]);
+    assert_eq!(refusal(&sink, conn, &room), [Refused::IncompatibleVersion]);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn invalid_items_handling_is_refused() {
     // 0b110 sets "own world" and "start inventory" without the base bit that
     // both depend on.
     room.handle(conn, connect(&name, &game, 0b110), &mut sink);
-    assert_eq!(refusal(&sink, conn), [Refused::InvalidItemsHandling]);
+    assert_eq!(refusal(&sink, conn, &room), [Refused::InvalidItemsHandling]);
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn several_problems_are_reported_together() {
 
     room.handle(conn, connect("Nobody", "Nothing", 0b001), &mut sink);
 
-    let errors = refusal(&sink, conn);
+    let errors = refusal(&sink, conn, &room);
     assert!(errors.contains(&Refused::InvalidPassword), "{errors:?}");
     assert!(errors.contains(&Refused::InvalidSlot), "{errors:?}");
     // Game and version are only checked once the slot resolves.
@@ -241,7 +241,7 @@ fn a_tracker_may_connect_without_naming_a_game() {
     );
 
     assert!(
-        refusal(&sink, conn).is_empty(),
+        refusal(&sink, conn, &room).is_empty(),
         "tracker should be accepted"
     );
     assert!(
@@ -272,7 +272,7 @@ fn compatibility_zero_demands_an_exact_version_match() {
     c.version = Version::new(0, 6, 7);
     room.handle(conn, ClientPacket::Connect(c), &mut sink);
 
-    assert_eq!(refusal(&sink, conn), [Refused::IncompatibleVersion]);
+    assert_eq!(refusal(&sink, conn, &room), [Refused::IncompatibleVersion]);
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn slot_data_is_omitted_when_the_client_declines_it() {
     room.handle(conn, ClientPacket::Connect(c), &mut sink);
 
     let connected = sink
-        .packets_for(conn)
+        .packets_for(conn, &room)
         .into_iter()
         .find_map(|p| match p {
             ServerPacket::Connected(c) => Some(c),
