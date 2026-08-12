@@ -9,6 +9,7 @@
 
 mod conn;
 mod effect;
+pub mod fuzzy;
 mod options;
 mod room;
 mod slot_data;

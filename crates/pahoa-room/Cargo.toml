@@ -16,5 +16,8 @@ pahoa-multidata = { path = "../pahoa-multidata" }
 pahoa-pickle = { path = "../pahoa-pickle" }
 pahoa-proto = { path = "../pahoa-proto" }
 pahoa-datastore = { path = "../pahoa-datastore" }
+# The unrestricted Damerau-Levenshtein, matching jellyfish. `osa_distance` in
+# the same crate is the restricted variant and would differ on some inputs.
+strsim = "0.11"
 pahoa-pyrandom = { path = "../pahoa-pyrandom" }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
