@@ -1792,6 +1792,18 @@ impl Room {
         self.hints.get(key)
     }
 
+    /// Replace a slot's hints wholesale.
+    ///
+    /// For restoring a save, and for an administrator clearing a slot's list.
+    pub fn set_hints(&mut self, key: SlotKey, hints: Vec<Hint>) {
+        self.hints.replace(key, hints);
+    }
+
+    /// How many hints a slot has paid for, which is what `hint_points` deducts.
+    pub fn hints_used(&self, key: SlotKey) -> i64 {
+        self.hints_used.get(&key).copied().unwrap_or(0)
+    }
+
     // --- derived views ---------------------------------------------------
 
     fn room_info(&self) -> RoomInfo {

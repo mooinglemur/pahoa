@@ -35,9 +35,30 @@ loads the world system.
 | `gen-datastore-vectors.py` | `crates/pahoa-datastore/tests/vectors.jsonl` | All 18 `Set` operations, from Archipelago's real `modify_functions` |
 | `gen-fuzzy-vectors.py` | `crates/pahoa-room/tests/fuzzy_vectors.jsonl` | `get_fuzzy_results` / `get_intended_text` scoring and thresholds |
 | `gen-message-vectors.py` | `crates/pahoa-room/tests/message_vectors.jsonl` | `json_format_send_event` and `Hint.as_network_message`, byte for byte through `NetUtils.encode` |
+| `gen-hint-vectors.py` | `crates/pahoa-room/tests/hint_vectors.jsonl` | `!hint` selection: candidates, spheres, cost accounting and reply text, from a real `MultiServer.Context` |
 
 Regenerate only when the reference changes; a diff in these files is a
 behavioral change and deserves review.
+
+Two of these need arguments beyond `--archipelago`:
+
+```sh
+PYTHONHASHSEED=0 ~/src/Archipelago/.venv/bin/python tools/gen-hint-vectors.py \
+    --archipelago ~/src/Archipelago \
+    --multidata crates/pahoa-pickle/tests/fixtures/AP_56807069331869547085.archipelago \
+    > crates/pahoa-room/tests/hint_vectors.jsonl
+```
+
+`PYTHONHASHSEED=0` only makes the *generating* run reproducible — the vectors
+deliberately do not encode hint order, because Archipelago's own is not stable
+across its own restarts (`Hint.__hash__` includes the entrance string, and
+CPython randomizes string hashing per process). The vector carries the seed
+name and the test refuses to run against a different fixture.
+
+`gen-hint-vectors.py` is also the only generator that constructs a real
+`MultiServer.Context`. It does that the way the reference itself does in
+production: subclass and override `_load_game_data`, so the world system is
+never imported.
 
 ## Differential checks — run against a live server
 
