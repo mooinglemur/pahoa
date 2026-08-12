@@ -7,6 +7,7 @@
 
 use crate::types::{JsonMessagePart, NetworkItem, NetworkPlayer, NetworkSlot, Permission, Version};
 use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -105,8 +106,13 @@ pub struct Connected {
     pub slot_info: BTreeMap<String, NetworkSlot>,
     pub hint_points: i64,
     /// Omitted entirely when the client sent `slot_data: false`.
+    ///
+    /// Raw JSON rather than a `Value`: world-supplied slot data can contain
+    /// integers wider than `u64` (a live seed has one), which `Value` cannot
+    /// represent without enabling `arbitrary_precision` for all JSON in the
+    /// server. Emitting the bytes verbatim keeps the digits exact.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub slot_data: Option<Value>,
+    pub slot_data: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,7 +265,7 @@ mod tests {
         assert!(!without.contains("slot_data"), "{without}");
 
         let with = json(&ServerPacket::Connected(Box::new(Connected {
-            slot_data: Some(serde_json::json!({"a": 1})),
+            slot_data: Some(serde_json::value::to_raw_value(&serde_json::json!({"a": 1})).unwrap()),
             ..base
         })));
         assert!(with.contains(r#""slot_data":{"a":1}"#), "{with}");

@@ -14,5 +14,5 @@ serde = { version = "1", features = ["derive"] }
 # and that order is directly observable in the Retrieved/SetReply payloads we
 # echo back to clients. Without it serde_json::Value is a BTreeMap and every
 # data-storage value silently gets reordered on the wire.
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 thiserror.workspace = true

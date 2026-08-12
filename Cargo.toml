@@ -6,6 +6,7 @@ members = [
     "crates/pahoa-pickle",
     "crates/pahoa-proto",
     "crates/pahoa-pyrandom",
+    "crates/pahoa-room",
 ]
 
 [workspace.package]

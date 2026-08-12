@@ -1,0 +1,19 @@
+[package]
+name = "pahoa-room"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Archipelago room state machine — transport-agnostic game logic"
+
+# Deliberately no tokio, no sockets, no I/O. Keeping this crate synchronous is
+# what lets the entire game logic — including a 400k-location release — run in a
+# plain unit test in milliseconds, with no runtime and no flakiness, and it
+# leaves the concurrency model free to change without touching game rules.
+[dependencies]
+pahoa-multidata = { path = "../pahoa-multidata" }
+pahoa-pickle = { path = "../pahoa-pickle" }
+pahoa-proto = { path = "../pahoa-proto" }
+pahoa-pyrandom = { path = "../pahoa-pyrandom" }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }

@@ -130,7 +130,10 @@ fn connected() {
                 ),
             ]),
             hint_points: 42,
-            slot_data: Some(json!({"nested": {"a": [1, 2, 3]}, "flag": true})),
+            slot_data: Some(
+                serde_json::value::to_raw_value(&json!({"nested": {"a": [1, 2, 3]}, "flag": true}))
+                    .unwrap(),
+            ),
         })),
     );
 }

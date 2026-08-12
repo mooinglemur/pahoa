@@ -1,0 +1,163 @@
+//! How the room emits work for the transport to do.
+//!
+//! A **streaming** sink rather than a returned `Vec<Effect>`, and that matters
+//! at scale: a 2000-slot release produces ~2,860 broadcast frames of 140
+//! `PrintJSON` packets each. Collecting those before shipping any would
+//! materialise the whole cascade in memory; a sink lets the transport encode
+//! and fan out each chunk as it is produced, holding peak memory at one chunk.
+//!
+//! Recipient resolution — including the `NoText` and tracker-tag filters —
+//! happens inside the room, which owns the client registry. The sink just
+//! receives a resolved `&[ConnId]`.
+
+use crate::conn::ConnId;
+use pahoa_proto::ServerPacket;
+
+/// Why the room is dropping a connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseReason {
+    /// The client sent something the reference server would have raised on,
+    /// which drops the socket rather than replying `InvalidPacket`.
+    ProtocolError(String),
+    /// Outbound buffer exceeded its budget. A deliberate divergence: Python
+    /// buffers without limit instead, which is unbounded memory growth.
+    TooSlow,
+    ServerShutdown,
+}
+
+pub trait EffectSink {
+    /// Send to one connection.
+    fn send(&mut self, to: ConnId, msgs: &[ServerPacket]);
+
+    /// Send the same packets to many connections.
+    ///
+    /// The transport encodes once and shares the bytes; that is the whole
+    /// reason this is distinct from repeated [`EffectSink::send`].
+    fn broadcast(&mut self, to: &[ConnId], msgs: &[ServerPacket]);
+
+    /// Drop a connection.
+    fn close(&mut self, conn: ConnId, reason: CloseReason);
+
+    /// Room state changed and should be persisted at the next save point.
+    fn mark_dirty(&mut self);
+}
+
+/// An [`EffectSink`] that records everything, for tests.
+#[derive(Debug, Default)]
+pub struct Recorder {
+    pub events: Vec<Event>,
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    Send {
+        to: ConnId,
+        msgs: Vec<ServerPacket>,
+    },
+    Broadcast {
+        to: Vec<ConnId>,
+        msgs: Vec<ServerPacket>,
+    },
+    Close {
+        conn: ConnId,
+        reason: CloseReason,
+    },
+}
+
+impl EffectSink for Recorder {
+    fn send(&mut self, to: ConnId, msgs: &[ServerPacket]) {
+        self.events.push(Event::Send {
+            to,
+            msgs: msgs.to_vec(),
+        });
+    }
+
+    fn broadcast(&mut self, to: &[ConnId], msgs: &[ServerPacket]) {
+        self.events.push(Event::Broadcast {
+            to: to.to_vec(),
+            msgs: msgs.to_vec(),
+        });
+    }
+
+    fn close(&mut self, conn: ConnId, reason: CloseReason) {
+        self.events.push(Event::Close { conn, reason });
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+}
+
+impl Recorder {
+    /// Every packet sent to `conn`, whether directly or by broadcast.
+    pub fn packets_for(&self, conn: ConnId) -> Vec<&ServerPacket> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Send { to, msgs } if *to == conn => Some(msgs),
+                Event::Broadcast { to, msgs } if to.contains(&conn) => Some(msgs),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Total packets emitted, ignoring how many connections received them.
+    pub fn packet_count(&self) -> usize {
+        self.events
+            .iter()
+            .map(|e| match e {
+                Event::Send { msgs, .. } | Event::Broadcast { msgs, .. } => msgs.len(),
+                Event::Close { .. } => 0,
+            })
+            .sum()
+    }
+
+    pub fn broadcasts(&self) -> impl Iterator<Item = (&Vec<ConnId>, &Vec<ServerPacket>)> {
+        self.events.iter().filter_map(|e| match e {
+            Event::Broadcast { to, msgs } => Some((to, msgs)),
+            _ => None,
+        })
+    }
+
+    pub fn clear(&mut self) {
+        self.events.clear();
+        self.dirty = false;
+    }
+}
+
+/// A sink that counts without retaining, for the large-scale tests where
+/// holding every packet would dwarf the work being measured.
+#[derive(Debug, Default)]
+pub struct Counter {
+    pub broadcasts: usize,
+    pub sends: usize,
+    pub packets: usize,
+    /// Largest number of packets in a single broadcast, to verify chunking.
+    pub max_chunk: usize,
+    pub closes: usize,
+    pub dirty: bool,
+}
+
+impl EffectSink for Counter {
+    fn send(&mut self, _to: ConnId, msgs: &[ServerPacket]) {
+        self.sends += 1;
+        self.packets += msgs.len();
+        self.max_chunk = self.max_chunk.max(msgs.len());
+    }
+
+    fn broadcast(&mut self, _to: &[ConnId], msgs: &[ServerPacket]) {
+        self.broadcasts += 1;
+        self.packets += msgs.len();
+        self.max_chunk = self.max_chunk.max(msgs.len());
+    }
+
+    fn close(&mut self, _conn: ConnId, _reason: CloseReason) {
+        self.closes += 1;
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+}
