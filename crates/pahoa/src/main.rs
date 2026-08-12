@@ -1,10 +1,11 @@
 //! pahoa — an Archipelago multiworld server.
 //!
-//! At M0 this is a thin shell over the two foundation crates: enough to prove
-//! the static build works end to end and to inspect a multidata by hand. The
+//! At M1 this is a thin shell over the foundation crates: enough to prove the
+//! static build works end to end and to inspect a multidata by hand. The
 //! server itself arrives at M4.
 
-use std::io::Read;
+mod inspect;
+
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -16,9 +17,14 @@ const USAGE: &str = "\
 pahoa — Archipelago multiworld server
 
 USAGE:
-    pahoa inspect <file.archipelago>   Summarise a multidata file
+    pahoa inspect <file.archipelago> [--snapshot <datapackage.json>]
+                                       Summarise a multidata file
     pahoa selftest                     Verify the build against known-answer tests
     pahoa --version
+
+The data package snapshot is produced by tools/export-datapackage.py. Without
+it, games are resolved from the seed's embedded package alone, which covers
+names and ids but never hint blacklists.
 ";
 
 fn main() -> ExitCode {
@@ -36,7 +42,14 @@ fn main() -> ExitCode {
         }
         Some("selftest") => selftest(),
         Some("inspect") => match args.get(1) {
-            Some(path) => inspect(Path::new(path)),
+            Some(path) => {
+                let snapshot = args
+                    .iter()
+                    .position(|a| a == "--snapshot")
+                    .and_then(|i| args.get(i + 1))
+                    .map(Path::new);
+                inspect::run(Path::new(path), snapshot)
+            }
             None => Err("inspect needs a path".to_string()),
         },
         Some(other) => Err(format!("unknown command {other:?}\n\n{USAGE}")),
@@ -105,53 +118,5 @@ fn selftest() -> Result<(), String> {
     }
 
     println!("selftest: ok (pickle, allowlist, bignum, pyrandom)");
-    Ok(())
-}
-
-fn inspect(path: &Path) -> Result<(), String> {
-    use pahoa_pickle::{Allowlist, from_slice};
-
-    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let format = *raw.first().ok_or("empty file")?;
-    if format > 3 {
-        return Err(format!("unsupported multidata format version {format}"));
-    }
-
-    let mut pickle = Vec::new();
-    flate2::read::ZlibDecoder::new(&raw[1..])
-        .read_to_end(&mut pickle)
-        .map_err(|e| format!("zlib: {e}"))?;
-
-    let data = from_slice(&pickle, &Allowlist::archipelago()).map_err(|e| e.to_string())?;
-
-    let seed = data
-        .get("seed_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<none>");
-    let slots = data
-        .get("slot_info")
-        .and_then(|v| v.as_dict())
-        .map_or(0, <[_]>::len);
-    let games = data
-        .get("datapackage")
-        .and_then(|v| v.as_dict())
-        .map_or(0, <[_]>::len);
-    let locations: usize = data
-        .get("locations")
-        .and_then(|v| v.as_dict())
-        .map(|d| {
-            d.iter()
-                .filter_map(|(_, v)| v.as_dict())
-                .map(<[_]>::len)
-                .sum()
-        })
-        .unwrap_or(0);
-
-    println!("file:      {}", path.display());
-    println!("format:    {format}");
-    println!("seed_name: {seed}");
-    println!("slots:     {slots}");
-    println!("games:     {games}");
-    println!("locations: {locations}");
     Ok(())
 }

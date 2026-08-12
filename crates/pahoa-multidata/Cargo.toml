@@ -1,0 +1,15 @@
+[package]
+name = "pahoa-multidata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed model of Archipelago .archipelago multidata and its data package"
+
+[dependencies]
+pahoa-pickle = { path = "../pahoa-pickle" }
+thiserror.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

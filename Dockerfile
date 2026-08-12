@@ -19,22 +19,12 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 
 WORKDIR /src
 
-# Copy manifests first so dependency compilation caches across source edits.
-COPY Cargo.toml Cargo.lock* ./
-COPY crates/pahoa/Cargo.toml crates/pahoa/
-COPY crates/pahoa-pickle/Cargo.toml crates/pahoa-pickle/
-COPY crates/pahoa-pyrandom/Cargo.toml crates/pahoa-pyrandom/
-RUN mkdir -p crates/pahoa/src crates/pahoa-pickle/src crates/pahoa-pyrandom/src \
-    && echo 'fn main() {}' > crates/pahoa/src/main.rs \
-    && touch crates/pahoa-pickle/src/lib.rs crates/pahoa-pyrandom/src/lib.rs \
-    && cargo build --release --target x86_64-unknown-linux-musl \
-    && rm -rf crates/*/src
-
+# A clean build of the whole workspace takes seconds, so there is no separate
+# dependency-caching stage. The usual trick — stub out the sources, build deps,
+# then copy the real code — needs a hand-maintained list of crates that breaks
+# silently the next time one is added. Not worth it at this size.
 COPY . .
-# Cargo skips rebuilding when only mtimes moved, so make the real sources newer
-# than the placeholder artifacts.
-RUN touch crates/*/src/*.rs \
-    && cargo build --release --target x86_64-unknown-linux-musl --locked
+RUN cargo build --release --target x86_64-unknown-linux-musl --locked
 
 # Verification is its own stage so `--target builder` stays inspectable when
 # something here fails.

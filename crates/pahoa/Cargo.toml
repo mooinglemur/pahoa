@@ -17,7 +17,7 @@ default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+pahoa-multidata = { path = "../pahoa-multidata" }
 pahoa-pickle = { path = "../pahoa-pickle" }
 pahoa-pyrandom = { path = "../pahoa-pyrandom" }
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 mimalloc = { version = "0.1", default-features = false, optional = true }

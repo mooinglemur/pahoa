@@ -103,8 +103,146 @@ pub struct Reader<'a> {
     pos: usize,
     stack: Vec<PyObj>,
     marks: Vec<usize>,
-    memo: Vec<PyObj>,
+    memo: Vec<MemoSlot>,
+    /// `(stack index, memo index)` for every `MemoSlot::Live`, ascending by
+    /// stack index so materialisation on shrink is a tail scan.
+    live: Vec<(usize, usize)>,
+    /// Memo indices this stream actually fetches. `None` means "unknown, so
+    /// track everything" — the safe fallback when the pre-scan gives up.
+    referenced: Option<std::collections::HashSet<u32>>,
     allowlist: &'a Allowlist,
+}
+
+/// Which memo indices the stream ever fetches back.
+///
+/// Almost nothing does. A 2000-slot multidata memoizes hundreds of thousands of
+/// values but fetches only a few thousand, and effectively never re-fetches a
+/// large container. Knowing the target set up front means unreferenced entries
+/// cost nothing at all — no clone on MEMOIZE, no materialisation on pop — which
+/// is what keeps [`MemoSlot::Live`] tracking from being expensive.
+///
+/// Returns `None` if the stream cannot be scanned, in which case the caller
+/// conservatively tracks everything. A bug here can therefore cost performance
+/// but never correctness.
+fn scan_memo_refs(buf: &[u8]) -> Option<std::collections::HashSet<u32>> {
+    let mut refs = std::collections::HashSet::new();
+    let mut pos = 0usize;
+
+    // Reads a little-endian integer of `n` bytes, advancing `pos`.
+    macro_rules! le {
+        ($n:expr) => {{
+            let n = $n;
+            if pos + n > buf.len() {
+                return None;
+            }
+            let mut v = 0u64;
+            for (i, &b) in buf[pos..pos + n].iter().enumerate() {
+                v |= (b as u64) << (8 * i);
+            }
+            pos += n;
+            v
+        }};
+    }
+    macro_rules! skip {
+        ($n:expr) => {{
+            pos = pos.checked_add($n)?;
+            if pos > buf.len() {
+                return None;
+            }
+        }};
+    }
+
+    while pos < buf.len() {
+        let opcode = buf[pos];
+        pos += 1;
+        match opcode {
+            op::BINGET => refs.insert(le!(1) as u32),
+            op::LONG_BINGET => refs.insert(le!(4) as u32),
+
+            // Fixed-width payloads.
+            op::PROTO | op::BININT1 => {
+                skip!(1);
+                true
+            }
+            op::BININT2 => {
+                skip!(2);
+                true
+            }
+            op::BININT => {
+                skip!(4);
+                true
+            }
+            op::BINFLOAT => {
+                skip!(8);
+                true
+            }
+            op::FRAME => {
+                skip!(8);
+                true
+            }
+
+            // Length-prefixed payloads.
+            op::SHORT_BINUNICODE | op::LONG1 => {
+                let n = le!(1) as usize;
+                skip!(n);
+                true
+            }
+            op::BINUNICODE => {
+                let n = le!(4) as usize;
+                skip!(n);
+                true
+            }
+
+            // No payload.
+            op::MARK
+            | op::STOP
+            | op::NONE
+            | op::NEWTRUE
+            | op::NEWFALSE
+            | op::EMPTY_LIST
+            | op::EMPTY_DICT
+            | op::EMPTY_SET
+            | op::EMPTY_TUPLE
+            | op::APPEND
+            | op::APPENDS
+            | op::SETITEM
+            | op::SETITEMS
+            | op::ADDITEMS
+            | op::TUPLE
+            | op::TUPLE1
+            | op::TUPLE2
+            | op::TUPLE3
+            | op::REDUCE
+            | op::NEWOBJ
+            | op::STACK_GLOBAL
+            | op::MEMOIZE => true,
+
+            // Anything else: give up and let the caller track everything.
+            _ => return None,
+        };
+    }
+    Some(refs)
+}
+
+/// A memo entry.
+///
+/// Pickle memoizes a container the moment it is *created*, i.e. while it is
+/// still empty, then fills it, and may fetch it back later with BINGET. CPython's
+/// memo holds a reference, so that fetch sees the filled container. Snapshotting
+/// the value at MEMOIZE time instead yields an empty one — silent corruption
+/// anywhere a structure aliases the same list, dict or set twice.
+///
+/// So mutable containers are tracked by stack position while they are still
+/// being built, and copied only once they leave the stack. Immutable values are
+/// snapshotted immediately, which is the overwhelmingly common case and stays
+/// cheap.
+enum MemoSlot {
+    Value(PyObj),
+    /// Index into [`Reader::stack`] of a container still under construction.
+    Live(usize),
+    /// Never fetched by this stream, so never worth storing. Entries still
+    /// occupy a slot because memo indices are positional.
+    Unreferenced,
 }
 
 impl<'a> Reader<'a> {
@@ -115,7 +253,32 @@ impl<'a> Reader<'a> {
             stack: Vec::new(),
             marks: Vec::new(),
             memo: Vec::new(),
+            live: Vec::new(),
+            referenced: scan_memo_refs(buf),
             allowlist,
+        }
+    }
+
+    /// Whether memo slot `index` is ever fetched back by this stream.
+    fn is_referenced(&self, index: usize) -> bool {
+        match &self.referenced {
+            Some(set) => set.contains(&(index as u32)),
+            // Pre-scan gave up: assume everything might be fetched.
+            None => true,
+        }
+    }
+
+    /// Copy out any live memo entries whose container is about to leave the
+    /// stack. Must run *before* the stack shrinks to `new_len`.
+    fn materialize_above(&mut self, new_len: usize) {
+        while let Some(&(stack_idx, memo_idx)) = self.live.last() {
+            if stack_idx < new_len {
+                break;
+            }
+            self.live.pop();
+            // Only clone here — once per aliased container, at the point it is
+            // consumed — rather than on every MEMOIZE.
+            self.memo[memo_idx] = MemoSlot::Value(self.stack[stack_idx].clone());
         }
     }
 
@@ -188,10 +351,16 @@ impl<'a> Reader<'a> {
                 opcode,
             });
         }
-        self.stack.pop().ok_or(Error::StackUnderflow {
-            offset: self.pos,
-            opcode,
-        })
+        let new_len = self
+            .stack
+            .len()
+            .checked_sub(1)
+            .ok_or(Error::StackUnderflow {
+                offset: self.pos,
+                opcode,
+            })?;
+        self.materialize_above(new_len);
+        Ok(self.stack.pop().expect("length checked immediately above"))
     }
 
     /// Pop everything above the most recent mark, consuming the mark.
@@ -206,15 +375,30 @@ impl<'a> Reader<'a> {
                 opcode,
             });
         }
+        self.materialize_above(m);
         Ok(self.stack.split_off(m))
     }
 
     fn memo_get(&self, index: usize) -> Result<PyObj> {
-        self.memo.get(index).cloned().ok_or(Error::BadMemo {
-            offset: self.pos,
-            index,
-            len: self.memo.len(),
-        })
+        match self.memo.get(index) {
+            Some(MemoSlot::Value(v)) => Ok(v.clone()),
+            // Still on the stack, so read its *current* contents rather than
+            // whatever it held when it was memoized.
+            Some(&MemoSlot::Live(idx)) => Ok(self.stack[idx].clone()),
+            // Only reachable if the pre-scan missed a BINGET, which would be a
+            // bug in `scan_memo_refs`. Fail loudly rather than return a wrong
+            // value.
+            Some(MemoSlot::Unreferenced) => Err(Error::BadMemo {
+                offset: self.pos,
+                index,
+                len: self.memo.len(),
+            }),
+            None => Err(Error::BadMemo {
+                offset: self.pos,
+                index,
+                len: self.memo.len(),
+            }),
+        }
     }
 
     // --- main loop -------------------------------------------------------
@@ -387,15 +571,27 @@ impl<'a> Reader<'a> {
                 }
 
                 op::MEMOIZE => {
-                    let top = self
-                        .stack
-                        .last()
-                        .ok_or(Error::StackUnderflow {
-                            offset: at,
-                            opcode: "MEMOIZE",
-                        })?
-                        .clone();
-                    self.memo.push(top);
+                    let top = self.stack.last().ok_or(Error::StackUnderflow {
+                        offset: at,
+                        opcode: "MEMOIZE",
+                    })?;
+                    let idx = self.stack.len() - 1;
+                    let memo_idx = self.memo.len();
+                    if !self.is_referenced(memo_idx) {
+                        // The overwhelming majority. Costs one push and no copy.
+                        self.memo.push(MemoSlot::Unreferenced);
+                    } else {
+                        match top {
+                            // Mutable, and pickle memoizes it while still empty,
+                            // so track the slot rather than freeze an empty
+                            // snapshot.
+                            PyObj::List(_) | PyObj::Dict(_) | PyObj::Set(_) => {
+                                self.live.push((idx, memo_idx));
+                                self.memo.push(MemoSlot::Live(idx));
+                            }
+                            other => self.memo.push(MemoSlot::Value(other.clone())),
+                        }
+                    }
                 }
                 op::BINGET => {
                     let i = self.u8()? as usize;

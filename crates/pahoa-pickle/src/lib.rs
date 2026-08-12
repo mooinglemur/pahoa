@@ -140,6 +140,55 @@ mod tests {
     }
 
     #[test]
+    fn shared_mutable_containers_see_later_mutations() {
+        // `pickle.dumps([shared, shared])` where `shared = {"a": 1}`.
+        //
+        // Pickle memoizes the dict while it is still EMPTY, fills it, and only
+        // then fetches it back with BINGET. A reader that snapshots the value at
+        // MEMOIZE time silently yields `[{"a": 1}, {}]` — the second reference
+        // frozen at its empty state. CPython's memo holds a reference, so both
+        // entries are the same filled dict.
+        let stream = b"\x80\x04\x95\x10\x00\x00\x00\x00\x00\x00\x00\x5d\x94\x28\x7d\x94\x8c\x01\x61\x94\x4b\x01\x73\x68\x01\x65\x2e";
+        let v = decode(stream).unwrap();
+        let items = v.as_seq().expect("a list");
+        assert_eq!(items.len(), 2);
+        let expected = PyObj::Dict(vec![(PyObj::Str("a".into()), PyObj::Int(1))]);
+        assert_eq!(items[0], expected, "first reference");
+        assert_eq!(
+            items[1], expected,
+            "second reference must not be the empty snapshot"
+        );
+    }
+
+    #[test]
+    fn shared_containers_survive_being_consumed_by_a_parent() {
+        // The aliased list is appended into a parent (leaving the stack) and
+        // only afterwards fetched again, so the memo must have materialised it
+        // rather than left a dangling reference.
+        // `{"x": [shared], "y": shared}` with `shared = [7]`.
+        let mut py = Vec::new();
+        py.extend_from_slice(b"\x80\x04}\x94"); // EMPTY_DICT, MEMOIZE(0)
+        py.extend_from_slice(b"("); // MARK
+        py.extend_from_slice(b"\x8c\x01x\x94"); // "x", MEMOIZE(1)
+        py.extend_from_slice(b"]\x94"); // EMPTY_LIST outer, MEMOIZE(2)
+        py.extend_from_slice(b"]\x94"); // EMPTY_LIST shared, MEMOIZE(3)
+        py.extend_from_slice(b"K\x07a"); // 7, APPEND -> shared == [7]
+        py.extend_from_slice(b"a"); // APPEND shared into outer; shared leaves the stack
+        py.extend_from_slice(b"\x8c\x01y\x94"); // "y", MEMOIZE(4)
+        py.extend_from_slice(b"h\x03"); // BINGET(3) -> shared
+        py.extend_from_slice(b"u."); // SETITEMS, STOP
+
+        let v = decode(&py).unwrap();
+        let shared = PyObj::List(vec![PyObj::Int(7)]);
+        assert_eq!(
+            v.get("y"),
+            Some(&shared),
+            "aliased list must be fully populated"
+        );
+        assert_eq!(v.get("x"), Some(&PyObj::List(vec![shared])));
+    }
+
+    #[test]
     fn builds_enum_via_reduce() {
         // NetUtils.SlotType(1) — STACK_GLOBAL, arg, TUPLE1, REDUCE
         let v = decode(b"\x80\x04\x8c\x08NetUtils\x8c\x08SlotType\x93K\x01\x85R.").unwrap();

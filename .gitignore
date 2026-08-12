@@ -11,3 +11,7 @@
 **/tests/fixtures/*.archipelago
 **/tests/fixtures/*.apsave
 **/tests/fixtures/*.zip
+
+# Python bytecode from the development-time scripts in tools/.
+__pycache__/
+*.pyc
