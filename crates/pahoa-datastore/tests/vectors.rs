@@ -1,4 +1,4 @@
-//! Replays every data-storage operation against CPython's recorded behaviour.
+//! Replays every data-storage operation against CPython's recorded behavior.
 //!
 //! The vectors come from Archipelago's own `MultiServer.modify_functions` (see
 //! `tools/gen-datastore-vectors.py`), so this is a comparison against the real

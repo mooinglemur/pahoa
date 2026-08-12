@@ -1,4 +1,4 @@
-//! `pahoa inspect` — summarise a multidata file.
+//! `pahoa inspect` — summarize a multidata file.
 //!
 //! Output is deliberately stable and machine-diffable: `tools/inspect-multidata.py`
 //! produces the identical text from CPython, and the two are compared over every

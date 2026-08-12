@@ -1,7 +1,7 @@
 //! The eighteen data-storage operations (`MultiServer.py:109-134`).
 //!
 //! Each is a Python expression applied to client-supplied JSON, so the work
-//! here is reproducing CPython's behaviour — including the parts that look like
+//! here is reproducing CPython's behavior — including the parts that look like
 //! bugs, because clients may depend on them.
 //!
 //! Four deliberate divergences, all narrower than they sound:
@@ -296,7 +296,7 @@ fn round(current: &Value, f: fn(f64) -> f64) -> OpResult {
 
 /// `max`/`min`.
 ///
-/// Two behaviours worth stating, both caught by the CPython vectors:
+/// Two behaviors worth stating, both caught by the CPython vectors:
 ///
 /// - Python returns the **first** maximal element, so `max(1, 1.0)` is the int
 ///   `1` while `max(1.0, 1)` is the float — visible in the emitted JSON.
@@ -404,7 +404,7 @@ fn remove(current: Value, arg: &Value) -> OpResult {
 /// missing dict key likewise — but a **negative** out-of-range index is not
 /// guarded, and the resulting `IndexError` is not among the exceptions Python
 /// catches, so it propagates and drops the connection. That asymmetry is real
-/// behaviour, so it is reproduced rather than tidied.
+/// behavior, so it is reproduced rather than tidied.
 fn pop(current: Value, arg: &Value) -> OpResult {
     match current {
         Value::Array(mut items) => {

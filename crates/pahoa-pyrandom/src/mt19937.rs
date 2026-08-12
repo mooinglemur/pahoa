@@ -140,7 +140,7 @@ mod tests {
     ///
     /// Values captured from CPython 3.13 (seeding with the integer whose
     /// little-endian words are that key), not transcribed from the
-    /// Matsumoto/Nishimura paper — CPython is the behaviour we must match, and
+    /// Matsumoto/Nishimura paper — CPython is the behavior we must match, and
     /// it is the only source that settles a disagreement.
     #[test]
     fn matches_cpython_init_by_array() {

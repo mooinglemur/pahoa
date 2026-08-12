@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthesise a large `.archipelago` for scale testing.
+"""Synthesize a large `.archipelago` for scale testing.
 
 pahoa targets ~2000 slots and 6000+ concurrent connections, but no seed that
 size exists to test against — generating a real one would mean running
@@ -9,7 +9,7 @@ multidata at that scale instead.
 It is explicitly **synthetic**: the item and location ids are drawn from a real
 seed's data package so names resolve, but the placement is mechanical rather
 than the output of a fill algorithm. That makes it right for what it is for —
-parse cost, LocationStore behaviour, memory footprint, broadcast fan-out — and
+parse cost, LocationStore behavior, memory footprint, broadcast fan-out — and
 wrong for anything about game logic or reachability.
 
 Usage:

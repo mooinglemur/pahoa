@@ -16,14 +16,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// Server version reported in `RoomInfo`. Tracks the Archipelago release whose
-/// behaviour this implementation reproduces.
+/// behavior this implementation reproduces.
 pub const SERVER_VERSION: Version = Version::new(0, 6, 8);
 
 /// `PrintJSON` packets per broadcast frame.
 ///
 /// Chosen by Archipelago to sit near the compression window without producing
 /// oversized frames (`MultiServer.py:1165-1167`); reproducing it keeps
-/// bandwidth behaviour and frame counts comparable.
+/// bandwidth behavior and frame counts comparable.
 const PRINT_JSON_CHUNK: usize = 140;
 
 /// `(team, slot)`. Teams beyond 0 never occur today — the reference server only
@@ -426,7 +426,7 @@ impl Room {
     ) {
         let wanted: Vec<String> = match (&args.games, &args.exclusions) {
             (Some(games), _) => games.clone(),
-            // Deprecated, past its own removal TODO, still honoured.
+            // Deprecated, past its own removal TODO, still honored.
             (None, Some(excluded)) => self
                 .datapackage
                 .games()
@@ -617,7 +617,7 @@ impl Room {
 
     /// Subscriptions are never explicitly removed — Python uses a `WeakSet` and
     /// lets garbage collection do it. Holding connection ids and pruning on
-    /// disconnect is the same behaviour without the GC timing dependency.
+    /// disconnect is the same behavior without the GC timing dependency.
     fn handle_set_notify(&mut self, conn: ConnId, args: cmd::SetNotify) {
         for key in args.keys {
             self.stored_data_subscriptions

@@ -102,7 +102,7 @@ fn vectors_file_is_populated() {
 }
 
 /// The sha512 seed derivation, checked independently of the generator so a
-/// failure here localises the bug immediately.
+/// failure here localizes the bug immediately.
 #[test]
 fn seed_derivation_matches_cpython() {
     for case in parse().iter().filter(|c| c.seed_str.is_some()) {

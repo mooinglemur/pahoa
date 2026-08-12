@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn shared_containers_survive_being_consumed_by_a_parent() {
         // The aliased list is appended into a parent (leaving the stack) and
-        // only afterwards fetched again, so the memo must have materialised it
+        // only afterwards fetched again, so the memo must have materialized it
         // rather than left a dangling reference.
         // `{"x": [shared], "y": shared}` with `shared = [7]`.
         let mut py = Vec::new();

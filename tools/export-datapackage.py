@@ -15,7 +15,7 @@ Four maps per game:
 That last one is why this script exists at all. A freshly generated
 `.archipelago` embeds full packages for every game in the seed, so names and
 ids are usually available without a snapshot — but `hint_blacklist` is never
-serialised into multidata by anything, so without this export `!hint` silently
+serialized into multidata by anything, so without this export `!hint` silently
 stops refusing non-hintable names.
 
 Usage:

@@ -27,7 +27,7 @@ import json
 import sys
 
 # Deliberately spread across every JSON type, with the edge cases that decide
-# behaviour: booleans (which are ints), zero (division), negatives (floored
+# behavior: booleans (which are ints), zero (division), negatives (floored
 # modulo), floats that are integral, empty containers, and nested containers
 # (which are unhashable and so break `update` on a list).
 OPERANDS = [
@@ -48,7 +48,7 @@ OPERANDS = [
     "ab",
     "1",
     # `%` on a str is printf-style formatting in Python, not modulo. Included so
-    # the vectors record that behaviour explicitly rather than leaving it to be
+    # the vectors record that behavior explicitly rather than leaving it to be
     # discovered by a client.
     "%s",
     "%d items",

@@ -4,7 +4,7 @@
 pahoa must reproduce CPython's Mersenne Twister bit for bit, because
 Archipelago seeds its hint PRNG from the seed name and hint ordering is
 therefore reproducible and player-visible. Rather than trust a reading of
-`Lib/random.py` and `Modules/_randommodule.c`, we pin the behaviour with
+`Lib/random.py` and `Modules/_randommodule.c`, we pin the behavior with
 vectors generated from a real interpreter and commit the result, so the Rust
 test suite needs no Python at run time.
 

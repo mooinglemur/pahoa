@@ -105,7 +105,7 @@ pub struct Reader<'a> {
     marks: Vec<usize>,
     memo: Vec<MemoSlot>,
     /// `(stack index, memo index)` for every `MemoSlot::Live`, ascending by
-    /// stack index so materialisation on shrink is a tail scan.
+    /// stack index so materialization on shrink is a tail scan.
     live: Vec<(usize, usize)>,
     /// Memo indices this stream actually fetches. `None` means "unknown, so
     /// track everything" — the safe fallback when the pre-scan gives up.
@@ -118,7 +118,7 @@ pub struct Reader<'a> {
 /// Almost nothing does. A 2000-slot multidata memoizes hundreds of thousands of
 /// values but fetches only a few thousand, and effectively never re-fetches a
 /// large container. Knowing the target set up front means unreferenced entries
-/// cost nothing at all — no clone on MEMOIZE, no materialisation on pop — which
+/// cost nothing at all — no clone on MEMOIZE, no materialization on pop — which
 /// is what keeps [`MemoSlot::Live`] tracking from being expensive.
 ///
 /// Returns `None` if the stream cannot be scanned, in which case the caller

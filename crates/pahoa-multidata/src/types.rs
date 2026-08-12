@@ -217,7 +217,7 @@ pub struct NetworkItem {
 /// Python's `__hash__` excludes `found`, `item_flags` and `status`
 /// (`NetUtils.py:418-419`) so that updating a hint's status replaces it in
 /// place rather than adding a duplicate. [`Hint::identity`] exposes that same
-/// key; do not derive `Hash` on the whole struct and expect matching behaviour.
+/// key; do not derive `Hash` on the whole struct and expect matching behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hint {
     pub receiving_player: u32,

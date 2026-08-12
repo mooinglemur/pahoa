@@ -28,7 +28,7 @@ pub enum ActorMsg {
         packets: Vec<ClientPacket>,
     },
     /// The reader could not decode a frame. Reproduces the reference server's
-    /// behaviour of dropping the socket rather than answering `InvalidPacket`.
+    /// behavior of dropping the socket rather than answering `InvalidPacket`.
     DecodeFailed {
         conn: ConnId,
         detail: String,

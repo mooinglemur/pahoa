@@ -19,7 +19,7 @@ pahoa — Archipelago multiworld server
 
 USAGE:
     pahoa inspect <file.archipelago> [--snapshot <datapackage.json>]
-                                       Summarise a multidata file
+                                       Summarize a multidata file
     pahoa serve <file.archipelago> [--snapshot <datapackage.json>]
                 [--port <n>] [--bind <addr>] [--password <pw>]
                                        Host a multiworld

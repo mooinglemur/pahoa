@@ -208,7 +208,7 @@ impl Serialize for NetworkSlot {
 
 /// `NetUtils.Hint`, as sent inside a `PrintJSON` and the `_read_hints_*` key.
 ///
-/// Only ever serialised: `Hint` is not in Python's decode allowlist, so a hint
+/// Only ever serialized: `Hint` is not in Python's decode allowlist, so a hint
 /// arriving from a client would land as a plain object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hint {
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_serialises_as_its_integer_value() {
+    fn permission_serializes_as_its_integer_value() {
         assert_eq!(json(&Permission::AutoEnabled), "7");
         assert_eq!(json(&Permission::Auto), "6");
         assert_eq!(json(&Permission::Disabled), "0");
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn items_handling_exposes_the_three_behaviours() {
+    fn items_handling_exposes_the_three_behaviors() {
         let none = ItemsHandling::new(0b000).unwrap();
         assert!(none.no_items());
 

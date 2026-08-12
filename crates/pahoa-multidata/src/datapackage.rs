@@ -11,7 +11,7 @@
 //!   embeds a full package for every game in the seed (`Main.py:315-320`), so
 //!   this covers custom apworlds the server has never heard of. But WebHost
 //!   *strips* it to `{version, checksum}` on upload (`WebHostLib/upload.py:56-78`),
-//!   old seeds may lack checksums, and the hint blacklist is never serialised
+//!   old seeds may lack checksums, and the hint blacklist is never serialized
 //!   anywhere.
 //! - **An offline JSON snapshot**, exported from an Archipelago checkout by
 //!   `tools/export-datapackage.py`. This is the only source of `hint_blacklist`.

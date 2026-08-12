@@ -403,7 +403,7 @@ fn bounced_is_the_bounce_with_cmd_rewritten() {
 
 #[test]
 fn hint_values_carry_their_class_tag() {
-    // Hint is only ever sent, never accepted, but it still has to serialise
+    // Hint is only ever sent, never accepted, but it still has to serialize
     // with its tag and an integer status.
     let h = Hint {
         receiving_player: 1,

@@ -176,7 +176,7 @@ impl MultiData {
                             // Some worlds emit a null entrance name; a real seed
                             // has 2 among 1290 entries. Python never type-checks
                             // this and downstream only ever tests `if entrance:`,
-                            // so None and "" behave identically. Normalise here
+                            // so None and "" behave identically. Normalize here
                             // rather than carrying an Option no caller can act on.
                             let name = match name {
                                 PyObj::None => String::new(),

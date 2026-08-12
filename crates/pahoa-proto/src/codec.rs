@@ -58,7 +58,7 @@ fn type_name(v: &Value) -> &'static str {
 
 /// Encode a batch of packets as one frame.
 pub fn encode(packets: &[ServerPacket]) -> String {
-    serde_json::to_string(packets).expect("server packets are always serialisable")
+    serde_json::to_string(packets).expect("server packets are always serializable")
 }
 
 /// Decode one inbound frame.

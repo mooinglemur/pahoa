@@ -3,7 +3,7 @@
 //! This mirrors `Utils.RestrictedUnpickler` in Archipelago
 //! (`Utils.py:453-487`). Both multidata and save files are attacker-influenced
 //! — datastorage in particular holds arbitrary client-supplied values — so an
-//! unrecognised class is refused rather than constructed. Unpickling untrusted
+//! unrecognized class is refused rather than constructed. Unpickling untrusted
 //! data is arbitrary code execution in Python; it is not in Rust, but a closed
 //! class set is still the right default and keeps parity with the reference.
 

@@ -8,7 +8,7 @@
 //! Note what is *not* validated here. Archipelago checks only `password` and
 //! `game` for presence on `Connect` and then indexes the rest unguarded
 //! (`MultiServer.py:1870-1871`), so a missing `name` or `version` raises and
-//! drops the socket instead of returning `InvalidPacket`. That behaviour is
+//! drops the socket instead of returning `InvalidPacket`. That behavior is
 //! reproduced at the room layer, where the strict/lenient switch lives; this
 //! layer reports a decode failure and lets the caller decide.
 
@@ -90,7 +90,7 @@ pub struct Say {
 pub struct GetDataPackage {
     #[serde(default)]
     pub games: Option<Vec<String>>,
-    /// Undocumented, past its own removal TODO, and still honoured by the
+    /// Undocumented, past its own removal TODO, and still honored by the
     /// reference server (`MultiServer.py:1943`, `:1950-1957`).
     #[serde(default)]
     pub exclusions: Option<Vec<String>>,

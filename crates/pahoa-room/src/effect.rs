@@ -3,7 +3,7 @@
 //! A **streaming** sink rather than a returned `Vec<Effect>`, and that matters
 //! at scale: a 2000-slot release produces ~2,860 broadcast frames of 140
 //! `PrintJSON` packets each. Collecting those before shipping any would
-//! materialise the whole cascade in memory; a sink lets the transport encode
+//! materialize the whole cascade in memory; a sink lets the transport encode
 //! and fan out each chunk as it is produced, holding peak memory at one chunk.
 //!
 //! Recipient resolution — including the `NoText` and tracker-tag filters —
@@ -16,7 +16,7 @@ use pahoa_proto::ServerPacket;
 
 /// Who a broadcast is for, described rather than enumerated.
 ///
-/// This is deliberately *intent*, not a resolved `&[ConnId]`. Materialising a
+/// This is deliberately *intent*, not a resolved `&[ConnId]`. Materializing a
 /// list would put an O(connections) walk in the room for every broadcast — at
 /// 6000 connections and ~3,500 broadcasts in a mass release, that is over 20
 /// million pushes of work the room should never be doing. Instead the transport
