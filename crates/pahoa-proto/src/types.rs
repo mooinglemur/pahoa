@@ -372,6 +372,38 @@ impl From<u8> for Permission {
 }
 
 impl Permission {
+    /// The option text this permission came from.
+    ///
+    /// The reference keeps these modes as *strings* on the context and only
+    /// converts to `Permission` for `RoomInfo`, so `!options` prints the word
+    /// rather than the number. Round-trips with [`Permission::from_text`] for
+    /// the canonical spellings, which is what the option parser accepts.
+    pub fn as_text(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+            Self::Goal => "goal",
+            Self::Auto => "auto",
+            Self::AutoEnabled => "auto-enabled",
+        }
+    }
+
+    /// Whether a player may use this at will (`"enabled" in mode`, which is a
+    /// substring test in the reference and so also true for `auto-enabled`).
+    pub fn allows_manual(self) -> bool {
+        self as u8 & Self::Enabled as u8 != 0
+    }
+
+    /// Whether reaching the goal unlocks it, or triggers it automatically.
+    pub fn on_goal(self) -> bool {
+        self as u8 & Self::Goal as u8 != 0
+    }
+
+    /// Whether the server does it for the player on goal completion.
+    pub fn is_auto(self) -> bool {
+        self as u8 & 0b100 != 0
+    }
+
     /// `Permission.from_text` (`NetUtils.py:62-71`).
     pub fn from_text(text: &str) -> Self {
         let t = text.to_ascii_lowercase();

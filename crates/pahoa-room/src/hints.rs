@@ -289,6 +289,13 @@ pub fn points(checks: usize, check_points: u32, hint_cost: i64, hints_used: i64)
     check_points as i64 * checks as i64 - hint_cost * hints_used
 }
 
+/// Python's stand-in for "unlimited" (`MultiServer.py:1766`, `:1770`).
+///
+/// Reproduced as the literal it is rather than as `usize::MAX`: a hint on an
+/// item group with more than a thousand placements really would stop at a
+/// thousand in the reference, and that is observable.
+pub const UNLIMITED: usize = 1000;
+
 /// How many new hints this call may grant.
 ///
 /// Zero cost means unlimited; otherwise the player gets **one** per invocation
@@ -296,7 +303,7 @@ pub fn points(checks: usize, check_points: u32, hint_cost: i64, hints_used: i64)
 /// free (`MultiServer.py:1765-1771`).
 pub fn budget(cost: i64, points_available: i64, any_unfound: bool) -> usize {
     if !any_unfound || cost == 0 {
-        usize::MAX
+        UNLIMITED
     } else if points_available / cost > 0 {
         1
     } else {
@@ -399,9 +406,9 @@ mod tests {
         // Unaffordable: none.
         assert_eq!(budget(5, 4, true), 0);
         // Free hints are unlimited...
-        assert_eq!(budget(0, 0, true), usize::MAX);
+        assert_eq!(budget(0, 0, true), UNLIMITED);
         // ...as are hints for locations already found.
-        assert_eq!(budget(5, 0, false), usize::MAX);
+        assert_eq!(budget(5, 0, false), UNLIMITED);
     }
 
     #[test]

@@ -168,6 +168,57 @@ impl GameNames {
     pub fn is_hintable(&self, name: &str) -> bool {
         !self.package.hint_blacklist.contains(name)
     }
+
+    /// Everything `!hint` will match a name against: items plus item groups
+    /// (`MultiServer.py:359-360`).
+    ///
+    /// Sorted, and deduplicated where a group shares an item's name. Python
+    /// builds a `set` here, so ties in the fuzzy ranking that follows resolve
+    /// in whatever order CPython's hashing produced — not reproducible even
+    /// between its own runs. A deterministic order costs nothing (both sources
+    /// are already sorted maps, so this is a merge, not a sort) and makes the
+    /// outcome testable.
+    pub fn item_and_group_names(&self) -> Vec<&str> {
+        union_sorted(
+            self.package.item_name_to_id.keys(),
+            self.package.item_name_groups.keys(),
+        )
+    }
+
+    /// The same for `!hint_location`.
+    pub fn location_and_group_names(&self) -> Vec<&str> {
+        union_sorted(
+            self.package.location_name_to_id.keys(),
+            self.package.location_name_groups.keys(),
+        )
+    }
+}
+
+/// Merge two already-sorted key sequences into one sorted, deduplicated list.
+fn union_sorted<'a>(
+    a: impl Iterator<Item = &'a String>,
+    b: impl Iterator<Item = &'a String>,
+) -> Vec<&'a str> {
+    let mut a = a.peekable();
+    let mut b = b.peekable();
+    let mut out = Vec::new();
+    loop {
+        let next = match (a.peek(), b.peek()) {
+            (None, None) => return out,
+            (Some(_), None) => a.next(),
+            (None, Some(_)) => b.next(),
+            (Some(x), Some(y)) => match x.cmp(y) {
+                std::cmp::Ordering::Less => a.next(),
+                std::cmp::Ordering::Greater => b.next(),
+                // Present in both: take one and drop the other.
+                std::cmp::Ordering::Equal => {
+                    b.next();
+                    a.next()
+                }
+            },
+        };
+        out.push(next.expect("peeked").as_str());
+    }
 }
 
 /// The merged data package for a room.
@@ -259,6 +310,24 @@ impl DataPackage {
                 }
             };
             games.insert(game.clone(), GameNames::new(merged));
+        }
+
+        // Every game can carry Archipelago's own items and locations — the
+        // cheat console, `Nothing` — so their ids resolve in any game's
+        // context. Only the id->name direction is merged, exactly as the
+        // reference does (`MultiServer.py:364-368`): `item_name_to_id` stays
+        // the game's own, which is what `!hint` matches names against.
+        if let Some(ap) = games.get("Archipelago") {
+            let (items, locations) = (ap.item_by_id.clone(), ap.location_by_id.clone());
+            for (name, game) in games.iter_mut() {
+                if name == "Archipelago" {
+                    continue;
+                }
+                game.item_by_id
+                    .extend(items.iter().map(|(k, v)| (*k, v.clone())));
+                game.location_by_id
+                    .extend(locations.iter().map(|(k, v)| (*k, v.clone())));
+            }
         }
 
         report.from_multidata.sort();

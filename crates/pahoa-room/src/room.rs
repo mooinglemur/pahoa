@@ -4,6 +4,8 @@
 //! packets through an [`EffectSink`]. No sockets, no clock beyond what callers
 //! pass in, no async.
 
+mod commands;
+
 use crate::conn::{Client, ConnId, non_game_verb};
 use crate::effect::{CloseReason, EffectSink, Recipients};
 use crate::hints::HintStore;
@@ -121,6 +123,12 @@ impl Room {
         &self.data
     }
 
+    /// The merged name tables. Immutable and shared, so callers off the actor
+    /// can hold it.
+    pub fn datapackage(&self) -> &Arc<NameTables> {
+        &self.datapackage
+    }
+
     pub fn client(&self, conn: ConnId) -> Option<&Client> {
         self.clients.get(&conn)
     }
@@ -209,10 +217,7 @@ impl Room {
             ClientPacket::LocationScouts(s) => self.handle_location_scouts(conn, s, out),
             ClientPacket::CreateHints(c) => self.handle_create_hints(conn, c, out),
             ClientPacket::UpdateHint(u) => self.handle_update_hint(conn, u, out),
-            // Chat and the `!` commands arrive later in M6; ignoring them here
-            // matches the reference's treatment of a command it is not ready
-            // for rather than inventing a refusal it would later have to unpick.
-            ClientPacket::Say(_) => {}
+            ClientPacket::Say(s) => self.handle_say(conn, s, out),
         }
     }
 
@@ -1189,6 +1194,11 @@ impl Room {
 
         let mut events: Vec<u32> = new_hint_events.into_iter().collect();
         events.sort_unstable();
+        // Only a hint that was actually banked changes anything worth saving;
+        // re-announcing one the player already holds does not.
+        if !events.is_empty() {
+            out.mark_dirty();
+        }
         for slot in events {
             self.on_new_hint((team, slot), out);
         }
@@ -1209,8 +1219,6 @@ impl Room {
                 .collect();
             out.broadcast(Recipients::SlotText((team, slot)), &msgs);
         }
-
-        out.mark_dirty();
     }
 
     /// `LocationScouts` (`MultiServer.py:2016-2035`).
@@ -1585,12 +1593,26 @@ impl Room {
             .collect()
     }
 
-    fn slot_alias(&self, key: SlotKey) -> String {
-        self.name_aliases
-            .get(&key)
-            .cloned()
-            .or_else(|| self.data.slot_info.get(&key.1).map(|i| i.name.clone()))
+    /// The slot's immutable name from the seed.
+    pub(crate) fn slot_name(&self, key: SlotKey) -> String {
+        self.data
+            .slot_info
+            .get(&key.1)
+            .map(|i| i.name.clone())
             .unwrap_or_else(|| format!("Unknown slot {}", key.1))
+    }
+
+    /// `get_aliased_name` (`MultiServer.py:799-803`): how a slot is written in
+    /// chat and in `NetworkPlayer.alias`.
+    ///
+    /// An alias does not *replace* the seed name, it prefixes it — `"Bob
+    /// (SlotName)"` — so other players can still tell who is who.
+    pub(crate) fn slot_alias(&self, key: SlotKey) -> String {
+        let name = self.slot_name(key);
+        match self.name_aliases.get(&key) {
+            Some(alias) => format!("{alias} ({name})"),
+            None => name,
+        }
     }
 
     fn slot_game(&self, slot: u32) -> String {
