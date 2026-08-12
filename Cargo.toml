@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/pahoa",
+    "crates/pahoa-datastore",
     "crates/pahoa-multidata",
     "crates/pahoa-net",
     "crates/pahoa-pickle",

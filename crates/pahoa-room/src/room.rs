@@ -11,6 +11,7 @@ use pahoa_multidata::{DataPackage as NameTables, MultiData, SlotType};
 use pahoa_proto::server::*;
 use pahoa_proto::types::*;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -49,6 +50,11 @@ pub struct Room {
     name_aliases: HashMap<SlotKey, String>,
     hints_used: HashMap<SlotKey, i64>,
 
+    /// Free-form client key-value store.
+    stored_data: HashMap<String, Value>,
+    /// Who to notify when a key changes.
+    stored_data_subscriptions: HashMap<String, HashSet<ConnId>>,
+
     /// Server start time, reported in `RoomInfo.time` for DeathLink sync.
     pub start_time: f64,
 }
@@ -81,6 +87,8 @@ impl Room {
             client_game_state,
             name_aliases: HashMap::new(),
             hints_used: HashMap::new(),
+            stored_data: HashMap::new(),
+            stored_data_subscriptions: HashMap::new(),
             start_time,
         }
     }
@@ -113,6 +121,11 @@ impl Room {
         let key = (client.team, client.slot);
         if let Some(conns) = self.by_slot.get_mut(&key) {
             conns.retain(|c| *c != conn);
+        }
+        // Python relies on a WeakSet and garbage collection for this; pruning
+        // explicitly is the same effect without the GC timing dependency.
+        for subscribers in self.stored_data_subscriptions.values_mut() {
+            subscribers.remove(&conn);
         }
 
         // Only announce the departure once the slot has nobody left, and only
@@ -165,9 +178,13 @@ impl Room {
             ClientPacket::LocationChecks(l) => self.handle_location_checks(conn, l, out),
             ClientPacket::StatusUpdate(s) => self.handle_status_update(conn, s, out),
             ClientPacket::ConnectUpdate(u) => self.handle_connect_update(conn, u, out),
-            // Hints, data storage, scouts, chat and bounce arrive in later
-            // milestones; ignoring them here matches the pre-auth behaviour of
-            // an unknown-but-valid command rather than inventing a refusal.
+            ClientPacket::Get(g, raw) => self.handle_get(conn, g, raw, out),
+            ClientPacket::Set(s, raw) => self.handle_set(conn, *s, raw, out),
+            ClientPacket::SetNotify(s) => self.handle_set_notify(conn, s),
+            ClientPacket::Bounce(b, raw) => self.handle_bounce(conn, b, raw, out),
+            // Hints, scouts and chat arrive at M6; ignoring them here matches
+            // the reference's treatment of a command it is not ready for rather
+            // than inventing a refusal it would later have to unpick.
             _ => {}
         }
     }
@@ -439,6 +456,219 @@ impl Room {
             &[ServerPacket::DataPackage(DataPackage {
                 data: DataPackageContents { games },
             })],
+        );
+    }
+
+    // --- data storage ----------------------------------------------------
+
+    /// Keys beginning `_read_` are computed views of room state rather than
+    /// stored values, and cannot be written (`MultiServer.py:498-577`).
+    const READ_PREFIX: &'static str = "_read_";
+
+    /// Resolve a `_read_*` key. `None` means the key names nothing.
+    fn read_data(&self, key: &str) -> Option<Value> {
+        let name = key.strip_prefix(Self::READ_PREFIX)?;
+
+        if name == "race_mode" {
+            return Some(Value::from(u8::from(self.data.race_mode)));
+        }
+        if let Some(rest) = name.strip_prefix("slot_data_") {
+            let slot: u32 = rest.parse().ok()?;
+            return Some(match self.slot_data_json(slot) {
+                Some(raw) => serde_json::from_str(raw.get()).unwrap_or(Value::Null),
+                None => Value::Null,
+            });
+        }
+        if let Some(rest) = name.strip_prefix("client_status_") {
+            let (team, slot) = parse_team_slot(rest)?;
+            return Some(Value::from(self.status((team, slot)) as u8));
+        }
+        if let Some(rest) = name.strip_prefix("item_name_groups_") {
+            return Some(groups_to_json(
+                self.datapackage
+                    .get(rest)
+                    .map(|n| &n.package.item_name_groups),
+            ));
+        }
+        if let Some(rest) = name.strip_prefix("location_name_groups_") {
+            return Some(groups_to_json(
+                self.datapackage
+                    .get(rest)
+                    .map(|n| &n.package.location_name_groups),
+            ));
+        }
+        if let Some(rest) = name.strip_prefix("hints_") {
+            // Hints land at M6; the key exists so trackers subscribing to it
+            // get an empty list rather than a missing key.
+            let _ = parse_team_slot(rest)?;
+            return Some(Value::Array(Vec::new()));
+        }
+        None
+    }
+
+    /// `Get`: the reply is the request map with `cmd` rewritten and `keys`
+    /// replaced, so any extra fields the client attached ride along
+    /// (`MultiServer.py:2162-2174`).
+    fn handle_get(
+        &mut self,
+        conn: ConnId,
+        args: cmd::Get,
+        raw: Map<String, Value>,
+        out: &mut dyn EffectSink,
+    ) {
+        let mut values = Map::new();
+        for key in &args.keys {
+            let value = if key.starts_with(Self::READ_PREFIX) {
+                self.read_data(key).unwrap_or(Value::Null)
+            } else {
+                self.stored_data.get(key).cloned().unwrap_or(Value::Null)
+            };
+            values.insert(key.clone(), value);
+        }
+        out.send(
+            conn,
+            &[ServerPacket::echo(
+                raw,
+                "Retrieved",
+                &[("keys", Value::Object(values))],
+            )],
+        );
+    }
+
+    fn handle_set(
+        &mut self,
+        conn: ConnId,
+        args: cmd::Set,
+        raw: Map<String, Value>,
+        out: &mut dyn EffectSink,
+    ) {
+        if args.key.starts_with(Self::READ_PREFIX) {
+            out.send(
+                conn,
+                &[ServerPacket::InvalidPacket(InvalidPacket {
+                    problem_type: "arguments".into(),
+                    original_cmd: Some("Set".into()),
+                    text: format!("cannot write to the read-only key {:?}", args.key),
+                })],
+            );
+            return;
+        }
+
+        // An absent key falls back to the packet's `default`, or 0 — not null
+        // (`MultiServer.py:2183`).
+        let original = self
+            .stored_data
+            .get(&args.key)
+            .cloned()
+            .unwrap_or_else(|| args.default.clone().unwrap_or(Value::from(0)));
+
+        let operations: Vec<(String, Value)> = args
+            .operations
+            .iter()
+            .map(|o| (o.operation.clone(), o.value.clone()))
+            .collect();
+
+        let value = match pahoa_datastore::apply_all(original.clone(), &operations) {
+            Ok(v) => v,
+            Err((index, e)) => {
+                // The reference raises here and drops the socket rather than
+                // answering; reproduce that, but say why in the log.
+                let slot = self.clients.get(&conn).map(|c| c.slot).unwrap_or(0);
+                out.close(
+                    conn,
+                    CloseReason::ProtocolError(format!(
+                        "slot {slot}: Set operation {index} ({}) failed: {e}",
+                        operations.get(index).map(|o| o.0.as_str()).unwrap_or("?"),
+                    )),
+                );
+                return;
+            }
+        };
+
+        self.stored_data.insert(args.key.clone(), value.clone());
+        out.mark_dirty();
+
+        let slot = self.clients.get(&conn).map(|c| c.slot).unwrap_or(0);
+        let reply = ServerPacket::echo(
+            raw,
+            "SetReply",
+            &[
+                ("original_value", original),
+                ("value", value),
+                ("slot", Value::from(slot)),
+            ],
+        );
+
+        // The setter only hears back if it asked; subscribers always do, and
+        // a SetReply is sent even when the value did not change.
+        let mut targets: Vec<ConnId> = self
+            .stored_data_subscriptions
+            .get(&args.key)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        if args.want_reply && !targets.contains(&conn) {
+            targets.push(conn);
+        }
+        if !targets.is_empty() {
+            targets.sort_unstable();
+            out.broadcast(Recipients::These(targets), &[reply]);
+        }
+    }
+
+    /// Subscriptions are never explicitly removed — Python uses a `WeakSet` and
+    /// lets garbage collection do it. Holding connection ids and pruning on
+    /// disconnect is the same behaviour without the GC timing dependency.
+    fn handle_set_notify(&mut self, conn: ConnId, args: cmd::SetNotify) {
+        for key in args.keys {
+            self.stored_data_subscriptions
+                .entry(key)
+                .or_default()
+                .insert(conn);
+        }
+    }
+
+    // --- bounce ----------------------------------------------------------
+
+    /// Forward a `Bounce` to everyone matching **any** of its filters, on the
+    /// same team, including the sender (`MultiServer.py:2149-2160`).
+    ///
+    /// This is what carries DeathLink.
+    fn handle_bounce(
+        &mut self,
+        conn: ConnId,
+        args: cmd::Bounce,
+        raw: Map<String, Value>,
+        out: &mut dyn EffectSink,
+    ) {
+        let Some(sender) = self.clients.get(&conn) else {
+            return;
+        };
+        let team = sender.team;
+
+        let games = args.games.unwrap_or_default();
+        let slots = args.slots.unwrap_or_default();
+        let tags = args.tags.unwrap_or_default();
+        // No filters at all matches nobody, which is what an empty `any()` does.
+        let targets: Vec<ConnId> = self
+            .clients
+            .values()
+            .filter(|c| c.auth && c.team == team)
+            .filter(|c| {
+                slots.contains(&c.slot)
+                    || tags.iter().any(|t| c.tags.contains(t))
+                    || games.contains(&self.slot_game(c.slot))
+            })
+            .map(|c| c.id)
+            .collect();
+
+        if targets.is_empty() {
+            return;
+        }
+        let mut targets = targets;
+        targets.sort_unstable();
+        out.broadcast(
+            Recipients::These(targets),
+            &[ServerPacket::echo(raw, "Bounced", &[])],
         );
     }
 
@@ -918,11 +1148,42 @@ impl Room {
         self.resolve(&Recipients::All)
     }
 
+    /// Snapshot of the key-value store, for saving and for tests.
+    pub fn stored_data(&self) -> &HashMap<String, Value> {
+        &self.stored_data
+    }
+
     pub fn shutdown(&mut self, out: &mut dyn EffectSink) {
         for conn in self.clients.keys().copied().collect::<Vec<_>>() {
             out.close(conn, CloseReason::ServerShutdown);
         }
         self.clients.clear();
         self.by_slot.clear();
+    }
+}
+
+/// Parse the `{team}_{slot}` suffix of a `_read_` key.
+fn parse_team_slot(s: &str) -> Option<(u32, u32)> {
+    let (team, slot) = s.split_once('_')?;
+    Some((team.parse().ok()?, slot.parse().ok()?))
+}
+
+/// Name groups as the `_read_*_name_groups_*` keys expose them.
+///
+/// An unknown game yields an empty object rather than null, matching how
+/// Python's `KeyedDefaultDict` behaves for a missing entry.
+fn groups_to_json(groups: Option<&BTreeMap<String, Vec<String>>>) -> Value {
+    match groups {
+        Some(g) => Value::Object(
+            g.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        Value::Array(v.iter().cloned().map(Value::from).collect()),
+                    )
+                })
+                .collect(),
+        ),
+        None => Value::Object(Map::new()),
     }
 }

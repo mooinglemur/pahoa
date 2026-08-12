@@ -274,6 +274,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pahoa-datastore"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pahoa-multidata"
 version = "0.1.0"
 dependencies = [
@@ -328,6 +336,7 @@ dependencies = [
 name = "pahoa-room"
 version = "0.1.0"
 dependencies = [
+ "pahoa-datastore",
  "pahoa-multidata",
  "pahoa-pickle",
  "pahoa-proto",
