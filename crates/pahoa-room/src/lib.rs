@@ -10,6 +10,7 @@
 mod conn;
 mod effect;
 pub mod fuzzy;
+pub mod hints;
 mod options;
 mod room;
 mod slot_data;
