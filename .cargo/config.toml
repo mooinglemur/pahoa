@@ -1,0 +1,11 @@
+# Static linking for musl targets.
+#
+# Rust defaults to +crt-static for *-linux-musl, but the official rust:alpine
+# image overrides it via the RUSTFLAGS environment variable, which takes
+# precedence over this file. The Dockerfile therefore sets RUSTFLAGS explicitly;
+# this entry covers musl builds that do not go through that image.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

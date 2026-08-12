@@ -1,0 +1,4 @@
+target/
+.git/
+# Fixtures are large symlinks to files outside the build context.
+crates/*/tests/fixtures/

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pahoa",
+    "crates/pahoa-pickle",
+    "crates/pahoa-pyrandom",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/mooinglemur/pahoa"
+
+[workspace.dependencies]
+thiserror = "2"
+
+# Deliberately NO [patch.crates-io] here. The sibling Archipelago-lobby workspace
+# patches rocket/figment/sentry to forked git branches; `[patch]` is workspace-global
+# and not opt-out-able, which is why pahoa is a standalone workspace.
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+# Keep symbols: we want usable backtraces out of a container. Split them at
+# packaging time rather than stripping blind.
+debug = 1
+
+[profile.dev]
+opt-level = 0
+
+# Fixture decoding and pickle round-trips are unbearable in a debug build.
+[profile.dev.package."*"]
+opt-level = 3
