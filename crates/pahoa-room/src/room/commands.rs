@@ -60,6 +60,18 @@ const HELP: &[(&str, &str, &str)] = &[
          For example: DeathLink or EnergyLink.",
     ),
     (
+        "release",
+        "",
+        "Sends remaining items in your world to their recipients.",
+    ),
+    ("collect", "", "Send your remaining items to yourself"),
+    ("countdown", "seconds=10 ", "Start a countdown in seconds"),
+    (
+        "remaining",
+        "",
+        "List remaining items in your game, but not their location or recipient",
+    ),
+    (
         "missing",
         "[filter_text] ",
         "List all missing location checks from the server's perspective.\n    \
@@ -163,12 +175,17 @@ impl Room {
         args: &[String],
         out: &mut dyn EffectSink,
     ) {
+        let first = args.first().map(String::as_str).unwrap_or("");
         match name {
             "help" => self.cmd_help(conn, out),
             "license" => self.cmd_license(conn, out),
             "options" => self.cmd_options(conn, out),
             "players" => self.cmd_players(conn, out),
-            "status" => self.cmd_status(conn, args.first().map(String::as_str).unwrap_or(""), out),
+            "status" => self.cmd_status(conn, first, out),
+            "release" => self.cmd_release(conn, out),
+            "collect" => self.cmd_collect(conn, out),
+            "countdown" => self.cmd_countdown(conn, first, out),
+            "remaining" => self.cmd_remaining(conn, out),
             _ => self.unknown_command(conn, name, out),
         }
     }
@@ -474,6 +491,188 @@ impl Room {
             ));
         }
         self.notify_multiple(conn, texts, out);
+    }
+
+    // --- release, collect, countdown, remaining ---------------------------
+    //
+    // These four are gated by a `Permission`, and the reference tests those
+    // modes two different ways. `!release` and `!collect` use a **substring**
+    // check — `"enabled" in release_mode` — which is also true for
+    // `auto-enabled`; `!remaining` and `!countdown` use **equality**, so
+    // `auto-enabled` matches neither `enabled` nor `disabled` and falls through
+    // to the goal-gated branch. The bits in `Permission` capture the substring
+    // form, so the equality cases match on the variant instead. It looks like an
+    // inconsistency in the reference because it is one, and copying it is the
+    // point.
+
+    fn cmd_release(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
+        let Some(key) = self.slot_of(conn) else {
+            return;
+        };
+        // An administrator's one-off grant beats the mode entirely.
+        if self.release_allowed(key) || self.options.release_mode.allows_manual() {
+            self.release_player(key, out);
+            out.mark_dirty();
+            return;
+        }
+        if self.options.release_mode == Permission::Disabled {
+            self.notify(
+                conn,
+                "Sorry, client item releasing has been disabled on this server. \
+                 You can ask the server admin for a /release"
+                    .to_string(),
+                out,
+            );
+            return;
+        }
+        // auto or goal: allowed once the player has finished.
+        if self.status(key) == ClientStatus::Goal {
+            self.release_player(key, out);
+            out.mark_dirty();
+        } else {
+            self.notify(
+                conn,
+                "Sorry, client item releasing requires you to have beaten the game on this \
+                 server. You can ask the server admin for a /release"
+                    .to_string(),
+                out,
+            );
+        }
+    }
+
+    fn cmd_collect(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
+        let Some(key) = self.slot_of(conn) else {
+            return;
+        };
+        if self.options.collect_mode.allows_manual() {
+            self.collect_player(key, out);
+            out.mark_dirty();
+            return;
+        }
+        if self.options.collect_mode == Permission::Disabled {
+            self.notify(
+                conn,
+                "Sorry, client collecting has been disabled on this server. You can ask the \
+                 server admin for a /collect"
+                    .to_string(),
+                out,
+            );
+            return;
+        }
+        if self.status(key) == ClientStatus::Goal {
+            self.collect_player(key, out);
+            out.mark_dirty();
+        } else {
+            self.notify(
+                conn,
+                "Sorry, client collecting requires you to have beaten the game on this server. \
+                 You can ask the server admin for a /collect"
+                    .to_string(),
+                out,
+            );
+        }
+    }
+
+    /// `!countdown`, which needs a clock the room does not own.
+    ///
+    /// The time comes from `start_time` plus however far the transport says the
+    /// room has got; tests drive it directly.
+    fn cmd_countdown(&mut self, conn: ConnId, seconds: &str, out: &mut dyn EffectSink) {
+        let disabled = self.options.countdown_mode == Permission::Disabled
+            // `auto` turns itself off once the room is too big for a countdown
+            // to mean anything (`MultiServer.py:1552-1553`).
+            || (self.options.countdown_mode == Permission::Auto
+                && self.data.slot_info.len() >= 30);
+        if disabled {
+            self.notify(
+                conn,
+                "Sorry, client countdowns have been disabled on this server. You can ask the \
+                 server admin for a /countdown"
+                    .to_string(),
+                out,
+            );
+            return;
+        }
+
+        // Unparseable falls back to ten; the reference does the same rather
+        // than complaining (`MultiServer.py:1556-1558`).
+        let timer: i64 = seconds.parse().unwrap_or(10);
+        if timer > 60 * 60 {
+            // The reference raises here, and its handler prints the resulting
+            // Python traceback to the client. A plain refusal instead: a
+            // traceback is an information leak and tells the player nothing.
+            self.notify(conn, format!("{timer} is invalid. Maximum is 1 hour."), out);
+            return;
+        }
+
+        let now = self.clock;
+        self.start_countdown(timer, now, out);
+    }
+
+    fn cmd_remaining(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
+        let Some(key) = self.slot_of(conn) else {
+            return;
+        };
+        match self.options.remaining_mode {
+            Permission::Enabled => self.report_remaining(conn, key, out),
+            Permission::Disabled => self.notify(
+                conn,
+                "Sorry, !remaining has been disabled on this server.".to_string(),
+                out,
+            ),
+            // goal, auto, and — because the reference compares strings —
+            // auto-enabled too.
+            _ => {
+                if self.status(key) == ClientStatus::Goal {
+                    self.report_remaining(conn, key, out);
+                } else {
+                    self.notify(
+                        conn,
+                        "Sorry, !remaining requires you to have beaten the game on this server"
+                            .to_string(),
+                        out,
+                    );
+                }
+            }
+        }
+    }
+
+    /// What is still sitting in this slot's world, by item name only — no
+    /// location and no recipient, so it spoils the inventory and nothing else.
+    fn report_remaining(&self, conn: ConnId, key: SlotKey, out: &mut dyn EffectSink) {
+        let checked = self.location_checks.get(&key);
+        // Sorted by `(receiving player, item id)`, matching
+        // `_LocationStore.get_remaining` — the order is a mild spoiler in
+        // itself, so it must not leak the location order.
+        let mut rest: Vec<(u32, i64)> = self
+            .data
+            .locations
+            .for_slot(key.1)
+            .iter()
+            .filter(|e| checked.is_none_or(|c| !c.contains(&e.location)))
+            .map(|e| (e.receiver, e.item))
+            .collect();
+        rest.sort_unstable();
+
+        if rest.is_empty() {
+            self.notify(conn, "No remaining items found.".to_string(), out);
+            return;
+        }
+        let names: Vec<String> = rest
+            .iter()
+            .map(|(receiver, item)| {
+                let game = self.slot_game(*receiver);
+                self.datapackage
+                    .get(&game)
+                    .map(|n| n.item_name(*item))
+                    .unwrap_or_else(|| format!("Unknown item (ID:{item})"))
+            })
+            .collect();
+        self.notify(conn, format!("Remaining items: {}", names.join(", ")), out);
+    }
+
+    fn slot_of(&self, conn: ConnId) -> Option<SlotKey> {
+        self.clients.get(&conn).map(|c| (c.team, c.slot))
     }
 
     // --- alias -----------------------------------------------------------

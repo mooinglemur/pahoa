@@ -51,6 +51,16 @@ struct Dispatcher<'a> {
     updates: Vec<(ConnId, crate::shard::Membership)>,
 }
 
+impl<'a> Dispatcher<'a> {
+    fn new(shards: &'a Shards) -> Self {
+        Self {
+            shards,
+            dirty: false,
+            updates: Vec::new(),
+        }
+    }
+}
+
 impl EffectSink for Dispatcher<'_> {
     fn send(&mut self, to: ConnId, msgs: &[ServerPacket]) {
         if msgs.is_empty() {
@@ -84,15 +94,45 @@ impl EffectSink for Dispatcher<'_> {
     }
 }
 
+/// Unix time as a float, the scale `RoomInfo.time` and the room's clock use.
+fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 pub async fn run(mut room: Room, shards: Shards, mut rx: mpsc::Receiver<ActorMsg>) {
     let mut dirty = false;
 
-    while let Some(msg) = rx.recv().await {
-        let mut sink = Dispatcher {
-            shards: &shards,
-            dirty: false,
-            updates: Vec::new(),
+    loop {
+        // The room says when it next wants poking — only a running countdown
+        // does today. With nothing pending this waits on the mailbox alone, so
+        // an idle room costs nothing.
+        let msg = match room.next_tick() {
+            None => rx.recv().await,
+            Some(at) => {
+                let delay = std::time::Duration::from_secs_f64((at - now()).max(0.0));
+                tokio::select! {
+                    msg = rx.recv() => msg,
+                    // Waiting on a timer is not a violation of "awaits only its
+                    // mailbox": the point of that rule is that no *client* can
+                    // make the actor wait, and a clock is not a client.
+                    _ = tokio::time::sleep(delay) => {
+                        let mut sink = Dispatcher::new(&shards);
+                        room.tick(now(), &mut sink);
+                        dirty |= sink.dirty;
+                        continue;
+                    }
+                }
+            }
         };
+        let Some(msg) = msg else { break };
+
+        let mut sink = Dispatcher::new(&shards);
+        // Refresh the room's notion of "now" before it acts on anything, so a
+        // command that needs a clock has a current one.
+        room.tick(now(), &mut sink);
 
         match msg {
             ActorMsg::Connected { conn, tx } => {

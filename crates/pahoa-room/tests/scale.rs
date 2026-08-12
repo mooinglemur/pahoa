@@ -180,3 +180,38 @@ fn item_delivery_does_not_sweep_unaffected_clients() {
         "expected at most the receiver's connections, got {sends} sends"
     );
 }
+
+#[test]
+fn collecting_scans_the_location_table_once_per_call() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let slots: Vec<u32> = data.player_slots().map(|(s, _)| *s).take(50).collect();
+    let mut room = room_for(data.clone(), RoomOptions::default());
+
+    // `!collect` has to find every location *anywhere* holding this slot's
+    // items, which is a linear pass over the flat table — the same shape as
+    // the reference's `get_for_player`, and the reason this is measured rather
+    // than assumed. If it ever needs to be O(items for the slot) instead, the
+    // fix is a receiver index alongside the sender one.
+    let mut sink = Counter::default();
+    let started = Instant::now();
+    for &slot in &slots {
+        room.collect_player((0, slot), &mut sink);
+    }
+    let elapsed = started.elapsed();
+
+    eprintln!(
+        "collected for {} slots over {} locations in {:?} ({:?} each)",
+        slots.len(),
+        data.locations.len(),
+        elapsed,
+        elapsed / slots.len() as u32,
+    );
+    assert!(
+        elapsed.as_secs() < 60,
+        "collect took {elapsed:?} for {} slots",
+        slots.len()
+    );
+}

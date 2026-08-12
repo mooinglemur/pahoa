@@ -35,6 +35,20 @@ const PRINT_JSON_CHUNK: usize = 140;
 /// retrofitting it later would touch every structure, so it is kept from the start.
 pub type SlotKey = (u32, u32);
 
+/// A running `!countdown`.
+///
+/// The reference spawns a task that sleeps a second per step
+/// (`MultiServer.py:1846-1858`). Holding the state here instead keeps the room
+/// clockless: it says *when* it next wants to be poked, and the transport does
+/// the poking.
+#[derive(Debug, Clone, Copy)]
+struct Countdown {
+    /// The number the next tick announces. Zero means the next tick says "GO".
+    remaining: i64,
+    /// Absolute time of that tick, on the same scale as [`Room::start_time`].
+    next_at: f64,
+}
+
 pub struct Room {
     data: Arc<MultiData>,
     datapackage: Arc<NameTables>,
@@ -64,6 +78,15 @@ pub struct Room {
     #[allow(dead_code)]
     rng: PyRandom,
 
+    /// Slots granted a one-off release by an administrator, over and above
+    /// what `release_mode` allows.
+    allow_releases: HashSet<SlotKey>,
+    /// Which members of each item-link group have collected, so the group's own
+    /// slot collects once they all have (`MultiServer.py:1113-1118`).
+    group_collected: HashMap<u32, HashSet<u32>>,
+    /// The running `!countdown`, if any.
+    countdown: Option<Countdown>,
+
     /// Free-form client key-value store.
     stored_data: HashMap<String, Value>,
     /// Who to notify when a key changes.
@@ -71,6 +94,13 @@ pub struct Room {
 
     /// Server start time, reported in `RoomInfo.time` for DeathLink sync.
     pub start_time: f64,
+    /// The last time the transport reported through [`Room::tick`].
+    ///
+    /// The room has no clock of its own — that is what lets a 400k-location
+    /// release run in a synchronous test — so anything time-dependent reads
+    /// this instead. It only has to be roughly current, and the transport
+    /// refreshes it on every batch it processes.
+    clock: f64,
 }
 
 impl Room {
@@ -113,9 +143,13 @@ impl Room {
             hints_used: HashMap::new(),
             hints,
             rng,
+            allow_releases: HashSet::new(),
+            group_collected: HashMap::new(),
+            countdown: None,
             stored_data: HashMap::new(),
             stored_data_subscriptions: HashMap::new(),
             start_time,
+            clock: start_time,
         }
     }
 
@@ -774,21 +808,37 @@ impl Room {
         out.mark_dirty();
 
         if status == ClientStatus::Goal {
-            let text = format!(
-                "{} (Team #{}) has completed their goal.",
-                self.slot_alias(key),
-                key.0 + 1
-            );
-            out.broadcast(
-                Recipients::AllText,
-                &[ServerPacket::PrintJSON(PrintJson {
-                    data: vec![JsonMessagePart::text(text)],
-                    print_type: Some(PrintJsonType::Goal),
-                    team: Some(key.0),
-                    slot: Some(key.1),
-                    ..Default::default()
-                })],
-            );
+            self.on_goal_achieved(key, out);
+        }
+    }
+
+    /// `on_goal_achieved` (`MultiServer.py:857-866`).
+    ///
+    /// Collect runs before release, which matters: collecting first means the
+    /// finished player's own inventory is settled before their world is
+    /// emptied out to everyone else.
+    fn on_goal_achieved(&mut self, key: SlotKey, out: &mut dyn EffectSink) {
+        let text = format!(
+            "{} (Team #{}) has completed their goal.",
+            self.slot_alias(key),
+            key.0 + 1
+        );
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                print_type: Some(PrintJsonType::Goal),
+                team: Some(key.0),
+                slot: Some(key.1),
+                ..Default::default()
+            })],
+        );
+
+        if self.options.collect_mode.is_auto() {
+            self.collect_player(key, out);
+        }
+        if self.options.release_mode.is_auto() {
+            self.release_player(key, out);
         }
     }
 
@@ -944,6 +994,207 @@ impl Room {
                 .get(&(0, slot))
                 .is_some_and(|c| c.contains(&location))
         })
+    }
+
+    /// The full `checked_locations` list, as against the incremental one
+    /// `register_location_checks` sends.
+    ///
+    /// Same field name, two meanings — clients union rather than replace, which
+    /// is what makes both correct (`MultiServer.py:1130-1132`).
+    fn update_checked_locations(&self, key: SlotKey, out: &mut dyn EffectSink) {
+        out.broadcast(
+            Recipients::Slot(key),
+            &[ServerPacket::RoomUpdate(Box::new(RoomUpdate {
+                checked_locations: Some(self.checked_locations(key)),
+                ..Default::default()
+            }))],
+        );
+    }
+
+    /// `release_player` (`MultiServer.py:1091-1098`): give up on the rest of a
+    /// world and send everything still in it.
+    pub fn release_player(&mut self, key: SlotKey, out: &mut dyn EffectSink) {
+        let text = format!(
+            "{} (Team #{}) has released all remaining items from their world.",
+            self.slot_name(key),
+            key.0 + 1
+        );
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                print_type: Some(PrintJsonType::Release),
+                team: Some(key.0),
+                slot: Some(key.1),
+                ..Default::default()
+            })],
+        );
+
+        let all: Vec<i64> = self
+            .data
+            .locations
+            .for_slot(key.1)
+            .iter()
+            .map(|e| e.location)
+            .collect();
+        self.register_location_checks(key, &all, out);
+        self.update_checked_locations(key, out);
+    }
+
+    /// `collect_player` (`MultiServer.py:1101-1118`): pull in everything the
+    /// rest of the multiworld is still holding for this slot.
+    ///
+    /// The reverse of a release — it checks *other* players' locations, the
+    /// ones that happen to contain this slot's items.
+    pub fn collect_player(&mut self, key: SlotKey, out: &mut dyn EffectSink) {
+        self.collect_inner(key, false, out);
+    }
+
+    fn collect_inner(&mut self, key: SlotKey, is_group: bool, out: &mut dyn EffectSink) {
+        let (team, slot) = key;
+        let text = format!(
+            "{} (Team #{}) has collected their items from other worlds.",
+            self.slot_name(key),
+            team + 1
+        );
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                print_type: Some(PrintJsonType::Collect),
+                team: Some(team),
+                slot: Some(slot),
+                ..Default::default()
+            })],
+        );
+
+        // Group by the world the items are sitting in, so each source slot is
+        // registered once and its owner sees one update.
+        let mut by_source: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+        for entry in self.data.locations.all() {
+            if entry.receiver == slot {
+                by_source
+                    .entry(entry.sender)
+                    .or_default()
+                    .push(entry.location);
+            }
+        }
+        for (source, locations) in by_source {
+            let source_key = (team, source);
+            self.register_location_checks(source_key, &locations, out);
+            self.update_checked_locations(source_key, out);
+        }
+
+        if is_group {
+            return;
+        }
+        // A group's own slot collects only once every member has, since until
+        // then the group is still owed items.
+        let groups: Vec<(u32, Vec<u32>)> = self
+            .data
+            .slot_info
+            .iter()
+            .filter(|(_, info)| info.group_members.contains(&slot))
+            .map(|(id, info)| (*id, info.group_members.clone()))
+            .collect();
+        for (group, members) in groups {
+            let collected = self.group_collected.entry(group).or_default();
+            collected.insert(slot);
+            if members.iter().all(|m| collected.contains(m)) {
+                self.collect_inner((team, group), true, out);
+            }
+        }
+    }
+
+    /// Grant one slot a release regardless of `release_mode`.
+    pub fn allow_release(&mut self, key: SlotKey, allowed: bool) {
+        if allowed {
+            self.allow_releases.insert(key);
+        } else {
+            self.allow_releases.remove(&key);
+        }
+    }
+
+    pub(crate) fn release_allowed(&self, key: SlotKey) -> bool {
+        self.allow_releases.contains(&key)
+    }
+
+    // --- countdown -------------------------------------------------------
+
+    /// Start or retarget the countdown.
+    ///
+    /// Restarting while one is running only changes the target, exactly as the
+    /// reference does — the original loop keeps ticking against the new number
+    /// rather than a second one starting alongside it.
+    pub(crate) fn start_countdown(&mut self, seconds: i64, now: f64, out: &mut dyn EffectSink) {
+        self.countdown_message(
+            format!("[Server]: Starting countdown of {seconds}s"),
+            seconds,
+            out,
+        );
+
+        if let Some(running) = &mut self.countdown {
+            running.remaining = seconds;
+            return;
+        }
+        if seconds > 0 {
+            // The reference's loop announces before its first sleep, so the
+            // opening number lands immediately.
+            self.countdown_message(format!("[Server]: {seconds}"), seconds, out);
+            self.countdown = Some(Countdown {
+                remaining: seconds - 1,
+                next_at: now + 1.0,
+            });
+        } else {
+            self.countdown_message("[Server]: GO".to_string(), 0, out);
+        }
+    }
+
+    fn countdown_message(&self, text: String, value: i64, out: &mut dyn EffectSink) {
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                print_type: Some(PrintJsonType::Countdown),
+                countdown: Some(value),
+                ..Default::default()
+            })],
+        );
+    }
+
+    /// When the room next wants [`Room::tick`] called, if ever.
+    ///
+    /// `None` means nothing is pending and the transport can sleep until a
+    /// client says something.
+    pub fn next_tick(&self) -> Option<f64> {
+        self.countdown.map(|c| c.next_at)
+    }
+
+    /// Advance anything time-driven. Idempotent and safe to call early.
+    ///
+    /// Loops rather than doing one step, so a late tick — a stalled thread, a
+    /// suspended container — catches up instead of stretching the countdown.
+    pub fn tick(&mut self, now: f64, out: &mut dyn EffectSink) {
+        self.clock = now;
+        while let Some(state) = self.countdown {
+            if now < state.next_at {
+                return;
+            }
+            if state.remaining > 0 {
+                self.countdown_message(
+                    format!("[Server]: {}", state.remaining),
+                    state.remaining,
+                    out,
+                );
+                self.countdown = Some(Countdown {
+                    remaining: state.remaining - 1,
+                    next_at: state.next_at + 1.0,
+                });
+            } else {
+                self.countdown_message("[Server]: GO".to_string(), 0, out);
+                self.countdown = None;
+            }
+        }
     }
 
     /// Queue an item for a slot, expanding item-link groups to their members.
@@ -1628,6 +1879,11 @@ impl Room {
             .slot_data
             .get(&slot)
             .map(crate::slot_data::to_json)
+    }
+
+    /// How many locations a slot has checked.
+    pub fn checked_count(&self, key: SlotKey) -> usize {
+        self.location_checks.get(&key).map_or(0, HashSet::len)
     }
 
     fn checked_locations(&self, key: SlotKey) -> Vec<i64> {
