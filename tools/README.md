@@ -34,6 +34,7 @@ loads the world system.
 | `gen-protocol-vectors.py` | `crates/pahoa-proto/tests/vectors.txt` | Byte-exact server→client encodings, including the `"class"` tags |
 | `gen-datastore-vectors.py` | `crates/pahoa-datastore/tests/vectors.jsonl` | All 18 `Set` operations, from Archipelago's real `modify_functions` |
 | `gen-fuzzy-vectors.py` | `crates/pahoa-room/tests/fuzzy_vectors.jsonl` | `get_fuzzy_results` / `get_intended_text` scoring and thresholds |
+| `gen-message-vectors.py` | `crates/pahoa-room/tests/message_vectors.jsonl` | `json_format_send_event` and `Hint.as_network_message`, byte for byte through `NetUtils.encode` |
 
 Regenerate only when the reference changes; a diff in these files is a
 behavioral change and deserves review.
@@ -46,7 +47,8 @@ cargo build --release
 
 ~/src/Archipelago/.venv/bin/python tools/real-client-check.py \
     --archipelago ~/src/Archipelago --port 38281 \
-    --slot "<slot name>" --game "<game>" --check <location id>
+    --slot "<slot name>" --game "<game>" \
+    --check <location id> --check <location id>
 
 ~/src/Archipelago/.venv/bin/python tools/deathlink-check.py \
     --archipelago ~/src/Archipelago --port 38281 \
@@ -55,7 +57,13 @@ cargo build --release
 
 Both exit non-zero on failure, so they can gate a release. `real-client-check`
 also reports which WebSocket extensions were negotiated — that is what
-established that clients tolerate a declined `permessage-deflate`.
+established that clients tolerate a declined `permessage-deflate` — and renders
+each `PrintJSON` through Archipelago's own `RawJSONtoTextParser`, so a wrong
+message-part type shows up as `Unknown item (ID: …)` and fails the run rather
+than passing as a plausible-looking string of digits.
+
+The location ids to pass to `--check` come from `pahoa inspect`, or from the
+multidata's `locations` table for the slot you are connecting as.
 
 ## Fixtures and inspection
 

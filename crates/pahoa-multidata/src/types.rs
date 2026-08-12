@@ -94,6 +94,19 @@ impl HintStatus {
             }
         })
     }
+
+    /// The parenthesized label a hint's status renders as
+    /// (`NetUtils.py:372-378`). Unknown values are unreachable here because the
+    /// enum is closed, but Python's fallback is `"(unknown)"`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unspecified => "(unspecified)",
+            Self::NoPriority => "(no priority)",
+            Self::Avoid => "(avoid)",
+            Self::Priority => "(priority)",
+            Self::Found => "(found)",
+        }
+    }
 }
 
 /// These are Python `IntEnum`/`IntFlag` types, so their integer value is the

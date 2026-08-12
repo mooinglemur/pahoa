@@ -188,6 +188,13 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>) {
                         }
                     }
                 }
+                Recipients::SlotText(key) => {
+                    for conn in by_slot.get(key).into_iter().flatten() {
+                        if let Some(m) = members.get(conn).filter(|m| !m.no_text) {
+                            deliver(m, Outbound::Frame(frame.clone()));
+                        }
+                    }
+                }
                 Recipients::These(list) => {
                     for conn in list {
                         if let Some(m) = members.get(conn) {

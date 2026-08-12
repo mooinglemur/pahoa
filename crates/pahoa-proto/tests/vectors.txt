@@ -9,9 +9,9 @@ location_info	{"cmd":"LocationInfo","locations":[{"item":5,"location":100,"playe
 room_update_partial	{"cmd":"RoomUpdate","hint_points":12}
 room_update_checked	{"cmd":"RoomUpdate","checked_locations":[7,8,9],"hint_points":3}
 print_json_chat	{"cmd":"PrintJSON","data":[{"text":"hello"}],"type":"Chat","slot":2,"message":"hello"}
-print_json_item_send	{"cmd":"PrintJSON","data":[{"text":"1","type":"player_id"},{"text":" sent "},{"text":"77","type":"item_id","player":2,"flags":1},{"text":" to "},{"text":"2","type":"player_id"},{"text":" ("},{"text":"1234","type":"location_id","player":1},{"text":")"}],"type":"ItemSend","receiving":2,"item":{"item":77,"location":1234,"player":1,"flags":1,"class":"NetworkItem"}}
+print_json_item_send	{"cmd":"PrintJSON","data":[{"text":"1","type":"player_id"},{"text":" sent "},{"text":"77","player":2,"flags":1,"type":"item_id"},{"text":" to "},{"text":"2","type":"player_id"},{"text":" ("},{"text":"1234","player":1,"type":"location_id"},{"text":")"}],"type":"ItemSend","receiving":2,"item":{"item":77,"location":1234,"player":1,"flags":1,"class":"NetworkItem"}}
 print_json_unicode	{"cmd":"PrintJSON","data":[{"text":"héllo ✓ 日本語"}],"type":"Chat"}
-print_json_hint	{"cmd":"PrintJSON","data":[{"text":"hint"},{"text":"30","type":"hint_status","hint_status":30}],"type":"Hint","receiving":1,"item":{"item":5,"location":100,"player":2,"flags":1,"class":"NetworkItem"},"found":false}
+print_json_hint	{"cmd":"PrintJSON","data":[{"text":"hint"},{"text":"30","hint_status":30,"type":"hint_status"}],"type":"Hint","receiving":1,"item":{"item":5,"location":100,"player":2,"flags":1,"class":"NetworkItem"},"found":false}
 data_package	{"cmd":"DataPackage","data":{"games":{"Archipelago":{"item_name_to_id":{"Nothing":0},"location_name_to_id":{"Cheat Console":-1},"checksum":"aaa"},"Timespinner":{"item_name_to_id":{"Blade":1,"Orb":2},"location_name_to_id":{"Chest":10},"checksum":"bbb"}}}}
 invalid_packet_cmd	{"cmd":"InvalidPacket","type":"cmd","original_cmd":null,"text":"Unknown command Nonsense"}
 invalid_packet_args	{"cmd":"InvalidPacket","type":"arguments","original_cmd":"LocationChecks","text":"locations must be a list of integers"}

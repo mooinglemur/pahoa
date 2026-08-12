@@ -52,6 +52,55 @@ def main():
 
     print(f"using websockets {websockets.version.version} from {args.archipelago}")
 
+    def text_parser(connected, data_package):
+        """Archipelago's own `PrintJSON` renderer over a minimal client context.
+
+        `NetUtils.RawJSONtoTextParser` is the real thing — its handler dispatch
+        on part `type` is exactly what a wrong part type would break — but
+        `CommonClient.CommonContext` is not usable here: importing it loads the
+        world system, which this venv deliberately does not have. So the three
+        lookups the handlers touch are supplied directly. They are reverse maps
+        of the data package the server just sent, which is all
+        `NameLookupDict` is (`CommonClient.py:238-292`).
+        """
+        from NetUtils import RawJSONtoTextParser
+
+        class Lookup:
+            def __init__(self, kind, by_game):
+                self.kind, self.by_game = kind, by_game
+
+            def lookup_in_slot(self, code, slot):
+                game = slot_info[str(slot)].game if str(slot) in slot_info else "Archipelago"
+                return self.by_game.get(game, {}).get(
+                    code, f"Unknown {self.kind} (ID: {code})"
+                )
+
+        slot_info = connected["slot_info"]
+        games = data_package["data"]["games"]
+
+        class Ctx:
+            slot = connected["slot"]
+            player_names = {p.slot: p.name for p in connected["players"]} | {
+                0: "Archipelago"
+            }
+            item_names = Lookup(
+                "item",
+                {g: {i: n for n, i in p["item_name_to_id"].items()} for g, p in games.items()},
+            )
+            location_names = Lookup(
+                "location",
+                {
+                    g: {i: n for n, i in p["location_name_to_id"].items()}
+                    for g, p in games.items()
+                },
+            )
+
+            @staticmethod
+            def slot_concerns_self(player):
+                return player == Ctx.slot
+
+        return RawJSONtoTextParser(Ctx())
+
     async def run():
         uri = f"ws://{args.host}:{args.port}"
 
@@ -145,20 +194,34 @@ def main():
             print(f"  slot_info decoded as {type(some).__name__}")
 
         # 4. Check locations, if asked.
+        #
+        # Rendered through Archipelago's own `JSONtoTextParser`, not by joining
+        # the raw `text` fields. That is the whole point: the server sends bare
+        # ids with `item_id`/`location_id`/`player_id` part types and the client
+        # resolves them against its data package, so a raw join would print
+        # "1 sent 42 to 2" and look fine while being unreadable to a human. If
+        # the part types or the `player` field on them were wrong, the names
+        # would come out as "Unknown item (ID: …)" here.
         if args.check:
+            parser = text_parser(connected, data_package)
+
             await send([{"cmd": "LocationChecks", "locations": args.check}])
             saw_update = False
+            unknown = []
             for _ in range(20):
                 for packet in await recv():
                     if packet["cmd"] == "RoomUpdate" and "checked_locations" in packet:
                         print(f"RoomUpdate: checked {packet['checked_locations']}")
                         saw_update = True
                     if packet["cmd"] == "PrintJSON":
-                        text = "".join(part.get("text", "") for part in packet["data"])
+                        text = parser(packet["data"])
                         print(f"PrintJSON[{packet.get('type')}]: {text}")
+                        if "Unknown item (ID:" in text or "Unknown location (ID:" in text:
+                            unknown.append(text)
                 if saw_update:
                     break
             assert saw_update, "location check produced no RoomUpdate"
+            assert not unknown, f"ids did not resolve to names: {unknown}"
 
         await socket.close()
         print("OK")

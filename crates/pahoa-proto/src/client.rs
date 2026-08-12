@@ -70,9 +70,14 @@ pub struct CreateHints {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct UpdateHint {
+    /// The **finding** player, not the receiver — hints are looked up by where
+    /// the item sits (`MultiServer.py:2097`).
     pub player: u32,
     pub location: i64,
-    #[serde(default)]
+    /// Required, but nullable: an explicit `null` means "leave the status
+    /// alone" and is ignored, while omitting the key entirely raises in the
+    /// reference and drops the socket. No `#[serde(default)]`, so the two stay
+    /// distinguishable.
     pub status: Option<i64>,
 }
 

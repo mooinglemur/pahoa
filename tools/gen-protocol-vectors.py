@@ -77,6 +77,50 @@ def hint(recv, find, loc, item, found, entrance, flags, status):
     )
 
 
+# The four `PrintJSON` part builders (`NetUtils.py:359-370`, `:388-390`).
+# Key order differs between them — `text` first, part-specific keys next, `type`
+# last — and it is observable, so these mirror the dict literals exactly.
+# `tools/gen-message-vectors.py` pins the same order against the real functions.
+def json_text(text, **kwargs):
+    return {"text": str(text), **kwargs}
+
+
+def json_item(item_id, player=0, item_flags=0, **kwargs):
+    return {
+        "text": str(item_id),
+        "player": player,
+        "flags": item_flags,
+        "type": "item_id",
+        **kwargs,
+    }
+
+
+def json_location(location_id, player=0, **kwargs):
+    return {"text": str(location_id), "player": player, "type": "location_id", **kwargs}
+
+
+def json_hint_status(hint_status, text, **kwargs):
+    return {"text": text, "hint_status": hint_status, "type": "hint_status", **kwargs}
+
+
+def item_send_parts(item, location, sender, receiver, flags):
+    """`MultiServer.json_format_send_event`, minus the self-send branch."""
+    return [
+        json_text(sender, type="player_id"),
+        json_text(" sent "),
+        json_item(item, receiver, flags),
+        json_text(" to "),
+        json_text(receiver, type="player_id"),
+        json_text(" ("),
+        json_location(location, sender),
+        json_text(")"),
+    ]
+
+
+def hint_status_parts(text, status):
+    return [json_text(text), json_hint_status(status, str(status))]
+
+
 CASES = collections.OrderedDict()
 
 CASES["room_info"] = {
@@ -157,16 +201,7 @@ CASES["print_json_chat"] = {
 
 CASES["print_json_item_send"] = {
     "cmd": "PrintJSON",
-    "data": [
-        {"text": "1", "type": "player_id"},
-        {"text": " sent "},
-        {"text": "77", "type": "item_id", "player": 2, "flags": 1},
-        {"text": " to "},
-        {"text": "2", "type": "player_id"},
-        {"text": " ("},
-        {"text": "1234", "type": "location_id", "player": 1},
-        {"text": ")"},
-    ],
+    "data": item_send_parts(item=77, location=1234, sender=1, receiver=2, flags=1),
     "type": "ItemSend",
     "receiving": 2,
     "item": network_item(77, 1234, 1, 1),
@@ -180,7 +215,7 @@ CASES["print_json_unicode"] = {
 
 CASES["print_json_hint"] = {
     "cmd": "PrintJSON",
-    "data": [{"text": "hint"}, {"text": "30", "type": "hint_status", "hint_status": 30}],
+    "data": hint_status_parts("hint", 30),
     "type": "Hint",
     "receiving": 1,
     "item": network_item(5, 100, 2, 1),

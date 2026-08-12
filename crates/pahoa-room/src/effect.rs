@@ -31,6 +31,12 @@ pub enum Recipients {
     /// Every connection authenticated to one slot. Co-op means this can be
     /// several.
     Slot(SlotKey),
+    /// One slot's connections, minus the `NoText` ones.
+    ///
+    /// Distinct from [`Recipients::Slot`] because hint messages are chat and
+    /// must skip `NoText` clients, while the `RoomUpdate` that accompanies them
+    /// must not (`MultiServer.py:836`).
+    SlotText(SlotKey),
     /// An explicit list, for the cases that genuinely need one.
     These(Vec<ConnId>),
 }

@@ -222,6 +222,21 @@ pub struct Hint {
     pub status: HintStatus,
 }
 
+impl From<&pahoa_multidata::Hint> for Hint {
+    fn from(h: &pahoa_multidata::Hint) -> Self {
+        Self {
+            receiving_player: h.receiving_player,
+            finding_player: h.finding_player,
+            location: h.location,
+            item: h.item,
+            found: h.found,
+            entrance: h.entrance.clone(),
+            item_flags: h.item_flags,
+            status: h.status,
+        }
+    }
+}
+
 impl Serialize for Hint {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut m = s.serialize_map(Some(9))?;
@@ -243,14 +258,25 @@ impl Serialize for Hint {
 /// Clients render `data` and may ignore everything else. Unknown `type` values
 /// must fall back to plain text — that rule is what lets new part types ship
 /// without breaking old clients (`NetUtils.py:280-283`).
+///
+/// **Field order is not arbitrary.** Archipelago builds these as dict literals
+/// in four helpers (`NetUtils.py:359-370`, `:388-390`), and every one of them
+/// puts `text` first, then the part-specific keys, then `type` last:
+///
+/// ```text
+/// add_json_text          {"text", "type"?}
+/// add_json_item          {"text", "player", "flags", "type"}
+/// add_json_location      {"text", "player", "type"}
+/// add_json_hint_status   {"text", "hint_status", "type"}
+/// ```
+///
+/// Declaring the fields in that order makes all four byte-identical, since the
+/// absent ones are skipped. `color` is never set by the server — clients add it
+/// while rendering — so its position is unconstrained.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonMessagePart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub part_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
     /// Owning player, for item and location parts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player: Option<u32>,
@@ -259,6 +285,10 @@ pub struct JsonMessagePart {
     pub flags: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint_status: Option<HintStatus>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub part_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 impl JsonMessagePart {
@@ -293,6 +323,18 @@ impl JsonMessagePart {
         Self {
             player: Some(owner),
             ..Self::typed("location_id", location.to_string())
+        }
+    }
+
+    /// The trailing `(priority)`/`(found)`/… span of a hint message.
+    ///
+    /// The text is redundant with `hint_status` and clients that understand the
+    /// field re-render it in their own words, but Python sends both
+    /// (`NetUtils.py:388-390`) and older clients only read the text.
+    pub fn hint_status(status: HintStatus) -> Self {
+        Self {
+            hint_status: Some(status),
+            ..Self::typed("hint_status", status.label())
         }
     }
 }
@@ -446,7 +488,26 @@ mod tests {
         assert_eq!(json(&JsonMessagePart::text("hi")), r#"{"text":"hi"}"#);
         assert_eq!(
             json(&JsonMessagePart::item_id(5, 2, 0b001)),
-            r#"{"text":"5","type":"item_id","player":2,"flags":1}"#
+            r#"{"text":"5","player":2,"flags":1,"type":"item_id"}"#
+        );
+    }
+
+    #[test]
+    fn json_message_parts_key_order_matches_each_python_builder() {
+        // `type` last for the parts that carry extra keys, second for the ones
+        // that do not — see the note on JsonMessagePart. Pinned against the real
+        // functions by crates/pahoa-room/tests/message_vectors.jsonl.
+        assert_eq!(
+            json(&JsonMessagePart::player_id(3)),
+            r#"{"text":"3","type":"player_id"}"#
+        );
+        assert_eq!(
+            json(&JsonMessagePart::location_id(1234, 1)),
+            r#"{"text":"1234","player":1,"type":"location_id"}"#
+        );
+        assert_eq!(
+            json(&JsonMessagePart::hint_status(HintStatus::Priority)),
+            r#"{"text":"(priority)","hint_status":30,"type":"hint_status"}"#
         );
     }
 

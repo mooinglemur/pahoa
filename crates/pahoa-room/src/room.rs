@@ -6,11 +6,13 @@
 
 use crate::conn::{Client, ConnId, non_game_verb};
 use crate::effect::{CloseReason, EffectSink, Recipients};
+use crate::hints::HintStore;
 use crate::options::RoomOptions;
-use pahoa_multidata::{DataPackage as NameTables, MultiData, SlotType};
+use pahoa_multidata::{DataPackage as NameTables, Hint, MultiData, SlotType};
 use pahoa_proto::server::*;
 use pahoa_proto::types::*;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_pyrandom::PyRandom;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -49,6 +51,16 @@ pub struct Room {
     client_game_state: HashMap<SlotKey, ClientStatus>,
     name_aliases: HashMap<SlotKey, String>,
     hints_used: HashMap<SlotKey, i64>,
+    hints: HintStore,
+    /// Seeded from the seed name, exactly as the reference does at load
+    /// (`MultiServer.py:535`), so hint ordering is reproducible for a seed.
+    /// Its state belongs in the save.
+    ///
+    /// Seeded here rather than where it is first drawn from, because the draw
+    /// sequence has to start from the same place the reference's does. Nothing
+    /// consumes it until `!hint` picks between candidate hints.
+    #[allow(dead_code)]
+    rng: PyRandom,
 
     /// Free-form client key-value store.
     stored_data: HashMap<String, Value>,
@@ -76,6 +88,16 @@ impl Room {
             }
         }
 
+        // Hints baked into the seed — placed by the generator, not bought.
+        let mut hints = HintStore::default();
+        for (slot, seeded) in &data.precollected_hints {
+            for hint in seeded {
+                hints.upsert((0, *slot), hint.clone());
+            }
+        }
+
+        let rng = PyRandom::seed_str(&data.seed_name);
+
         Self {
             data,
             datapackage,
@@ -87,6 +109,8 @@ impl Room {
             client_game_state,
             name_aliases: HashMap::new(),
             hints_used: HashMap::new(),
+            hints,
+            rng,
             stored_data: HashMap::new(),
             stored_data_subscriptions: HashMap::new(),
             start_time,
@@ -182,11 +206,35 @@ impl Room {
             ClientPacket::Set(s, raw) => self.handle_set(conn, *s, raw, out),
             ClientPacket::SetNotify(s) => self.handle_set_notify(conn, s),
             ClientPacket::Bounce(b, raw) => self.handle_bounce(conn, b, raw, out),
-            // Hints, scouts and chat arrive at M6; ignoring them here matches
-            // the reference's treatment of a command it is not ready for rather
-            // than inventing a refusal it would later have to unpick.
-            _ => {}
+            ClientPacket::LocationScouts(s) => self.handle_location_scouts(conn, s, out),
+            ClientPacket::CreateHints(c) => self.handle_create_hints(conn, c, out),
+            ClientPacket::UpdateHint(u) => self.handle_update_hint(conn, u, out),
+            // Chat and the `!` commands arrive later in M6; ignoring them here
+            // matches the reference's treatment of a command it is not ready
+            // for rather than inventing a refusal it would later have to unpick.
+            ClientPacket::Say(_) => {}
         }
+    }
+
+    /// Refuse a command's arguments without dropping the connection.
+    fn bad_arguments(&self, conn: ConnId, cmd: &str, text: String, out: &mut dyn EffectSink) {
+        out.send(
+            conn,
+            &[ServerPacket::InvalidPacket(InvalidPacket {
+                problem_type: "arguments".into(),
+                original_cmd: Some(cmd.to_string()),
+                text,
+            })],
+        );
+    }
+
+    /// Drop the connection, reproducing a handler that raises in the reference.
+    ///
+    /// `process_client_cmd` is called inside the socket's read loop with no
+    /// per-command guard, so an exception unwinds to `server()`'s handler and
+    /// the client is disconnected (`MultiServer.py:900-917`).
+    fn protocol_error(&self, conn: ConnId, text: String, out: &mut dyn EffectSink) {
+        out.close(conn, CloseReason::ProtocolError(text));
     }
 
     // --- Connect ---------------------------------------------------------
@@ -498,10 +546,8 @@ impl Room {
             ));
         }
         if let Some(rest) = name.strip_prefix("hints_") {
-            // Hints land at M6; the key exists so trackers subscribing to it
-            // get an empty list rather than a missing key.
-            let _ = parse_team_slot(rest)?;
-            return Some(Value::Array(Vec::new()));
+            let key = parse_team_slot(rest)?;
+            return Some(self.hints_json(key));
         }
         None
     }
@@ -838,7 +884,7 @@ impl Room {
                 out.broadcast(Recipients::AllText, &feed);
                 feed.clear();
             }
-            feed.push(self.item_send_message(slot, receiver, net));
+            feed.push(Self::item_send_message(receiver, net));
         }
         if !feed.is_empty() {
             out.broadcast(Recipients::AllText, &feed);
@@ -864,7 +910,35 @@ impl Room {
             );
         }
 
+        // Hints on the locations just checked become "found". Only hints this
+        // slot *finds* can change, so the sweep is bounded by that.
+        for changed in self.recheck_hints(slot) {
+            self.on_changed_hints(changed, out);
+        }
+
         out.mark_dirty();
+    }
+
+    /// Refresh the found flag on every hint `finder` is responsible for, and
+    /// report whose hint lists changed.
+    ///
+    /// The reference does this lazily too, on every read of `_read_hints_*`
+    /// (`MultiServer.py:758-760`). Doing it eagerly here instead is equivalent —
+    /// registering checks is the only thing that can make a hint found — and it
+    /// keeps a tracker polling that key off an O(all hints) path.
+    fn recheck_hints(&mut self, finder: u32) -> Vec<SlotKey> {
+        let Self {
+            hints,
+            location_checks,
+            ..
+        } = self;
+        // Team is 0 throughout; the reference indexes `location_checks` by the
+        // team of the hint list being rechecked, which is the same thing today.
+        hints.recheck(finder, &|slot, location| {
+            location_checks
+                .get(&(0, slot))
+                .is_some_and(|c| c.contains(&location))
+        })
     }
 
     /// Queue an item for a slot, expanding item-link groups to their members.
@@ -965,47 +1039,498 @@ impl Room {
         out
     }
 
-    fn item_send_message(&self, sender: u32, receiver: u32, item: NetworkItem) -> ServerPacket {
-        let sender_game = self.slot_game(sender);
-        let receiver_game = self.slot_game(receiver);
-        let item_name = self
-            .datapackage
-            .get(&receiver_game)
-            .map(|n| n.item_name(item.item))
-            .unwrap_or_else(|| format!("Unknown item (ID:{})", item.item));
-        let location_name = self
-            .datapackage
-            .get(&sender_game)
-            .map(|n| n.location_name(item.location))
-            .unwrap_or_else(|| format!("Unknown location (ID:{})", item.location));
+    /// `json_format_send_event` (`MultiServer.py:1278-1296`).
+    ///
+    /// Ids, not names: the server sends `item_id`/`location_id` parts and each
+    /// client resolves them against its own cached data package. That is also
+    /// why this is cheap enough to run 400k times in a mass release — no name
+    /// lookups and no per-item string building on the hot path.
+    pub fn item_send_message(receiver: u32, item: NetworkItem) -> ServerPacket {
+        let sender = item.player;
+        let mut data = vec![JsonMessagePart::player_id(sender)];
+        if sender == receiver {
+            data.push(JsonMessagePart::text(" found their "));
+            data.push(JsonMessagePart::item_id(item.item, sender, item.flags));
+        } else {
+            data.push(JsonMessagePart::text(" sent "));
+            data.push(JsonMessagePart::item_id(item.item, receiver, item.flags));
+            data.push(JsonMessagePart::text(" to "));
+            data.push(JsonMessagePart::player_id(receiver));
+        }
+        data.push(JsonMessagePart::text(" ("));
+        data.push(JsonMessagePart::location_id(item.location, sender));
+        data.push(JsonMessagePart::text(")"));
 
         ServerPacket::PrintJSON(PrintJson {
-            data: vec![
-                JsonMessagePart::player_id(sender),
-                JsonMessagePart::text(" sent "),
-                JsonMessagePart {
-                    text: Some(item_name),
-                    part_type: Some("item_name".into()),
-                    player: Some(receiver),
-                    flags: Some(item.flags),
-                    ..Default::default()
-                },
-                JsonMessagePart::text(" to "),
-                JsonMessagePart::player_id(receiver),
-                JsonMessagePart::text(" ("),
-                JsonMessagePart {
-                    text: Some(location_name),
-                    part_type: Some("location_name".into()),
-                    player: Some(sender),
-                    ..Default::default()
-                },
-                JsonMessagePart::text(")"),
-            ],
+            data,
             print_type: Some(PrintJsonType::ItemSend),
             receiving: Some(receiver),
             item: Some(item),
             ..Default::default()
         })
+    }
+
+    /// `Hint.as_network_message` (`NetUtils.py:421-441`).
+    pub fn hint_message(hint: &Hint) -> ServerPacket {
+        let mut data = vec![
+            JsonMessagePart::text("[Hint]: "),
+            JsonMessagePart::player_id(hint.receiving_player),
+            JsonMessagePart::text("'s "),
+            JsonMessagePart::item_id(hint.item, hint.receiving_player, hint.item_flags),
+            JsonMessagePart::text(" is at "),
+            JsonMessagePart::location_id(hint.location, hint.finding_player),
+            JsonMessagePart::text(" in "),
+            JsonMessagePart::player_id(hint.finding_player),
+        ];
+        if hint.entrance.is_empty() {
+            data.push(JsonMessagePart::text("'s World"));
+        } else {
+            data.push(JsonMessagePart::text("'s World at "));
+            data.push(JsonMessagePart::typed(
+                "entrance_name",
+                hint.entrance.as_str(),
+            ));
+        }
+        data.push(JsonMessagePart::text(". "));
+        data.push(JsonMessagePart::hint_status(hint.status));
+
+        ServerPacket::PrintJSON(PrintJson {
+            data,
+            print_type: Some(PrintJsonType::Hint),
+            receiving: Some(hint.receiving_player),
+            // `player` here is the *finding* player: the item is described by
+            // where it sits, not by who gets it.
+            item: Some(NetworkItem {
+                item: hint.item,
+                location: hint.location,
+                player: hint.finding_player,
+                flags: hint.item_flags,
+            }),
+            found: Some(hint.found),
+            ..Default::default()
+        })
+    }
+
+    // --- hints -----------------------------------------------------------
+
+    /// The slots a hint for `slot` concerns: an item-link group expands to its
+    /// members, anything else is just itself (`MultiServer.py:775-778`).
+    fn slot_set(&self, slot: u32) -> Vec<u32> {
+        let members = self.group_members_of(slot);
+        if members.is_empty() {
+            vec![slot]
+        } else {
+            members
+        }
+    }
+
+    /// Send and remember hints (`MultiServer.py:805-843`).
+    ///
+    /// `only_new` drops hints the finding player already holds; without it an
+    /// existing hint is re-announced but not re-stored. `persist_even_if_found`
+    /// is what separates a scout — which remembers everything — from `!hint`,
+    /// which does not bank a hint for a location that was already checked.
+    /// `recipients`, when given, restricts *delivery* without restricting what
+    /// gets stored.
+    pub fn notify_hints(
+        &mut self,
+        team: u32,
+        hints: Vec<Hint>,
+        only_new: bool,
+        persist_even_if_found: bool,
+        recipients: Option<&[u32]>,
+        out: &mut dyn EffectSink,
+    ) {
+        let mut hints: Vec<Hint> = if only_new {
+            hints
+                .into_iter()
+                .filter(|h| !self.hints.contains((team, h.finding_player), &h.identity()))
+                .collect()
+        } else {
+            hints
+        };
+        if hints.is_empty() {
+            return;
+        }
+
+        // Found hints first, stably, so a scout of a partly-completed world
+        // reads in the same order the reference produces.
+        hints.sort_by_key(|h| !h.found);
+
+        // Which slots hear about which hints, and in what order.
+        let mut concerns: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        let mut new_hint_events: HashSet<u32> = HashSet::new();
+
+        for (index, hint) in hints.iter().enumerate() {
+            for player in self.slot_set(hint.receiving_player) {
+                concerns.entry(player).or_default().push(index);
+            }
+            // The finder hears about it too, unless it is also the receiver —
+            // or already got this hint above as a member of the receiving group.
+            if hint.receiving_player != hint.finding_player {
+                let list = concerns.entry(hint.finding_player).or_default();
+                if !list.contains(&index) {
+                    list.push(index);
+                }
+            }
+
+            if !hint.found || persist_even_if_found {
+                let finder_key = (team, hint.finding_player);
+                if !self.hints.contains(finder_key, &hint.identity()) {
+                    self.hints.upsert(finder_key, hint.clone());
+                    new_hint_events.insert(hint.finding_player);
+                    for player in self.slot_set(hint.receiving_player) {
+                        self.hints.upsert((team, player), hint.clone());
+                        new_hint_events.insert(player);
+                    }
+                }
+            }
+        }
+
+        let mut events: Vec<u32> = new_hint_events.into_iter().collect();
+        events.sort_unstable();
+        for slot in events {
+            self.on_new_hint((team, slot), out);
+        }
+
+        for (slot, mut indexes) in concerns {
+            if recipients.is_some_and(|r| !r.contains(&slot)) {
+                continue;
+            }
+            if self.by_slot.get(&(team, slot)).is_none_or(Vec::is_empty) {
+                continue;
+            }
+            // Hints this slot finds come first — stably, so the found-first
+            // order above survives inside each group.
+            indexes.sort_by_key(|&i| hints[i].finding_player != slot);
+            let msgs: Vec<ServerPacket> = indexes
+                .iter()
+                .map(|&i| Self::hint_message(&hints[i]))
+                .collect();
+            out.broadcast(Recipients::SlotText((team, slot)), &msgs);
+        }
+
+        out.mark_dirty();
+    }
+
+    /// `LocationScouts` (`MultiServer.py:2016-2035`).
+    ///
+    /// Answers with what each location holds, and optionally banks a hint for
+    /// each. `create_as_hint` is a three-way switch: 0 scouts silently, 1
+    /// announces every resulting hint, 2 announces only the ones that did not
+    /// already exist. Scout-created hints persist even for locations already
+    /// checked, which is what separates a scout from `!hint`.
+    fn handle_location_scouts(
+        &mut self,
+        conn: ConnId,
+        args: cmd::LocationScouts,
+        out: &mut dyn EffectSink,
+    ) {
+        let Some(client) = self.clients.get(&conn) else {
+            return;
+        };
+        let (team, slot) = (client.team, client.slot);
+
+        let mut locations = Vec::with_capacity(args.locations.len());
+        let mut hints = Vec::new();
+        for &location in &args.locations {
+            // The reference indexes its location table directly, so an id this
+            // slot does not own raises and drops the socket.
+            let Some(entry) = self.data.locations.get(slot, location) else {
+                self.protocol_error(
+                    conn,
+                    format!("slot {slot}: LocationScouts for unknown location {location}"),
+                    out,
+                );
+                return;
+            };
+            let entry = *entry;
+            if args.create_as_hint != 0 {
+                hints.extend(self.collect_location_hints(
+                    (team, slot),
+                    slot,
+                    location,
+                    Some(HintStatus::Unspecified),
+                ));
+            }
+            // `player` is the *receiving* player here — inverted from every
+            // other use of `NetworkItem` (`NetUtils.py:93-94`).
+            locations.push(NetworkItem {
+                item: entry.item,
+                location,
+                player: entry.receiver,
+                flags: entry.flags,
+            });
+        }
+
+        self.notify_hints(team, hints, args.create_as_hint == 2, true, None, out);
+        if !locations.is_empty() && args.create_as_hint != 0 {
+            out.mark_dirty();
+        }
+        out.send(
+            conn,
+            &[ServerPacket::LocationInfo(LocationInfo { locations })],
+        );
+    }
+
+    /// `CreateHints` (`MultiServer.py:2037-2087`).
+    ///
+    /// Hints without spending points, which is why the permission rules are the
+    /// interesting part: a slot may hint freely inside its own world, and may
+    /// hint another slot's location only for an item destined to itself — and
+    /// then only with the "unspecified" status, so it cannot editorialize about
+    /// someone else's item.
+    fn handle_create_hints(
+        &mut self,
+        conn: ConnId,
+        args: cmd::CreateHints,
+        out: &mut dyn EffectSink,
+    ) {
+        let Some(client) = self.clients.get(&conn) else {
+            return;
+        };
+        let (team, slot) = (client.team, client.slot);
+        let location_player = args.player.unwrap_or(slot);
+
+        if args.locations.is_empty() {
+            self.bad_arguments(
+                conn,
+                "CreateHints",
+                "CreateHints: No locations specified.".into(),
+                out,
+            );
+            return;
+        }
+
+        // An absent status means "unspecified". An explicit null is a
+        // divergence we accept: Python rejects it as an unknown status, but the
+        // decoded form cannot tell the two apart and no client sends null here.
+        let status = match args.status {
+            None => HintStatus::Unspecified,
+            Some(raw) => match HintStatus::from_i64(raw, &pahoa_multidata::Path::root()) {
+                Ok(s) => s,
+                Err(_) => {
+                    self.bad_arguments(
+                        conn,
+                        "CreateHints",
+                        format!("Unknown Status: {raw} is not a valid HintStatus"),
+                        out,
+                    );
+                    return;
+                }
+            },
+        };
+
+        let mut hints = Vec::new();
+        for &location in &args.locations {
+            let entry = match self.data.locations.get(location_player, location) {
+                Some(e) => *e,
+                None if location_player != slot => {
+                    self.bad_arguments(
+                        conn,
+                        "CreateHints",
+                        "CreateHints: One or more of the locations do not exist for the \
+                         specified off-world player. Please refrain from hinting other slot's \
+                         locations that you don't know contain your items."
+                            .into(),
+                        out,
+                    );
+                    return;
+                }
+                // Own slot, unknown location: the reference indexes and raises.
+                None => {
+                    self.protocol_error(
+                        conn,
+                        format!("slot {slot}: CreateHints for unknown location {location}"),
+                        out,
+                    );
+                    return;
+                }
+            };
+
+            if !self.slot_set(entry.receiver).contains(&slot) {
+                if status != HintStatus::Unspecified {
+                    self.bad_arguments(
+                        conn,
+                        "CreateHints",
+                        "CreateHints: Must use \"unspecified\"/None status for items from \
+                         other players."
+                            .into(),
+                        out,
+                    );
+                    return;
+                }
+                if slot != location_player {
+                    self.bad_arguments(
+                        conn,
+                        "CreateHints",
+                        "CreateHints: Can only create hints for own items or own locations.".into(),
+                        out,
+                    );
+                    return;
+                }
+            }
+
+            hints.extend(self.collect_location_hints(
+                (team, location_player),
+                location_player,
+                location,
+                Some(status),
+            ));
+        }
+
+        self.notify_hints(team, hints, true, true, None, out);
+        out.mark_dirty();
+    }
+
+    /// `UpdateHint` (`MultiServer.py:2089-2129`).
+    ///
+    /// Only the receiving player may reprioritize a hint, and nobody may set
+    /// "found" by hand — that flag is derived from the location actually being
+    /// checked.
+    fn handle_update_hint(
+        &mut self,
+        conn: ConnId,
+        args: cmd::UpdateHint,
+        out: &mut dyn EffectSink,
+    ) {
+        let Some(client) = self.clients.get(&conn) else {
+            return;
+        };
+        let (team, slot) = (client.team, client.slot);
+
+        // Missing hints are ignored rather than refused: a client may be
+        // working from a stale list.
+        let Some(hint) = self
+            .hints
+            .find((team, args.player), args.player, args.location)
+            .cloned()
+        else {
+            return;
+        };
+
+        if !self.slot_set(hint.receiving_player).contains(&slot) {
+            self.bad_arguments(conn, "UpdateHint", "UpdateHint: No Permission".into(), out);
+            return;
+        }
+
+        let Some(raw) = args.status else {
+            return;
+        };
+        let Ok(status) = HintStatus::from_i64(raw, &pahoa_multidata::Path::root()) else {
+            self.bad_arguments(conn, "UpdateHint", "UpdateHint: Invalid Status".into(), out);
+            return;
+        };
+        if status == HintStatus::Found {
+            self.bad_arguments(
+                conn,
+                "UpdateHint",
+                "UpdateHint: Cannot manually update status to \"HINT_FOUND\"".into(),
+                out,
+            );
+            return;
+        }
+
+        // `re_prioritize`: a found hint keeps its status whatever was asked for.
+        let effective = if hint.found {
+            HintStatus::Found
+        } else {
+            status
+        };
+        if effective == hint.status {
+            return;
+        }
+
+        let mut concerned = self.slot_set(hint.receiving_player);
+        concerned.push(hint.finding_player);
+        concerned.sort_unstable();
+        concerned.dedup();
+
+        for &target in &concerned {
+            self.hints
+                .set_status((team, target), hint.finding_player, hint.location, status);
+        }
+        out.mark_dirty();
+        for target in concerned {
+            self.on_changed_hints((team, target), out);
+        }
+    }
+
+    /// One location's hint, reusing an existing one so its status survives
+    /// (`MultiServer.py:1231-1256`).
+    fn collect_location_hints(
+        &self,
+        key: SlotKey,
+        slot: u32,
+        location: i64,
+        status: Option<HintStatus>,
+    ) -> Vec<Hint> {
+        crate::hints::collect_for_location(
+            &self.data,
+            &self.hints,
+            key,
+            slot,
+            location,
+            status,
+            &|s, loc| {
+                self.location_checks
+                    .get(&(key.0, s))
+                    .is_some_and(|c| c.contains(&loc))
+            },
+        )
+    }
+
+    /// A hint was banked: the slot's point balance moved, so tell it
+    /// (`MultiServer.py:872-877`).
+    fn on_new_hint(&mut self, key: SlotKey, out: &mut dyn EffectSink) {
+        self.on_changed_hints(key, out);
+        out.broadcast(
+            Recipients::Slot(key),
+            &[ServerPacket::RoomUpdate(Box::new(RoomUpdate {
+                hint_points: Some(self.slot_points(key)),
+                ..Default::default()
+            }))],
+        );
+    }
+
+    /// Push the slot's whole hint list to anything subscribed to its
+    /// `_read_hints_*` key — how trackers stay current.
+    ///
+    /// Built as a bare map rather than through [`ServerPacket::echo`]: the
+    /// reference constructs a fresh dict here, so the reply carries only `cmd`,
+    /// `key` and `value`, with none of the `original_value`/`slot` fields a
+    /// client-initiated `Set` would produce.
+    fn on_changed_hints(&self, key: SlotKey, out: &mut dyn EffectSink) {
+        let name = format!("_read_hints_{}_{}", key.0, key.1);
+        let Some(subscribers) = self.stored_data_subscriptions.get(&name) else {
+            return;
+        };
+        if subscribers.is_empty() {
+            return;
+        }
+        let mut targets: Vec<ConnId> = subscribers.iter().copied().collect();
+        targets.sort_unstable();
+
+        let mut reply = Map::new();
+        reply.insert("cmd".into(), Value::from("SetReply"));
+        reply.insert("key".into(), Value::from(name));
+        reply.insert("value".into(), self.hints_json(key));
+        out.broadcast(Recipients::These(targets), &[ServerPacket::Echo(reply)]);
+    }
+
+    /// One slot's hints, as the `_read_hints_*` key exposes them.
+    fn hints_json(&self, key: SlotKey) -> Value {
+        Value::Array(
+            self.hints
+                .get(key)
+                .iter()
+                .map(|h| serde_json::to_value(pahoa_proto::Hint::from(h)).expect("hints serialize"))
+                .collect(),
+        )
+    }
+
+    pub fn hints_for(&self, key: SlotKey) -> &[Hint] {
+        self.hints.get(key)
     }
 
     // --- derived views ---------------------------------------------------
@@ -1137,6 +1662,14 @@ impl Room {
                 .map(|c| c.id)
                 .collect(),
             Recipients::Slot(key) => self.by_slot.get(key).cloned().unwrap_or_default(),
+            Recipients::SlotText(key) => self
+                .by_slot
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter(|c| self.clients.get(c).is_some_and(|c| !c.no_text))
+                .copied()
+                .collect(),
             Recipients::These(list) => list.clone(),
         };
         v.sort_unstable();
