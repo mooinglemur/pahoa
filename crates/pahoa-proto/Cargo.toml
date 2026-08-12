@@ -1,0 +1,18 @@
+[package]
+name = "pahoa-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Archipelago network protocol types and JSON codec"
+
+[dependencies]
+pahoa-multidata = { path = "../pahoa-multidata" }
+serde = { version = "1", features = ["derive"] }
+# preserve_order is REQUIRED, not a preference: Python dicts keep insertion order
+# and that order is directly observable in the Retrieved/SetReply payloads we
+# echo back to clients. Without it serde_json::Value is a BTreeMap and every
+# data-storage value silently gets reordered on the wire.
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror.workspace = true

@@ -9,8 +9,7 @@ use pahoa_pickle::PyObj;
 use serde::{Deserialize, Serialize};
 
 /// `NetUtils.SlotType`, an `IntFlag`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotType {
     Spectator = 0b00,
     Player = 0b01,
@@ -40,7 +39,7 @@ impl SlotType {
 }
 
 /// `NetUtils.ClientStatus`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ClientStatus {
     Unknown = 0,
     Connected = 5,
@@ -69,7 +68,7 @@ impl ClientStatus {
 }
 
 /// `NetUtils.HintStatus`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintStatus {
     Unspecified = 0,
     NoPriority = 10,
@@ -96,6 +95,37 @@ impl HintStatus {
         })
     }
 }
+
+/// These are Python `IntEnum`/`IntFlag` types, so their integer value is the
+/// representation — on the wire and in any JSON we emit. serde's default enum
+/// encoding would write the variant *name*, which a client would reject and
+/// which the protocol vectors catch immediately.
+macro_rules! int_enum_serde {
+    ($ty:ty, $name:literal) => {
+        impl Serialize for $ty {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                s: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                s.serialize_u8(*self as u8)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                d: D,
+            ) -> std::result::Result<Self, D::Error> {
+                let v = i64::deserialize(d)?;
+                Self::from_i64(v, &Path::root())
+                    .map_err(|_| serde::de::Error::custom(format!("{v} is not a valid {}", $name)))
+            }
+        }
+    };
+}
+
+int_enum_serde!(SlotType, "SlotType");
+int_enum_serde!(ClientStatus, "ClientStatus");
+int_enum_serde!(HintStatus, "HintStatus");
 
 /// Item classification bits as they appear on the wire.
 ///
