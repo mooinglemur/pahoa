@@ -1,14 +1,20 @@
 //! pahoa — an Archipelago multiworld server.
 //!
-//! At M1 this is a thin shell over the foundation crates: enough to prove the
-//! static build works end to end and to inspect a multidata by hand. The
-//! server itself arrives at M4.
+//! Argument parsing, wiring, and three subcommands: `serve`, `inspect`, and a
+//! `selftest` that exists because a static binary in a `scratch` image has no
+//! test runner and "it linked" is not the same as "it computes the right
+//! answers". Everything with behavior lives in the crates below this one.
 
+mod cli;
 mod inspect;
 mod serve;
 
+use cli::{Opt, flag, value};
+use pahoa_proto::Permission;
+use pahoa_room::RoomOptions;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
@@ -18,14 +24,40 @@ const USAGE: &str = "\
 pahoa — Archipelago multiworld server
 
 USAGE:
+    pahoa serve <file.archipelago> [options]
+                                     Host a multiworld
     pahoa inspect <file.archipelago> [--snapshot <datapackage.json>]
-                                       Summarize a multidata file
-    pahoa serve <file.archipelago> [--snapshot <datapackage.json>]
-                [--port <n>] [--bind <addr>] [--password <pw>]
-                [--save-dir <dir>] [--save-interval <seconds>]
-                                       Host a multiworld
-    pahoa selftest                     Verify the build against known-answer tests
+                                     Summarize a multidata file
+    pahoa selftest                   Verify the build against known-answer tests
     pahoa --version
+
+SERVE OPTIONS
+    --bind <addr>            Listen address (default 0.0.0.0)
+    --port <n>               Listen port (default 38281)
+    --snapshot <file.json>   Data package snapshot, from export-datapackage.py
+    --save-dir <dir>         Where the room persists itself
+    --save-interval <secs>   Save cadence (default 60)
+
+ROOM OPTIONS
+    --password <pw>              Required from every client on connect
+    --server-password <pw>       Enables !admin login; unset refuses it outright
+    --hint-cost <percent>        Hint price, as a percentage of a slot's own
+                                 location count (default 10; 0 makes hints free)
+    --location-check-points <n>  Points earned per check (default 1)
+    --release-mode <mode>        auto, enabled, disabled, goal, auto-enabled
+                                 (default auto)
+    --collect-mode <mode>        as --release-mode (default auto)
+    --remaining-mode <mode>      enabled, disabled, goal (default goal)
+    --countdown-mode <mode>      enabled, disabled, auto (default enabled)
+    --no-item-cheat              Refuse !getitem
+    --compatibility <0|1|2>      0 exact client version match, 1 strict,
+                                 2 permissive (default 2)
+    --use-embedded-options       Take every ROOM OPTION from the seed's own
+                                 server_options instead, overriding the flags
+                                 above where the seed sets them
+
+The reference server's underscored spellings (--hint_cost, --release_mode,
+--disable_item_cheat, --host, …) are accepted as aliases.
 
 The data package snapshot is produced by tools/export-datapackage.py. Without
 it, games are resolved from the seed's embedded package alone, which covers
@@ -37,72 +69,176 @@ nothing across a restart. --save-interval (default 60) is how much play the
 room may lose on an unclean stop.
 ";
 
+const SERVE_OPTS: &[Opt] = &[
+    flag("--help", &["-h"]),
+    value("--bind", &["--host"]),
+    value("--port", &[]),
+    value("--snapshot", &[]),
+    value("--save-dir", &[]),
+    value("--save-interval", &[]),
+    value("--password", &[]),
+    value("--server-password", &["--server_password"]),
+    value("--hint-cost", &["--hint_cost"]),
+    value("--location-check-points", &["--location_check_points"]),
+    value("--release-mode", &["--release_mode"]),
+    value("--collect-mode", &["--collect_mode"]),
+    value("--remaining-mode", &["--remaining_mode"]),
+    value("--countdown-mode", &["--countdown_mode"]),
+    flag("--no-item-cheat", &["--disable_item_cheat"]),
+    value("--compatibility", &[]),
+    flag("--use-embedded-options", &["--use_embedded_options"]),
+];
+
+const INSPECT_OPTS: &[Opt] = &[flag("--help", &["-h"]), value("--snapshot", &[])];
+
+/// `!release` and `!collect` test their mode with `"enabled" in mode`, so every
+/// spelling means something for them. `!remaining` and `!countdown` compare for
+/// **equality**, so a value like `auto-enabled` would match no branch and sit
+/// there doing nothing — which is why their choices are narrower here, as they
+/// are in the reference's own argparse (`MultiServer.py:2618-2643`).
+const RELEASE_MODES: &[Permission] = &[
+    Permission::Auto,
+    Permission::Enabled,
+    Permission::Disabled,
+    Permission::Goal,
+    Permission::AutoEnabled,
+];
+const REMAINING_MODES: &[Permission] =
+    &[Permission::Enabled, Permission::Disabled, Permission::Goal];
+const COUNTDOWN_MODES: &[Permission] =
+    &[Permission::Enabled, Permission::Disabled, Permission::Auto];
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.first().map(String::as_str);
+    let Some((cmd, rest)) = args.split_first() else {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    };
 
-    let result = match cmd {
-        Some("--version" | "-V") => {
+    let result = match cmd.as_str() {
+        "--version" | "-V" => {
             println!("pahoa {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
-        Some("--help" | "-h") | None => {
+        "--help" | "-h" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
         }
-        Some("serve") => match args.get(1) {
-            Some(path) => {
-                let opt = |name: &str| {
-                    args.iter()
-                        .position(|a| a == name)
-                        .and_then(|i| args.get(i + 1))
-                        .cloned()
-                };
-                let snapshot = opt("--snapshot");
-                let save_dir = opt("--save-dir");
-                serve::run(serve::ServeArgs {
-                    multidata: Path::new(path),
-                    snapshot: snapshot.as_deref().map(Path::new),
-                    port: match opt("--port") {
-                        Some(p) => match p.parse() {
-                            Ok(v) => v,
-                            Err(_) => return report(Err(format!("bad --port {p:?}"))),
-                        },
-                        None => 38281,
-                    },
-                    bind: opt("--bind").unwrap_or_else(|| "0.0.0.0".to_string()),
-                    password: opt("--password"),
-                    save_dir: save_dir.as_deref().map(Path::new),
-                    save_interval: match opt("--save-interval") {
-                        Some(s) => match s.parse::<u64>() {
-                            // Zero would spin the actor on a timer that fires
-                            // continuously, so it is an error rather than a
-                            // clever way to ask for constant saving.
-                            Ok(v) if v > 0 => std::time::Duration::from_secs(v),
-                            _ => return report(Err(format!("bad --save-interval {s:?}"))),
-                        },
-                        None => std::time::Duration::from_secs(60),
-                    },
-                })
-            }
-            None => Err("serve needs a multidata path".to_string()),
-        },
-        Some("selftest") => selftest(),
-        Some("inspect") => match args.get(1) {
-            Some(path) => {
-                let snapshot = args
-                    .iter()
-                    .position(|a| a == "--snapshot")
-                    .and_then(|i| args.get(i + 1))
-                    .map(Path::new);
-                inspect::run(Path::new(path), snapshot)
-            }
-            None => Err("inspect needs a path".to_string()),
-        },
-        Some(other) => Err(format!("unknown command {other:?}\n\n{USAGE}")),
+        "serve" => serve_command(rest),
+        "inspect" => inspect_command(rest),
+        "selftest" => selftest(),
+        other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     };
 
     report(result)
+}
+
+fn serve_command(argv: &[String]) -> Result<(), String> {
+    let args = cli::parse(argv, SERVE_OPTS)?;
+    if args.is_set("--help") {
+        print!("{USAGE}");
+        return Ok(());
+    }
+    let multidata = one_path(&args, "serve")?;
+
+    let mut options = RoomOptions {
+        password: args.get("--password").map(str::to_string),
+        server_password: args.get("--server-password").map(str::to_string),
+        ..Default::default()
+    };
+    if let Some(v) = args.number::<u32>("--hint-cost")? {
+        options.hint_cost = v;
+    }
+    if let Some(v) = args.number::<u32>("--location-check-points")? {
+        options.location_check_points = v;
+    }
+    if let Some(v) = args.get("--release-mode") {
+        options.release_mode = mode("--release-mode", v, RELEASE_MODES)?;
+    }
+    if let Some(v) = args.get("--collect-mode") {
+        options.collect_mode = mode("--collect-mode", v, RELEASE_MODES)?;
+    }
+    if let Some(v) = args.get("--remaining-mode") {
+        options.remaining_mode = mode("--remaining-mode", v, REMAINING_MODES)?;
+    }
+    if let Some(v) = args.get("--countdown-mode") {
+        options.countdown_mode = mode("--countdown-mode", v, COUNTDOWN_MODES)?;
+    }
+    if args.is_set("--no-item-cheat") {
+        options.item_cheat = false;
+    }
+    // Parsed wide and range-checked, so that `--compatibility 7` is told what
+    // the choices are rather than "expected a number".
+    if let Some(v) = args.number::<i64>("--compatibility")? {
+        if !(0..=2i64).contains(&v) {
+            return Err(format!("--compatibility: expected 0, 1 or 2, got {v}"));
+        }
+        options.compatibility = v as u8;
+    }
+
+    let save_interval = match args.number::<u64>("--save-interval")? {
+        // Zero would spin the actor on a timer that fires continuously, so it
+        // is an error rather than a clever way to ask for constant saving.
+        Some(0) => return Err("--save-interval: must be at least 1 second".to_string()),
+        Some(v) => Duration::from_secs(v),
+        None => Duration::from_secs(60),
+    };
+
+    serve::run(serve::ServeArgs {
+        multidata: Path::new(multidata),
+        snapshot: args.get("--snapshot").map(Path::new),
+        port: args.number("--port")?.unwrap_or(38281),
+        bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
+        save_dir: args.get("--save-dir").map(Path::new),
+        save_interval,
+        options,
+        use_embedded_options: args.is_set("--use-embedded-options"),
+    })
+}
+
+fn inspect_command(argv: &[String]) -> Result<(), String> {
+    let args = cli::parse(argv, INSPECT_OPTS)?;
+    if args.is_set("--help") {
+        print!("{USAGE}");
+        return Ok(());
+    }
+    let path = one_path(&args, "inspect")?;
+    inspect::run(Path::new(path), args.get("--snapshot").map(Path::new))
+}
+
+/// Exactly one multidata path.
+///
+/// A second one is an error rather than a file quietly ignored: the shape it
+/// arrives in is a shell glob that matched more seeds than the operator meant,
+/// and serving the first of them silently is the wrong answer.
+fn one_path<'a>(args: &'a cli::Parsed, cmd: &str) -> Result<&'a str, String> {
+    match args.positional.as_slice() {
+        [only] => Ok(only.as_str()),
+        [] => Err(format!("{cmd} needs a multidata path")),
+        many => Err(format!(
+            "{cmd} takes one multidata path, got {}: {}",
+            many.len(),
+            many.join(" ")
+        )),
+    }
+}
+
+/// Strict mode parsing, for the command line only.
+///
+/// [`Permission::from_text`] is deliberately lenient — it reproduces the
+/// reference's substring test, where an unrecognized word quietly becomes
+/// `disabled`. That is right for a multidata field and wrong for a flag: an
+/// operator who types `--release-mode enable` should be told, not handed a room
+/// where nobody can release and no message saying so.
+fn mode(name: &str, text: &str, choices: &[Permission]) -> Result<Permission, String> {
+    choices
+        .iter()
+        .copied()
+        .find(|p| p.as_text() == text)
+        .ok_or_else(|| {
+            let names: Vec<&str> = choices.iter().map(|p| p.as_text()).collect();
+            format!("{name}: expected one of {}, got {text:?}", names.join(" "))
+        })
 }
 
 fn report(result: Result<(), String>) -> ExitCode {

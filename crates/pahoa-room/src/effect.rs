@@ -68,6 +68,26 @@ pub trait EffectSink {
 
     /// Room state changed and should be persisted at the next save point.
     fn mark_dirty(&mut self);
+
+    /// This connection's broadcast-filtering state changed.
+    ///
+    /// **Ordering is the entire point of this being an effect** rather than
+    /// something the transport reads back afterwards. A transport filters
+    /// [`Recipients::AllText`] against its own copy of `auth`, so if it learns
+    /// about a client authenticating only after the handler returns, that
+    /// client is filtered out of its own join announcement — it watches
+    /// everyone else arrive and never sees itself.
+    ///
+    /// Defaulted to nothing, because only a real transport keeps a second copy
+    /// of this state; a recorder resolves recipients against the room directly.
+    fn membership_changed(
+        &mut self,
+        _conn: ConnId,
+        _auth: bool,
+        _no_text: bool,
+        _slot: Option<crate::SlotKey>,
+    ) {
+    }
 }
 
 /// An [`EffectSink`] that records everything, for tests.

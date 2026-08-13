@@ -19,6 +19,7 @@ mimalloc = ["dep:mimalloc"]
 [dependencies]
 pahoa-multidata = { path = "../pahoa-multidata" }
 pahoa-net = { path = "../pahoa-net" }
+pahoa-proto = { path = "../pahoa-proto" }
 pahoa-room = { path = "../pahoa-room" }
 tokio = { version = "1", features = ["signal", "rt"] }
 pahoa-pickle = { path = "../pahoa-pickle" }

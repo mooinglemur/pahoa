@@ -393,3 +393,54 @@ async fn many_clients_sustain_a_release_cascade() {
 
     server.shutdown().await;
 }
+
+/// A joining client must receive its *own* join announcement.
+///
+/// The shards filter `AllText` against their own copy of `auth`, and the room
+/// published that flag only after the whole handler returned — so the join
+/// broadcast went out while the shard still saw the joiner as unauthenticated,
+/// and everyone received the message except the client it was about.
+///
+/// This cannot be caught a level down: `Recorder` resolves recipients against
+/// the room itself, where the flag was already set, so the room-level tests all
+/// passed. It only exists where two copies of the state do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_joining_client_sees_its_own_join_announcement() {
+    let Some(data) = load(FIXTURE) else {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    };
+    let (_, name, game) = first_player(&data);
+    let server = start(data, RoomOptions::default()).await;
+
+    let mut client = Client::connect(server.local_addr).await;
+    client.wait_for("RoomInfo").await;
+    client.send(connect_packet(&name, &game, 0b111)).await;
+
+    let mut join_text = None;
+    'scan: for _ in 0..50 {
+        for packet in client.recv_frame().await {
+            match packet["cmd"].as_str() {
+                Some("PrintJSON") if packet["type"] == json!("Join") => {
+                    join_text = Some(
+                        packet["data"]
+                            .as_array()
+                            .expect("PrintJSON carries data")
+                            .iter()
+                            .filter_map(|p| p["text"].as_str())
+                            .collect::<String>(),
+                    );
+                }
+                // Sent after the announcement, so its arrival bounds the scan.
+                Some("Connected") => break 'scan,
+                _ => {}
+            }
+        }
+    }
+
+    let text = join_text.expect("the joining client should receive its own Join");
+    assert!(text.contains(&name), "{text}");
+    assert!(text.contains("has joined."), "{text}");
+
+    server.shutdown().await;
+}

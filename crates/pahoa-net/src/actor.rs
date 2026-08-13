@@ -90,6 +90,27 @@ impl EffectSink for Dispatcher<'_> {
         self.shards.broadcast(to, msg);
     }
 
+    fn membership_changed(
+        &mut self,
+        conn: ConnId,
+        auth: bool,
+        no_text: bool,
+        slot: Option<(u32, u32)>,
+    ) {
+        // Told immediately rather than queued into `updates`, because the
+        // effect that follows is the join broadcast and the shard must already
+        // know this connection counts as a recipient.
+        self.shards.tell(
+            conn,
+            ShardMsg::Update {
+                conn,
+                auth,
+                no_text,
+                slot,
+            },
+        );
+    }
+
     fn close(&mut self, conn: ConnId, reason: CloseReason) {
         let text = match reason {
             CloseReason::ProtocolError(_) => "protocol error",

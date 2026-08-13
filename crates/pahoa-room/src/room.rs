@@ -6,7 +6,7 @@
 
 mod commands;
 
-use crate::conn::{Client, ConnId, non_game_verb};
+use crate::conn::{Client, ConnId, non_game_verb, python_list_repr};
 use crate::effect::{CloseReason, EffectSink, Recipients};
 use crate::hints::HintStore;
 use crate::options::RoomOptions;
@@ -214,8 +214,11 @@ impl Room {
             subscribers.remove(&conn);
         }
 
-        // Only announce the departure once the slot has nobody left, and only
-        // reset status when the last connection goes (`MultiServer.py:990-1007`).
+        // Only the *status reset* waits for the slot to be empty
+        // (`MultiServer.py:990-993`). The announcement does not: the reference
+        // broadcasts it for every departing connection, outside that guard.
+        // Having it inside meant a slot with a game and a tracker attached said
+        // nothing at all when one of them went away.
         if self.by_slot.get(&key).is_none_or(Vec::is_empty) {
             self.client_game_state
                 .entry(key)
@@ -225,24 +228,31 @@ impl Room {
                     }
                 })
                 .or_insert(ClientStatus::Unknown);
-
-            let verb = non_game_verb(&client.tags).unwrap_or("playing");
-            let text = format!(
-                "{} ({}) has left the game. ({verb})",
-                self.slot_alias(key),
-                self.slot_game(client.slot),
-            );
-            out.broadcast(
-                Recipients::AllText,
-                &[ServerPacket::PrintJSON(PrintJson {
-                    data: vec![JsonMessagePart::text(text)],
-                    print_type: Some(PrintJsonType::Part),
-                    team: Some(client.team),
-                    slot: Some(client.slot),
-                    ..Default::default()
-                })],
-            );
         }
+
+        // `MultiServer.py:1001-1006`. A non-game client "stopped tracking"
+        // rather than "left", so the verb is a phrase and not a parenthetical.
+        let verb = match non_game_verb(&client.tags) {
+            Some(v) => format!("stopped {v}"),
+            None => "left".to_string(),
+        };
+        let text = format!(
+            "{} (Team #{}) has {verb} the game. Client({}), {}.",
+            self.slot_alias(key),
+            client.team + 1,
+            client.version,
+            python_list_repr(&client.tags),
+        );
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                print_type: Some(PrintJsonType::Part),
+                team: Some(client.team),
+                slot: Some(client.slot),
+                ..Default::default()
+            })],
+        );
     }
 
     // --- packet dispatch -------------------------------------------------
@@ -426,6 +436,11 @@ impl Room {
 
         if !was_authed {
             self.clients.get_mut(&conn).expect("registered").auth = true;
+            // Before the announcement, not after: the transport filters
+            // broadcasts on its own copy of `auth`, so a late update leaves the
+            // joining client out of its own join message.
+            let client = &self.clients[&conn];
+            out.membership_changed(conn, true, client.no_text, Some((client.team, client.slot)));
             self.announce_join(conn, out);
         }
 
@@ -436,12 +451,16 @@ impl Room {
         let client = &self.clients[&conn];
         let key = (client.team, client.slot);
         let verb = non_game_verb(&client.tags).unwrap_or("playing");
+        // `MultiServer.py:972-976`, verbatim. Every part of the shape matters
+        // because players read it: the parenthesized field is the *team*, the
+        // verb precedes the game, and the trailing field is the tag list.
         let text = format!(
-            "{} ({}) has joined. Client({}), {}.",
+            "{} (Team #{}) {verb} {} has joined. Client({}), {}.",
             self.slot_alias(key),
+            client.team + 1,
             self.slot_game(client.slot),
             client.version,
-            verb,
+            python_list_repr(&client.tags),
         );
         out.broadcast(
             Recipients::AllText,
@@ -451,6 +470,23 @@ impl Room {
                 team: Some(client.team),
                 slot: Some(client.slot),
                 tags: Some(client.tags.clone()),
+                ..Default::default()
+            })],
+        );
+
+        // The reference follows every join with this, privately
+        // (`MultiServer.py:977-982`). It is how a player discovers `!help`
+        // exists at all, so its absence is a functional gap, not a cosmetic one.
+        out.send(
+            conn,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(
+                    "Now that you are connected, you can use !help to list commands \
+                     to run via the server. If your client supports it, you may have \
+                     additional local commands you can list with /help."
+                        .to_string(),
+                )],
+                print_type: Some(PrintJsonType::Tutorial),
                 ..Default::default()
             })],
         );

@@ -24,15 +24,70 @@ pub const NON_GAME_TAGS: [&str; 3] = ["HintGame", "Tracker", "TextOnly"];
 
 /// The join/leave verb each non-game tag produces (`MultiServer.py:956`).
 pub fn non_game_verb(tags: &[String]) -> Option<&'static str> {
-    for tag in tags {
-        match tag.as_str() {
-            "HintGame" => return Some("hinting"),
-            "Tracker" => return Some("tracking"),
-            "TextOnly" => return Some("viewing"),
-            _ => {}
+    // Priority follows the reference *dict's* order rather than the client's
+    // tag order: it iterates `_non_game_messages` and breaks on the first tag
+    // the client carries, so `["Tracker", "HintGame"]` is "hinting".
+    for (tag, verb) in [
+        ("HintGame", "hinting"),
+        ("Tracker", "tracking"),
+        ("TextOnly", "viewing"),
+    ] {
+        if tags.iter().any(|t| t == tag) {
+            return Some(verb);
         }
     }
     None
+}
+
+/// Render tags the way Python renders a list of strings.
+///
+/// The join and leave announcements interpolate `client.tags` directly
+/// (`MultiServer.py:975`, `:1005`), so the wire text carries a Python list
+/// repr — `['Tracker', 'DeathLink']`, single-quoted, comma-space separated.
+/// Clients display this verbatim, which makes it observable formatting rather
+/// than an internal detail.
+pub fn python_list_repr(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&python_str_repr(item));
+    }
+    out.push(']');
+    out
+}
+
+/// `repr()` of one string: single quotes, unless the value contains a single
+/// quote and no double quote, which is when Python switches.
+fn python_str_repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            // Python escapes the C0 range and DEL as \xNN; anything printable
+            // above ASCII it leaves alone.
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -156,5 +211,44 @@ mod tests {
         assert_eq!(non_game_verb(&tags(&["TextOnly"])), Some("viewing"));
         assert_eq!(non_game_verb(&tags(&["HintGame"])), Some("hinting"));
         assert_eq!(non_game_verb(&tags(&["AP"])), None);
+    }
+
+    /// The reference scans its own table and breaks on the first hit, so the
+    /// client's tag order does not decide the verb.
+    #[test]
+    fn verb_priority_is_the_servers_not_the_clients() {
+        assert_eq!(
+            non_game_verb(&tags(&["Tracker", "HintGame"])),
+            Some("hinting")
+        );
+        assert_eq!(
+            non_game_verb(&tags(&["TextOnly", "Tracker"])),
+            Some("tracking")
+        );
+    }
+
+    #[test]
+    fn tags_render_as_a_python_list() {
+        assert_eq!(python_list_repr(&[]), "[]");
+        assert_eq!(python_list_repr(&tags(&["AP"])), "['AP']");
+        assert_eq!(
+            python_list_repr(&tags(&["Tracker", "Axolotl", "DeathLink"])),
+            "['Tracker', 'Axolotl', 'DeathLink']"
+        );
+    }
+
+    /// Tags come from the client, so the repr has to survive hostile ones the
+    /// same way Python's does rather than producing something unquotable.
+    #[test]
+    fn quoting_follows_pythons_repr_rules() {
+        // A single quote inside flips the outer quote to double, as Python's.
+        assert_eq!(python_list_repr(&tags(&["it's"])), "[\"it's\"]");
+        // Unless a double quote is present too, and then it escapes instead.
+        assert_eq!(python_list_repr(&tags(&["it's \"x\""])), r#"['it\'s "x"']"#);
+        assert_eq!(python_list_repr(&tags(&["a\\b"])), r"['a\\b']");
+        assert_eq!(python_list_repr(&tags(&["a\nb"])), r"['a\nb']");
+        assert_eq!(python_list_repr(&tags(&["a\u{7}b"])), r"['a\x07b']");
+        // Printable non-ASCII passes through, as it does in Python 3.
+        assert_eq!(python_list_repr(&tags(&["héllo"])), "['héllo']");
     }
 }

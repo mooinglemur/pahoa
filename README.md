@@ -1,2 +1,119 @@
 # pahoa
 Alternative Archipelago Multiworld MultiServer implementation written in pure Rust.  Designed to be deployed containerized per multiworld. Designed mainly to solve concurrency and performance limitations of the reference implementation.
+
+## Building
+
+```sh
+cargo build --release
+```
+
+The shipping artifact is a fully static musl binary in a `scratch` image, built
+and verified — linkage *and* known-answer tests — by the `Dockerfile`:
+
+```sh
+docker build -t pahoa .
+```
+
+## Usage
+
+```
+pahoa serve <file.archipelago> [options]     Host a multiworld
+pahoa inspect <file.archipelago>             Summarize a multidata file
+pahoa selftest                               Verify the build against known-answer tests
+pahoa --version
+```
+
+`pahoa --help` prints the same reference as below. The reference server's
+underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
+`--host`, …) are accepted as aliases everywhere, so muscle memory carries over.
+
+### Serving
+
+| option | default | |
+|---|---|---|
+| `--bind <addr>` | `0.0.0.0` | Listen address |
+| `--port <n>` | `38281` | Listen port |
+| `--snapshot <file.json>` | — | Data package snapshot, from `tools/export-datapackage.py` |
+| `--save-dir <dir>` | — | Where the room persists itself |
+| `--save-interval <secs>` | `60` | Save cadence |
+
+```sh
+pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
+```
+
+Without `--snapshot`, games resolve from the seed's own embedded data package.
+That covers item and location names and ids for every game in the seed, so a
+room runs fine on it; what it never carries is each world's hint blacklist, so
+`!hint` cannot refuse a non-hintable name. The server warns at startup for the
+games affected.
+
+**`--save-dir` is optional and the room says so loudly when it is missing** —
+without it nothing survives a restart, which is right for a throwaway room and a
+data-loss bug for anything else. The directory is ordinary: one room per
+directory, claimed with an exclusive lock held for the life of the process, so a
+second `pahoa serve` pointed at it exits rather than silently overwriting. The
+save cadence is what bounds how much play an unclean stop can lose; the flush on
+shutdown is a nicety, since SIGKILL, node loss and OOM kills all skip it.
+
+### Room options
+
+| option | default | |
+|---|---|---|
+| `--password <pw>` | — | Required from every client on connect |
+| `--server-password <pw>` | — | Enables `!admin login`; unset refuses it outright |
+| `--hint-cost <percent>` | `10` | Hint price as a percentage of a slot's own location count; `0` makes hints free |
+| `--location-check-points <n>` | `1` | Points earned per check |
+| `--release-mode <mode>` | `auto` | `auto`, `enabled`, `disabled`, `goal`, `auto-enabled` |
+| `--collect-mode <mode>` | `auto` | as `--release-mode` |
+| `--remaining-mode <mode>` | `goal` | `enabled`, `disabled`, `goal` |
+| `--countdown-mode <mode>` | `enabled` | `enabled`, `disabled`, `auto` |
+| `--no-item-cheat` | off | Refuse `!getitem` |
+| `--compatibility <0\|1\|2>` | `2` | `0` exact client version match, `1` strict, `2` permissive |
+| `--use-embedded-options` | off | Take every room option above from the seed instead |
+
+The mode choices are narrower for `--remaining-mode` and `--countdown-mode`
+because those two commands compare their mode for *equality*, where `!release`
+and `!collect` test it with `"enabled" in mode`. A value outside the list would
+match no branch and sit there doing nothing, so it is rejected instead.
+
+`--use-embedded-options` reads the `server_options` a seed was generated with
+and applies them **over** the flags above — the seed wins. That direction is the
+reference's (`MultiServer.py:558-560`) and is the point of the flag: it honors
+what the generator was configured with rather than what whoever restarts the
+room happens to type. It matters more than it sounds, because real seeds rarely
+agree with the defaults — of the four in `crates/pahoa-pickle/tests/fixtures`,
+all four set
+`collect_mode: disabled` against a default of `auto`, and their `hint_cost`
+values are 5 and 20 against a default of 10. The room prints what it took, and
+warns about anything it recognized but could not use.
+
+### Inspecting
+
+```sh
+pahoa inspect seed.archipelago [--snapshot <datapackage.json>]
+```
+
+Slot, game, location and hint counts, plus what the data package resolved to.
+`tools/inspect-multidata.py` is the reference implementation of this output and
+`crates/pahoa/tests/inspect_differential.rs` compares the two line for line.
+
+## Not implemented yet
+
+Phase 1 — the protocol-complete headless server — is done: real clients play a
+real seed to completion, and a 6000-connection load run sustains a mass release.
+Deliberately absent so far, and reachable from no flag:
+
+- **TLS and the PROXY protocol.** Terminate at an ingress for now.
+- **The `/` console command set**, and therefore what `!admin` dispatches into.
+  It overlaps the admin REST API heavily and is worth writing once, with it.
+- **Per-slot passwords**, the lobby integration, the tracker APIs and the admin
+  REST API.
+- `--loglevel`, `--logtime`, `--auto_shutdown` and `--disable_save`, which the
+  reference has. The first two want a logging surface pahoa does not have yet;
+  the last two are covered by omitting `--save-dir`.
+
+## Development
+
+`tools/README.md` covers the differential harness against the Python server, the
+generators behind the committed test vectors, the load driver, and the Autobahn
+WebSocket conformance run.

@@ -16,6 +16,10 @@ pub enum AcceptError {
     Timeout(Duration),
     #[error("connection closed during the handshake")]
     Closed,
+    #[error("client tried TLS on a plaintext port; terminate TLS at a proxy")]
+    Tls,
+    #[error("not an HTTP request")]
+    NotHttp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +76,7 @@ where
         if read == 0 {
             return Err(AcceptError::Closed);
         }
+        sniff(&buf)?;
     };
 
     let accepted = request
@@ -107,12 +112,51 @@ where
     })
 }
 
+/// Recognize a connection that cannot become an HTTP request, as soon as it is
+/// recognizable, rather than waiting for a `\r\n\r\n` that will never arrive.
+///
+/// The case that motivated this: a client that tries `wss://` first and falls
+/// back to `ws://` sends a TLS ClientHello and then waits for a ServerHello.
+/// Those bytes contain no header terminator and the peer sends nothing further,
+/// so the read loop sat here for the full 30-second handshake timeout and the
+/// fallback looked like a hang. Neither side is at fault; nobody says anything.
+fn sniff(buf: &[u8]) -> Result<(), AcceptError> {
+    // A TLS record: handshake content type, then a major version of 3 (every
+    // version from SSL 3.0 to TLS 1.3 puts a 3 here, since 1.3 keeps the
+    // legacy record version for compatibility).
+    if buf.first() == Some(&0x16) {
+        return match buf.get(1) {
+            // Not enough yet to tell TLS from a stray byte; read on.
+            None => Ok(()),
+            Some(0x03) => Err(AcceptError::Tls),
+            Some(_) => Err(AcceptError::NotHttp),
+        };
+    }
+    // Every HTTP method is uppercase ASCII, and an upgrade must be a `GET`.
+    // Anything else is binary garbage or a protocol we do not speak.
+    match buf.first() {
+        Some(c) if !c.is_ascii_uppercase() => Err(AcceptError::NotHttp),
+        _ => Ok(()),
+    }
+}
+
 /// Answer a request that is not a WebSocket upgrade, so a browser or health
 /// check gets an HTTP status rather than a silently dropped socket.
 pub async fn reject<S>(stream: &mut S, error: &AcceptError)
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
+    // A TLS peer cannot read an HTTP response — it is waiting for a ServerHello
+    // and would report a protocol error on anything else. A fatal alert is the
+    // one thing it does understand, and it turns "connection reset" into a
+    // clean handshake failure the client can fall back from immediately.
+    if matches!(error, AcceptError::Tls) {
+        const HANDSHAKE_FAILURE: &[u8] = &[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28];
+        let _ = stream.write_all(HANDSHAKE_FAILURE).await;
+        let _ = stream.flush().await;
+        return;
+    }
+
     let status = match error {
         AcceptError::Handshake(HandshakeError::BadVersion(_)) => "426 Upgrade Required",
         AcceptError::Handshake(HandshakeError::HeadersTooLarge(_)) => {
@@ -265,6 +309,50 @@ mod tests {
             response.starts_with("HTTP/1.1 400 Bad Request"),
             "got {response:?}"
         );
+    }
+
+    /// A client that tries `wss://` before `ws://` used to hang here for the
+    /// full handshake timeout: a ClientHello contains no `\r\n\r\n` and the
+    /// peer then waits for a ServerHello, so neither side says anything.
+    #[tokio::test]
+    async fn a_tls_client_hello_fails_at_once_rather_than_at_the_timeout() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        // Opening bytes of a real ClientHello: handshake record, legacy
+        // version, record length, then the handshake header.
+        client
+            .write_all(&[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc])
+            .await
+            .unwrap();
+
+        let config = AcceptConfig {
+            timeout: Duration::from_secs(30),
+            ..config()
+        };
+        let started = std::time::Instant::now();
+        let error = accept(&mut server, &config).await.unwrap_err();
+
+        assert!(matches!(error, AcceptError::Tls), "{error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "took {:?}, so it waited on the timeout",
+            started.elapsed()
+        );
+
+        // And the peer gets a fatal alert, which its TLS stack reports as a
+        // clean handshake failure instead of a connection reset.
+        reject(&mut server, &error).await;
+        drop(server);
+        let mut alert = Vec::new();
+        client.read_to_end(&mut alert).await.unwrap();
+        assert_eq!(alert, [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28]);
+    }
+
+    #[tokio::test]
+    async fn binary_garbage_is_refused_rather_than_waited_on() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        client.write_all(&[0x00, 0x01, 0x02, 0x03]).await.unwrap();
+        let error = accept(&mut server, &config()).await.unwrap_err();
+        assert!(matches!(error, AcceptError::NotHttp), "{error:?}");
     }
 
     #[tokio::test]

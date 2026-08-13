@@ -60,6 +60,9 @@ pub struct Budget {
 #[derive(Debug, Default)]
 pub struct ConnBudget {
     queued: AtomicUsize,
+    /// Bytes admitted above the per-connection share by the progress guarantee
+    /// below, so they do not lock out the traffic queued behind them.
+    oversize: AtomicUsize,
 }
 
 impl Budget {
@@ -78,7 +81,19 @@ impl Budget {
         // Per-connection first, so one client hitting its own ceiling is
         // attributed to that client rather than to whoever happens to be next
         // when the global budget runs out.
-        if conn.queued.load(Ordering::Relaxed) + size > self.per_connection {
+        //
+        // The oversize allowance is what makes a large *single* message
+        // deliverable at all. Without it any packet bigger than the share was
+        // undeliverable by construction, and one routinely is: `GetDataPackage`
+        // on a 35-game seed is 2.5 MiB against a 256 KiB share, so a client
+        // that asked for the data package — which every real client does when
+        // its cached checksums miss — was closed as "too slow" while sitting
+        // completely idle. The budget exists to bound *accumulation*; capping
+        // one legitimate payload is a correctness bug wearing its clothes.
+        let queued = conn.queued.load(Ordering::Relaxed);
+        let counted = queued.saturating_sub(conn.oversize.load(Ordering::Relaxed));
+        let oversized = queued == 0 && size > self.per_connection;
+        if !oversized && counted + size > self.per_connection {
             return false;
         }
         let total = QUEUED.fetch_add(size, Ordering::Relaxed) + size;
@@ -88,6 +103,9 @@ impl Budget {
         }
         PEAK.fetch_max(total, Ordering::Relaxed);
         conn.queued.fetch_add(size, Ordering::Relaxed);
+        if oversized {
+            conn.oversize.fetch_add(size, Ordering::Relaxed);
+        }
         true
     }
 
@@ -95,6 +113,15 @@ impl Budget {
     pub fn release(conn: &ConnBudget, size: usize) {
         conn.queued.fetch_sub(size, Ordering::Relaxed);
         QUEUED.fetch_sub(size, Ordering::Relaxed);
+        // An oversize allowance is only ever claimed on an empty queue, so that
+        // message is first in line and the writer drains in order — the first
+        // release is therefore the one that clears it.
+        let _ =
+            conn.oversize
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| match held {
+                    0 => None,
+                    held => Some(held.saturating_sub(size)),
+                });
     }
 
     /// Release everything a connection still holds, when it goes away without
@@ -102,6 +129,7 @@ impl Budget {
     /// the room slowly refuses to send anything at all.
     pub fn release_all(conn: &ConnBudget) {
         let held = conn.queued.swap(0, Ordering::Relaxed);
+        conn.oversize.store(0, Ordering::Relaxed);
         QUEUED.fetch_sub(held, Ordering::Relaxed);
     }
 }
@@ -123,6 +151,74 @@ mod tests {
         QUEUED.store(0, Ordering::Relaxed);
         PEAK.store(0, Ordering::Relaxed);
         guard
+    }
+
+    /// `GetDataPackage` on a 35-game seed is 2.5 MiB against a 256 KiB share.
+    /// Before the progress guarantee it could never be sent, so asking for the
+    /// data package disconnected the client for being "too slow" while idle.
+    #[test]
+    fn one_message_larger_than_the_share_is_still_deliverable() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1024);
+        let conn = ConnBudget::default();
+
+        assert!(
+            budget.reserve(&conn, 4096),
+            "an idle connection must be able to make progress on any one message"
+        );
+
+        // And it must not lock out what queues up behind it: the oversize
+        // message is not counted against the share for later admissions.
+        assert!(budget.reserve(&conn, 512));
+        assert!(budget.reserve(&conn, 512));
+        assert!(!budget.reserve(&conn, 1), "the share itself still applies");
+    }
+
+    #[test]
+    fn the_oversize_allowance_is_cleared_by_the_message_that_claimed_it() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1024);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 4096));
+        Budget::release(&conn, 4096);
+        assert_eq!(conn.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(conn.oversize.load(Ordering::Relaxed), 0);
+
+        // Back to an ordinary share, with no leftover allowance.
+        assert!(budget.reserve(&conn, 1024));
+        assert!(!budget.reserve(&conn, 1));
+    }
+
+    /// The allowance is for a connection that is *idle*, not one already behind.
+    #[test]
+    fn a_backed_up_connection_gets_no_oversize_allowance() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1024);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 512));
+        assert!(
+            !budget.reserve(&conn, 4096),
+            "a connection that is already behind must still be refused"
+        );
+    }
+
+    #[test]
+    fn the_global_limit_still_binds_an_oversize_message() {
+        let _guard = exclusive();
+        let budget = Budget::new(2048, 1024);
+        let conn = ConnBudget::default();
+
+        assert!(
+            !budget.reserve(&conn, 4096),
+            "the process-wide cap is not something one connection may exceed"
+        );
+        assert_eq!(
+            queued_bytes(),
+            0,
+            "a refused reservation must leave no trace"
+        );
     }
 
     #[test]
