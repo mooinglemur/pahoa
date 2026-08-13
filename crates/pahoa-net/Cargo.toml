@@ -19,13 +19,25 @@ tokio = { version = "1", features = [
     "time",
     "macros",
     "signal",
+    # Owning the WebSocket layer means owning the socket reads and writes.
+    "io-util",
 ] }
-tokio-tungstenite = "0.28"
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 bytes = "1"
 tracing = "0.1"
+thiserror.workspace = true
+# permessage-deflate. `zlib-rs` is the only pure-Rust backend exposing
+# `new_with_window_bits`, which RFC 7692's window negotiation needs.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# The handshake's `Sec-WebSocket-Accept` is base64(sha1(key + GUID)).
+sha1 = { version = "0.10", default-features = false }
+httparse = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 serde_json = "1"
 pahoa-multidata = { path = "../pahoa-multidata" }
+# The client side of the tests only. Keeping an independent implementation on
+# the other end of the socket is the point: it is what turns "our framing round
+# trips against itself" into "our framing interoperates".
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

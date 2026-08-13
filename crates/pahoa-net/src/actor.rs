@@ -14,7 +14,7 @@
 
 use crate::save::SaveSink;
 use crate::shard::{Outbound, ShardMsg, Shards};
-use bytes::Bytes;
+use crate::ws::Outgoing;
 use pahoa_proto::{ClientPacket, ServerPacket, encode};
 use pahoa_room::{CloseReason, ConnId, EffectSink, Recipients, Room};
 use std::sync::Arc;
@@ -26,6 +26,9 @@ pub enum ActorMsg {
     Connected {
         conn: ConnId,
         tx: mpsc::Sender<Outbound>,
+        /// The deflate window this connection negotiated, if any. Decides which
+        /// variant of a broadcast its shard hands it.
+        deflate: Option<u8>,
     },
     Packets {
         conn: ConnId,
@@ -70,17 +73,19 @@ impl EffectSink for Dispatcher<'_> {
         if msgs.is_empty() {
             return;
         }
-        let frame = Bytes::from(encode(msgs));
-        self.shards.tell(to, ShardMsg::Send { conn: to, frame });
+        let msg = Outgoing::text(encode(msgs).as_bytes());
+        self.shards.tell(to, ShardMsg::Send { conn: to, msg });
     }
 
     fn broadcast(&mut self, to: Recipients, msgs: &[ServerPacket]) {
         if msgs.is_empty() {
             return;
         }
-        // Encoded once for every recipient across every shard.
-        let frame = Bytes::from(encode(msgs));
-        self.shards.broadcast(to, frame);
+        // Encoded and framed once for every recipient across every shard.
+        // Compression deliberately happens further out, in the shards — see
+        // `Shards::broadcast`.
+        let msg = Outgoing::text(encode(msgs).as_bytes());
+        self.shards.broadcast(to, msg);
     }
 
     fn close(&mut self, conn: ConnId, reason: CloseReason) {
@@ -283,8 +288,8 @@ pub async fn run_with_saves(
         room.tick(now(), &mut sink);
 
         match msg {
-            ActorMsg::Connected { conn, tx } => {
-                shards.tell(conn, ShardMsg::Add { conn, tx });
+            ActorMsg::Connected { conn, tx, deflate } => {
+                shards.tell(conn, ShardMsg::Add { conn, tx, deflate });
                 room.on_connect(conn, &mut sink);
                 push_membership(room, conn, &mut sink);
             }

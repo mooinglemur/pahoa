@@ -1,16 +1,13 @@
 //! How the server answers a client that offers `permessage-deflate`.
 //!
-//! This de-risks M8. The plan's open question is whether pahoa can ship Phase 1
-//! uncompressed, which depends on clients tolerating a *declined* extension.
-//! Two halves to that, and only one is ours:
+//! Written at M4, when pahoa declined the extension and the open question was
+//! whether real clients tolerate that. They do. M8 turned it on, so this now
+//! covers both directions — the negotiation pahoa performs by default, and the
+//! declining path, which stays a supported configuration rather than becoming a
+//! dead branch.
 //!
-//! - the server must decline correctly — omit the extension from its handshake
-//!   response, per RFC 6455 §9.1, rather than echoing something it cannot do
-//! - real clients must then carry on, which only a real client can answer
-//!
-//! This covers our half. The Python `websockets` library that Archipelago's
-//! client uses offers deflate by default, so this is exactly the handshake it
-//! will perform.
+//! The offers exercised here are literally what Python's `websockets` sends,
+//! since that is the library Archipelago's client uses.
 
 use pahoa_multidata::{GamePackage, MultiData};
 use pahoa_net::{NetConfig, Server};
@@ -39,18 +36,16 @@ fn load() -> Option<Arc<MultiData>> {
 }
 
 async fn start(data: Arc<MultiData>) -> Server {
+    start_with(data, NetConfig::default()).await
+}
+
+async fn start_with(data: Arc<MultiData>, config: NetConfig) -> Server {
     let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
     let (names, _) = data.resolve_datapackage(&snapshot);
     let room = Room::new(data, Arc::new(names), RoomOptions::default(), 0.0);
-    Server::start(
-        room,
-        NetConfig {
-            port: 0,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap()
+    Server::start(room, NetConfig { port: 0, ..config })
+        .await
+        .unwrap()
 }
 
 /// Perform the HTTP upgrade by hand so the offered extensions are controllable.
@@ -98,7 +93,7 @@ async fn the_upgrade_succeeds_without_extensions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn permessage_deflate_is_declined_rather_than_echoed() {
+async fn permessage_deflate_is_negotiated_with_no_context_takeover() {
     let Some(data) = load() else {
         eprintln!("SKIP: fixture not present");
         return;
@@ -115,16 +110,82 @@ async fn permessage_deflate_is_declined_rather_than_echoed() {
 
     assert!(
         response.starts_with("HTTP/1.1 101"),
-        "upgrade must still succeed:\n{response}"
+        "upgrade must succeed:\n{response}"
     );
-
-    // Declining means saying nothing about it. Echoing an extension we cannot
-    // perform would make the client compress frames we would then fail to read
-    // — worse than not supporting it at all.
     let lower = response.to_ascii_lowercase();
     assert!(
-        !lower.contains("sec-websocket-extensions"),
-        "server must not accept an extension it does not implement:\n{response}"
+        lower.contains("sec-websocket-extensions: permessage-deflate"),
+        "the extension should be accepted:\n{response}"
+    );
+    // The whole reason M8 exists: without this, identical payloads compress to
+    // different bytes per connection and a broadcast costs one compression per
+    // recipient instead of one in total.
+    assert!(
+        lower.contains("server_no_context_takeover"),
+        "server_no_context_takeover is what makes a broadcast shareable:\n{response}"
+    );
+    assert!(
+        lower.contains("server_max_window_bits=11"),
+        "window bits should match what the reference negotiates:\n{response}"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_max_window_bits_is_not_named_unless_the_client_offered_it() {
+    let Some(data) = load() else {
+        eprintln!("SKIP: fixture not present");
+        return;
+    };
+    let server = start(data).await;
+
+    // RFC 7692 §7.1.2.2. Naming the parameter unprompted is a protocol error,
+    // and Python's `websockets` fails the connection over it — so this is a
+    // real interoperability trap, not pedantry.
+    let response = raw_handshake(server.local_addr, Some("permessage-deflate")).await;
+    assert!(response.starts_with("HTTP/1.1 101"), "{response}");
+    assert!(
+        !response
+            .to_ascii_lowercase()
+            .contains("client_max_window_bits"),
+        "must not name a parameter the client did not offer:\n{response}"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deflate_can_still_be_declined_by_configuration() {
+    let Some(data) = load() else {
+        eprintln!("SKIP: fixture not present");
+        return;
+    };
+    // The M4 finding — that real clients carry on when the extension is
+    // declined — is what made shipping uncompressed viable, and it stays a
+    // supported configuration for debugging a wire capture.
+    let config = NetConfig {
+        deflate: pahoa_net::ws::handshake::DeflateConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let server = start_with(data, config).await;
+
+    let response = raw_handshake(
+        server.local_addr,
+        Some("permessage-deflate; client_max_window_bits"),
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 101"), "{response}");
+    // Declining means saying nothing about it. Echoing an extension we will not
+    // perform would make the client compress frames we then fail to read.
+    assert!(
+        !response
+            .to_ascii_lowercase()
+            .contains("sec-websocket-extensions"),
+        "a declined extension must be omitted, not echoed:\n{response}"
     );
 
     server.shutdown().await;

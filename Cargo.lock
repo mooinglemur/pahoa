@@ -297,11 +297,15 @@ name = "pahoa-net"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "flate2",
  "futures-util",
+ "httparse",
  "pahoa-multidata",
  "pahoa-proto",
  "pahoa-room",
  "serde_json",
+ "sha1",
+ "thiserror",
  "tokio",
  "tokio-tungstenite",
  "tracing",

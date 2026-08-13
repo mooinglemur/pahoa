@@ -77,11 +77,48 @@ cargo build --release
 ```
 
 Both exit non-zero on failure, so they can gate a release. `real-client-check`
-also reports which WebSocket extensions were negotiated — that is what
-established that clients tolerate a declined `permessage-deflate` — and renders
-each `PrintJSON` through Archipelago's own `RawJSONtoTextParser`, so a wrong
-message-part type shows up as `Unknown item (ID: …)` and fails the run rather
-than passing as a plausible-looking string of digits.
+renders each `PrintJSON` through Archipelago's own `RawJSONtoTextParser`, so a
+wrong message-part type shows up as `Unknown item (ID: …)` and fails the run
+rather than passing as a plausible-looking string of digits.
+
+It also reports the negotiated WebSocket extension **and its parameters**. At M4
+that established clients tolerate a *declined* `permessage-deflate`; since M8 it
+is the exit gate for the extension being right, and `--require-deflate` turns
+the observation into a check:
+
+```sh
+~/src/Archipelago/.venv/bin/python tools/real-client-check.py \
+    --archipelago ~/src/Archipelago --port 38281 --require-deflate \
+    --slot "<slot name>" --game "<game>" --check <location id>
+```
+
+That fails unless the server asked for `server_no_context_takeover` and window
+bits 11. The first of those is the load-bearing one: without it, identical
+payloads compress to different bytes per connection and a broadcast costs one
+compression per recipient instead of one per shard.
+
+## WebSocket conformance — Autobahn
+
+pahoa owns its WebSocket layer (`crates/pahoa-net/src/ws/`), because no crate
+can send a *pre-compressed shared* frame and that is what one-broadcast-to-6000
+requires. Owning it means proving it, which is what the Autobahn suite is for.
+
+pahoa speaks Archipelago rather than echo, so conformance is measured against a
+bare echo server exposing the same layer:
+
+```sh
+cargo run --release -p pahoa-net --example ws-echo -- 9001 &
+docker run --rm --network host \
+    -v "$PWD/tools/autobahn:/config:ro" -v "$PWD/target/autobahn:/reports" \
+    crossbario/autobahn-testsuite \
+    wstest -m fuzzingclient -s /config/fuzzingclient.json
+```
+
+The report lands in `target/autobahn/index.html`. Cases 1–10 cover framing,
+fragmentation, UTF-8 handling and the close handshake; **12 and 13 are the
+permessage-deflate suites** and are the ones M8 turned on. `Non-Strict` on a
+performance case means a slow response rather than a wrong one; anything
+reported as `Failed` is a real defect.
 
 The location ids to pass to `--check` come from `pahoa inspect`, or from the
 multidata's `locations` table for the slot you are connecting as.

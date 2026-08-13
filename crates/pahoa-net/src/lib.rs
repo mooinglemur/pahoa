@@ -11,6 +11,7 @@ pub mod config;
 pub mod save;
 pub mod server;
 pub mod shard;
+pub mod ws;
 
 pub use config::NetConfig;
 pub use save::{SaveSink, SaveStore};

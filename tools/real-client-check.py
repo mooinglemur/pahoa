@@ -31,6 +31,12 @@ def main():
     ap.add_argument("--game", required=True)
     ap.add_argument("--password", default=None)
     ap.add_argument(
+        "--require-deflate",
+        action="store_true",
+        help="fail unless the server negotiated permessage-deflate with "
+        "server_no_context_takeover and window bits 11 (M8's exit gate)",
+    )
+    ap.add_argument(
         "--check",
         type=int,
         action="append",
@@ -110,8 +116,38 @@ def main():
             uri, ping_timeout=None, ping_interval=None, max_size=16 * 1024 * 1024
         )
 
-        negotiated = [type(e).__name__ for e in (getattr(socket, "extensions", None) or [])]
-        print(f"negotiated extensions: {negotiated or '(none)'}")
+        # Report the *parameters*, not just the extension name. "PerMessageDeflate
+        # was negotiated" is much weaker than what M8 needs to prove: that the
+        # client accepted and applied `server_no_context_takeover`, which is what
+        # makes a broadcast compressible once instead of once per connection.
+        extensions = getattr(socket, "extensions", None) or []
+        if not extensions:
+            print("negotiated extensions: (none)")
+        for extension in extensions:
+            params = {
+                name: getattr(extension, name, None)
+                for name in (
+                    "remote_no_context_takeover",
+                    "local_no_context_takeover",
+                    "remote_max_window_bits",
+                    "local_max_window_bits",
+                )
+            }
+            print(f"negotiated {type(extension).__name__}: {params}")
+            if args.require_deflate:
+                # From the client's point of view the server is "remote".
+                if not params["remote_no_context_takeover"]:
+                    raise SystemExit(
+                        "server did not ask for no-context-takeover; a broadcast "
+                        "would have to be compressed once per connection"
+                    )
+                if params["remote_max_window_bits"] != 11:
+                    raise SystemExit(
+                        f"expected server window bits 11, got "
+                        f"{params['remote_max_window_bits']}"
+                    )
+        if args.require_deflate and not extensions:
+            raise SystemExit("permessage-deflate was not negotiated")
 
         async def recv():
             raw = await asyncio.wait_for(socket.recv(), timeout=10)

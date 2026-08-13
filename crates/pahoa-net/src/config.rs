@@ -29,6 +29,29 @@ pub struct NetConfig {
 
     /// How long a connection may take to send its first frame.
     pub handshake_timeout: Duration,
+
+    /// permessage-deflate negotiation.
+    pub deflate: crate::ws::handshake::DeflateConfig,
+
+    /// Deflate level for outbound frames, 0-9.
+    ///
+    /// 6 rather than 1 because the trade is lopsided: a broadcast is compressed
+    /// once and its bytes go to every connection, so ratio multiplies by the
+    /// connection count while CPU does not. Measured on a full 140-packet
+    /// chunk, level 6 costs 175µs against level 1's 87µs and produces 3.6 KiB
+    /// against 8.7 KiB — across a mass release at 6000 connections that is
+    /// 63 GB versus 149 GB. Level 9 buys a further 0.9% for 73% more time.
+    pub compression_level: u32,
+
+    /// Largest inbound message after decompression.
+    ///
+    /// Separate from `max_frame_bytes` because a 2 KiB deflate window still
+    /// expands far enough to matter: the frame cap bounds what arrives, this
+    /// bounds what it turns into.
+    pub max_message_bytes: usize,
+
+    /// Header bytes accepted before the request is refused.
+    pub max_header_bytes: usize,
 }
 
 impl Default for NetConfig {
@@ -42,6 +65,10 @@ impl Default for NetConfig {
             per_connection_budget_bytes: 256 * 1024,
             max_frame_bytes: 1024 * 1024,
             handshake_timeout: Duration::from_secs(30),
+            deflate: crate::ws::handshake::DeflateConfig::default(),
+            compression_level: 6,
+            max_message_bytes: 4 * 1024 * 1024,
+            max_header_bytes: 16 * 1024,
         }
     }
 }
@@ -55,6 +82,15 @@ impl NetConfig {
         self.shards
             .unwrap_or_else(|| self.worker_threads_resolved())
             .max(1)
+    }
+
+    pub fn accept_config(&self) -> crate::ws::accept::AcceptConfig {
+        crate::ws::accept::AcceptConfig {
+            deflate: self.deflate,
+            max_headers: self.max_header_bytes,
+            timeout: self.handshake_timeout,
+            max_message: self.max_message_bytes,
+        }
     }
 }
 
