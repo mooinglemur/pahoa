@@ -12,6 +12,7 @@
 //! Shard assignment is `conn_id % K`, so the actor knows which shard owns a
 //! connection without a lookup.
 
+use crate::budget::{Budget, ConnHandle};
 use crate::ws::Outgoing;
 use crate::ws::deflate::Deflater;
 use bytes::Bytes;
@@ -41,6 +42,11 @@ struct Member {
     /// below the default and will then inflate with that smaller window;
     /// compressing with a larger one emits back-references it cannot resolve.
     deflate: Option<u8>,
+    /// This connection's share of the outbound byte budget, shared with its
+    /// writer task, which releases bytes as they reach the socket.
+    budget: ConnHandle,
+    /// Already dropped for falling behind; nothing more is queued for it.
+    lagged: bool,
 }
 
 /// Membership flags a shard needs to filter broadcasts without consulting the
@@ -53,6 +59,7 @@ pub enum ShardMsg {
         conn: ConnId,
         tx: mpsc::Sender<Outbound>,
         deflate: Option<u8>,
+        budget: ConnHandle,
     },
     Remove {
         conn: ConnId,
@@ -86,12 +93,12 @@ pub struct Shards {
 }
 
 impl Shards {
-    pub fn spawn(count: usize, queue_depth: usize, compression_level: u32) -> Self {
+    pub fn spawn(count: usize, queue_depth: usize, compression_level: u32, budget: Budget) -> Self {
         let mut txs = Vec::with_capacity(count);
         for index in 0..count {
             let (tx, rx) = mpsc::channel(queue_depth);
             txs.push(tx);
-            tokio::spawn(run_shard(index, rx, compression_level));
+            tokio::spawn(run_shard(index, rx, compression_level, budget.clone()));
         }
         Self { txs }
     }
@@ -132,7 +139,7 @@ impl Shards {
     }
 }
 
-async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32) {
+async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, budget: Budget) {
     let mut members: HashMap<ConnId, Member> = HashMap::new();
     // Slot membership, so `Recipients::Slot` needs no scan.
     let mut by_slot: HashMap<SlotKey, Vec<ConnId>> = HashMap::new();
@@ -145,7 +152,12 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32) {
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            ShardMsg::Add { conn, tx, deflate } => {
+            ShardMsg::Add {
+                conn,
+                tx,
+                deflate,
+                budget,
+            } => {
                 members.insert(
                     conn,
                     Member {
@@ -154,15 +166,22 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32) {
                         no_text: false,
                         slot: None,
                         deflate,
+                        budget,
+                        lagged: false,
                     },
                 );
             }
             ShardMsg::Remove { conn } => {
-                if let Some(m) = members.remove(&conn)
-                    && let Some(slot) = m.slot
-                    && let Some(list) = by_slot.get_mut(&slot)
-                {
-                    list.retain(|c| *c != conn);
+                if let Some(m) = members.remove(&conn) {
+                    // Whatever it never drained goes back to the global budget,
+                    // or every disconnect leaks and the room eventually refuses
+                    // to send anything at all.
+                    Budget::release_all(&m.budget);
+                    if let Some(slot) = m.slot
+                        && let Some(list) = by_slot.get_mut(&slot)
+                    {
+                        list.retain(|c| *c != conn);
+                    }
                 }
             }
             ShardMsg::Update {
@@ -188,22 +207,28 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32) {
                 }
             }
             ShardMsg::Send { conn, msg } => {
-                if let Some(m) = members.get(&conn) {
+                let mut lagged = Vec::new();
+                if let Some(m) = members.get(&conn)
+                    && !m.lagged
+                {
                     let frame = variant(m, &msg, level, &mut deflaters, &mut Vec::new());
-                    deliver(m, Outbound::Frame(frame));
+                    if !deliver(m, frame, &budget) {
+                        lagged.push(conn);
+                    }
                 }
+                mark_lagged(&mut members, &lagged);
             }
             ShardMsg::Broadcast { to, msg } => {
                 // Memoized across this whole broadcast, per window size, and
                 // never built at all unless a connection here wants it.
                 let mut deflated: Vec<(u8, Bytes)> = Vec::new();
-                let mut recipients: Vec<&Member> = Vec::new();
+                let mut recipients: Vec<(&ConnId, &Member)> = Vec::new();
                 match &to {
                     Recipients::All => {
-                        recipients.extend(members.values().filter(|m| m.auth));
+                        recipients.extend(members.iter().filter(|(_, m)| m.auth));
                     }
                     Recipients::AllText => {
-                        recipients.extend(members.values().filter(|m| m.auth && !m.no_text));
+                        recipients.extend(members.iter().filter(|(_, m)| m.auth && !m.no_text));
                     }
                     Recipients::Slot(key) => {
                         recipients.extend(
@@ -211,7 +236,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32) {
                                 .get(key)
                                 .into_iter()
                                 .flatten()
-                                .filter_map(|c| members.get(c)),
+                                .filter_map(|c| members.get_key_value(c)),
                         );
                     }
                     Recipients::SlotText(key) => {
@@ -220,18 +245,26 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32) {
                                 .get(key)
                                 .into_iter()
                                 .flatten()
-                                .filter_map(|c| members.get(c))
-                                .filter(|m| !m.no_text),
+                                .filter_map(|c| members.get_key_value(c))
+                                .filter(|(_, m)| !m.no_text),
                         );
                     }
                     Recipients::These(list) => {
-                        recipients.extend(list.iter().filter_map(|c| members.get(c)));
+                        recipients.extend(list.iter().filter_map(|c| members.get_key_value(c)));
                     }
                 }
-                for m in recipients {
+
+                let mut lagged = Vec::new();
+                for (conn, m) in recipients {
+                    if m.lagged {
+                        continue;
+                    }
                     let frame = variant(m, &msg, level, &mut deflaters, &mut deflated);
-                    deliver(m, Outbound::Frame(frame));
+                    if !deliver(m, frame, &budget) {
+                        lagged.push(*conn);
+                    }
                 }
+                mark_lagged(&mut members, &lagged);
             }
             ShardMsg::Close { conn, reason } => {
                 if let Some(m) = members.get(&conn) {
@@ -277,16 +310,41 @@ fn variant(
     frame
 }
 
-/// Never awaits.
+/// Queue a frame. Never awaits. Returns false when the connection has fallen
+/// too far behind and must be dropped.
 ///
-/// A full queue means the client cannot keep up. Python buffers without limit
-/// here, which is unbounded memory growth; dropping the frame and letting the
-/// writer notice is bounded instead. This is safe because the protocol is
-/// resumable — `ReceivedItems` is index-addressed and `Connect` resyncs
-/// `checked_locations` — so a lagging client that reconnects lands in a correct
-/// state. Only chat scrollback is lost, which any disconnect already loses.
-fn deliver(member: &Member, out: Outbound) {
-    if member.tx.try_send(out).is_err() {
-        tracing::debug!("dropping frame for a connection that cannot keep up");
+/// **Dropping the frame and carrying on is not an option**, which is the subtle
+/// part. `send_new_items` advances a slot's `send_index` as it sends, so a
+/// discarded `ReceivedItems` leaves the server believing a client holds items it
+/// never received — and the client cannot tell. Closing instead is safe because
+/// the protocol is resumable: `Connect` resends `checked_locations` in full and
+/// replays the item queue from index zero, so a lagged client reconnects into
+/// correct state. Only chat scrollback is lost, which any disconnect loses.
+fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> bool {
+    let size = frame.len();
+    if !budget.reserve(&member.budget, size) {
+        return false;
+    }
+    if member.tx.try_send(Outbound::Frame(frame)).is_err() {
+        // The writer is gone or its queue is full; hand the reservation back
+        // rather than leaking it, then drop the connection for the same reason.
+        Budget::release(&member.budget, size);
+        return false;
+    }
+    true
+}
+
+/// Close out the connections that could not keep up.
+fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[ConnId]) {
+    for conn in lagged {
+        if let Some(m) = members.get_mut(conn) {
+            if m.lagged {
+                continue;
+            }
+            m.lagged = true;
+            crate::metrics::record_lag_disconnect();
+            tracing::info!(%conn, "dropping a connection that cannot keep up");
+            let _ = m.tx.try_send(Outbound::Close("too slow"));
+        }
     }
 }

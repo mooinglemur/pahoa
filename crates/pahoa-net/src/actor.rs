@@ -29,6 +29,8 @@ pub enum ActorMsg {
         /// The deflate window this connection negotiated, if any. Decides which
         /// variant of a broadcast its shard hands it.
         deflate: Option<u8>,
+        /// This connection's share of the outbound byte budget.
+        budget: crate::budget::ConnHandle,
     },
     Packets {
         conn: ConnId,
@@ -184,8 +186,10 @@ impl Saver {
         self.in_flight = Some(tokio::task::spawn_blocking(move || {
             // `spawn_blocking`, not a regular task: `fsync` blocks its thread,
             // and on CephFS so can every other call in here.
+            let started = std::time::Instant::now();
             let bytes = snapshot.encode(compress);
             store.store(&bytes)?;
+            crate::metrics::record_save(started.elapsed(), bytes.len());
             Ok(bytes.len())
         }));
     }
@@ -262,6 +266,11 @@ pub async fn run_with_saves(
             .next_tick()
             .map(|at| Duration::from_secs_f64((at - now()).max(0.0)));
 
+        // The bottleneck canary. A transient spike is fine; a floor that climbs
+        // and does not drain means work is arriving faster than the room can
+        // apply it, and every other symptom is downstream of that.
+        crate::metrics::record_mailbox_depth(rx.len());
+
         let msg = tokio::select! {
             msg = rx.recv() => msg,
             // Waiting on a timer is not a violation of "awaits only its
@@ -288,8 +297,21 @@ pub async fn run_with_saves(
         room.tick(now(), &mut sink);
 
         match msg {
-            ActorMsg::Connected { conn, tx, deflate } => {
-                shards.tell(conn, ShardMsg::Add { conn, tx, deflate });
+            ActorMsg::Connected {
+                conn,
+                tx,
+                deflate,
+                budget,
+            } => {
+                shards.tell(
+                    conn,
+                    ShardMsg::Add {
+                        conn,
+                        tx,
+                        deflate,
+                        budget,
+                    },
+                );
                 room.on_connect(conn, &mut sink);
                 push_membership(room, conn, &mut sink);
             }

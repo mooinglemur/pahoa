@@ -97,6 +97,52 @@ bits 11. The first of those is the load-bearing one: without it, identical
 payloads compress to different bytes per connection and a broadcast costs one
 compression per recipient instead of one per shard.
 
+## Playing a whole seed — `play-seed.py`
+
+M9's correctness half. Every player slot connects, checks every location it
+owns, receives what it is owed, and claims its goal; then a final connection
+audits the room — no missing locations, the checked count matches the multidata,
+and `!status` agrees everyone is done.
+
+```sh
+~/src/Archipelago/.venv/bin/python tools/play-seed.py \
+    --archipelago ~/src/Archipelago --port 38281 \
+    --multidata crates/pahoa-pickle/tests/fixtures/<seed>.archipelago
+```
+
+Real in the ways that matter — Archipelago's `NetUtils.encode`/`decode`, its
+`websockets` (so deflate is negotiated as a player's client would), its slot
+metadata — and deliberately not a *game* client, since the server cannot tell
+the difference and what is under test is the multiworld's completion rules.
+`--slots N` plays only the first N for a quicker check. Exits non-zero on any
+mismatch.
+
+## Load testing — a separate track, and it has to be
+
+The Python server cannot host 2000 slots at all, so differential testing proves
+*fidelity* at small scale and can say nothing about *scale*.
+
+```sh
+cargo run --release -p pahoa-net --example loadtest -- \
+    crates/pahoa-pickle/tests/fixtures/SYNTH_2000slot.archipelago 6000
+```
+
+Four phases — connect storm, steady mix, mass release cascade, reconnect storm —
+against an in-process server, so the numbers the plan names are read directly
+rather than inferred: actor mailbox depth, outbound bytes against the global
+budget, lag disconnects, compressions, RSS.
+
+The one to watch is **compressions against broadcasts**: it should track
+broadcasts times *shards*, never times connections. A run where it approaches
+the connection count means `server_no_context_takeover` did not negotiate.
+
+Two traps this harness fell into, both worth knowing before writing another one:
+clients must start reading the moment they connect (otherwise each accumulates
+one join announcement per other connection, and the server rightly drops
+connections that are not actually slow), and the load client must not inflate
+what it receives (at 6000 connections the client-side inflate costs far more
+than the server-side compression, so the harness becomes the bottleneck).
+
 ## WebSocket conformance — Autobahn
 
 pahoa owns its WebSocket layer (`crates/pahoa-net/src/ws/`), because no crate

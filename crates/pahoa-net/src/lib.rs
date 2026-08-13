@@ -7,7 +7,9 @@
 //! handful of messages instead of thousands.
 
 pub mod actor;
+pub mod budget;
 pub mod config;
+pub mod metrics;
 pub mod save;
 pub mod server;
 pub mod shard;

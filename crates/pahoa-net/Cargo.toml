@@ -31,6 +31,8 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # The handshake's `Sec-WebSocket-Accept` is base64(sha1(key + GUID)).
 sha1 = { version = "0.10", default-features = false }
 httparse = "1"
+# The load driver reads packets back to verify a resync actually happened.
+serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }

@@ -238,9 +238,16 @@ def pick_scenarios(ctx):
     """
     import collections
 
+    from NetUtils import SlotType
+
     scenarios = []
+    # Compared against the enum rather than `str(...)`: `SlotType` is an
+    # `IntEnum`, and since Python 3.11 that stringifies as "1", not
+    # "SlotType.player". The `or` fallback below hid that — every slot in the
+    # current fixture is a player, so the vectors were unaffected, but on a seed
+    # with spectators or item-link groups it would have picked one of those.
     player_slots = [
-        s for s, info in ctx.slot_info.items() if str(info.type) == "SlotType.player"
+        s for s, info in ctx.slot_info.items() if info.type == SlotType.player
     ] or list(ctx.slot_info)
 
     # A slot with no entrance data: its hints hash deterministically, so even

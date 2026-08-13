@@ -15,6 +15,7 @@
 //! - [`handshake`] / [`accept`] — the upgrade and what gets negotiated
 
 pub mod accept;
+pub mod client;
 pub mod deflate;
 pub mod frame;
 pub mod handshake;

@@ -92,6 +92,8 @@ pub enum FrameError {
     ReservedBits,
     #[error("client frame was not masked")]
     Unmasked,
+    #[error("server frame was masked")]
+    MaskedFromServer,
     #[error("control frame carried {0} bytes, the limit is 125")]
     ControlTooLarge(usize),
     #[error("control frame was fragmented")]
@@ -111,11 +113,23 @@ struct Header {
     len: usize,
 }
 
+/// Which end of the connection is reading.
+///
+/// Masking is asymmetric: a client masks everything it sends and a server masks
+/// nothing, so each side's *reader* enforces the opposite rule (RFC 6455 §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Reading client traffic: every frame must be masked.
+    Server,
+    /// Reading server traffic: no frame may be masked.
+    Client,
+}
+
 /// Parse a header from the front of `buf`.
 ///
 /// `Ok(None)` means "not enough bytes yet", which is the normal case on a
 /// stream and not an error.
-fn parse_header(buf: &[u8], max_payload: usize) -> Result<Option<Header>, FrameError> {
+fn parse_header(buf: &[u8], max_payload: usize, role: Role) -> Result<Option<Header>, FrameError> {
     if buf.len() < 2 {
         return Ok(None);
     }
@@ -129,12 +143,15 @@ fn parse_header(buf: &[u8], max_payload: usize) -> Result<Option<Header>, FrameE
     }
     let opcode = OpCode::from_bits(first & 0x0F).ok_or(FrameError::ReservedOpcode(first & 0x0F))?;
 
-    // A server must close on an unmasked client frame (RFC 6455 §5.1). This is
-    // not pedantry: an unmasked stream from a browser is a cache-poisoning
-    // vector, which is the whole reason masking exists.
+    // A server must close on an unmasked client frame, and a client on a masked
+    // server frame. Not pedantry on the server side: an unmasked stream from a
+    // browser is a cache-poisoning vector, which is the whole reason masking
+    // exists.
     let masked = second & 0x80 != 0;
-    if !masked {
-        return Err(FrameError::Unmasked);
+    match role {
+        Role::Server if !masked => return Err(FrameError::Unmasked),
+        Role::Client if masked => return Err(FrameError::MaskedFromServer),
+        _ => {}
     }
 
     let short_len = (second & 0x7F) as usize;
@@ -174,10 +191,17 @@ fn parse_header(buf: &[u8], max_payload: usize) -> Result<Option<Header>, FrameE
     }
 
     let mask_offset = 2 + len_bytes;
-    if buf.len() < mask_offset + 4 {
-        return Ok(None);
-    }
-    let mask = Some(buf[mask_offset..mask_offset + 4].try_into().unwrap());
+    let (mask, len) = if masked {
+        if buf.len() < mask_offset + 4 {
+            return Ok(None);
+        }
+        (
+            Some(buf[mask_offset..mask_offset + 4].try_into().unwrap()),
+            mask_offset + 4,
+        )
+    } else {
+        (None, mask_offset)
+    };
 
     Ok(Some(Header {
         fin,
@@ -185,7 +209,7 @@ fn parse_header(buf: &[u8], max_payload: usize) -> Result<Option<Header>, FrameE
         opcode,
         mask,
         payload_len,
-        len: mask_offset + 4,
+        len,
     }))
 }
 
@@ -194,7 +218,16 @@ fn parse_header(buf: &[u8], max_payload: usize) -> Result<Option<Header>, FrameE
 /// Consumes exactly the bytes of that frame and leaves the rest, so this can be
 /// driven straight from a read buffer.
 pub fn decode(buf: &mut BytesMut, max_payload: usize) -> Result<Option<Frame>, FrameError> {
-    let Some(header) = parse_header(buf, max_payload)? else {
+    decode_as(buf, max_payload, Role::Server)
+}
+
+/// As [`decode`], for a given end of the connection.
+pub fn decode_as(
+    buf: &mut BytesMut,
+    max_payload: usize,
+    role: Role,
+) -> Result<Option<Frame>, FrameError> {
+    let Some(header) = parse_header(buf, max_payload, role)? else {
         return Ok(None);
     };
     if buf.len() < header.len + header.payload_len {
@@ -239,6 +272,40 @@ pub fn build(opcode: OpCode, rsv1: bool, payload: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(MAX_SERVER_HEADER + payload.len());
     put_header(&mut out, opcode, rsv1, true, payload.len());
     out.put_slice(payload);
+    out.freeze()
+}
+
+/// Build a complete **client** frame: masked, as RFC 6455 §5.1 requires.
+///
+/// Only the load driver and the tests send from this side; a server never does.
+/// The key is not cryptographic — masking defends intermediaries against cache
+/// poisoning, not the payload against reading — so a counter-derived key is
+/// sufficient and avoids a dependency on a random source.
+pub fn build_masked(opcode: OpCode, rsv1: bool, payload: &[u8], key: [u8; 4]) -> Bytes {
+    let mut out = BytesMut::with_capacity(MAX_SERVER_HEADER + 4 + payload.len());
+    // Always FIN: nothing on this side fragments.
+    let mut first = opcode.bits() | 0x80;
+    if rsv1 {
+        first |= 0x40;
+    }
+    out.put_u8(first);
+
+    let len = payload.len();
+    if len < 126 {
+        out.put_u8(0x80 | len as u8);
+    } else if len <= u16::MAX as usize {
+        out.put_u8(0x80 | 126);
+        out.put_u16(len as u16);
+    } else {
+        out.put_u8(0x80 | 127);
+        out.put_u64(len as u64);
+    }
+    out.put_slice(&key);
+    out.put_slice(payload);
+    // The header is already written, so masking in place covers exactly the
+    // payload.
+    let start = out.len() - payload.len();
+    unmask(&mut out[start..], key);
     out.freeze()
 }
 
@@ -315,6 +382,44 @@ mod tests {
             .enumerate()
             .map(|(i, b)| b ^ key[i % 4])
             .collect()
+    }
+
+    #[test]
+    fn client_and_server_readers_enforce_opposite_masking_rules() {
+        // Masking is asymmetric, so each side's reader has to reject what the
+        // other side would never send.
+        let mut masked = client_frame(0x1, true, false, b"from a client");
+        assert_eq!(
+            decode_as(&mut masked.clone(), 1 << 20, Role::Client),
+            Err(FrameError::MaskedFromServer)
+        );
+        assert!(decode_as(&mut masked, 1 << 20, Role::Server).is_ok());
+
+        let mut unmasked = BytesMut::from(&build(OpCode::Text, false, b"from a server")[..]);
+        assert_eq!(
+            decode_as(&mut unmasked.clone(), 1 << 20, Role::Server),
+            Err(FrameError::Unmasked)
+        );
+        let frame = decode_as(&mut unmasked, 1 << 20, Role::Client)
+            .unwrap()
+            .expect("a client should read an unmasked server frame");
+        assert_eq!(&frame.payload[..], b"from a server");
+    }
+
+    #[test]
+    fn a_client_built_frame_reads_back_as_the_server_sees_it() {
+        // The load driver's send path against the server's read path, which is
+        // the pairing that has to hold for any of the load numbers to mean
+        // anything.
+        for len in [0usize, 1, 125, 126, 65535, 65536] {
+            let payload = vec![b'q'; len];
+            let built = build_masked(OpCode::Text, false, &payload, [0xDE, 0xAD, 0xBE, 0xEF]);
+            let mut buf = BytesMut::from(&built[..]);
+            let frame = decode(&mut buf, 1 << 20).unwrap().expect("whole frame");
+            assert_eq!(frame.payload.len(), len, "len {len}");
+            assert_eq!(&frame.payload[..], &payload[..], "len {len}");
+            assert!(buf.is_empty(), "len {len} left trailing bytes");
+        }
     }
 
     #[test]

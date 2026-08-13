@@ -48,7 +48,16 @@ impl Server {
         let listener = TcpListener::bind((config.bind.as_str(), config.port)).await?;
         let local_addr = listener.local_addr()?;
 
-        let shards = Shards::spawn(config.shards_resolved(), 4096, config.compression_level);
+        let budget = crate::budget::Budget::new(
+            config.outbound_budget_bytes,
+            config.per_connection_budget_bytes,
+        );
+        let shards = Shards::spawn(
+            config.shards_resolved(),
+            4096,
+            config.compression_level,
+            budget.clone(),
+        );
         let (actor_tx, actor_rx) = mpsc::channel(8192);
 
         let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
@@ -128,16 +137,26 @@ async fn serve_connection(
 
     let (mut read_half, mut write_half) = stream.into_split();
 
-    // Bounded by bytes-worth-of-messages rather than unbounded: a client that
-    // cannot keep up must not be able to grow the server's memory without limit.
-    let depth = (config.per_connection_budget_bytes / 4096).max(8);
+    // The real bound is the byte budget the shard checks before queuing. This
+    // depth exists only so the channel is never the *tighter* limit: sized at
+    // the message count the byte budget would already have refused, assuming a
+    // 64-byte floor per message. Getting this wrong reintroduces exactly the
+    // bound-by-message-count behavior the byte budget replaced — a burst of
+    // small chat frames would hit the channel long before the budget and drop
+    // connections that were nowhere near their share.
+    //
+    // tokio's mpsc does not preallocate, so a generous capacity costs nothing
+    // until it is used.
+    let depth = (config.per_connection_budget_bytes / 64).max(256);
     let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(depth);
+    let conn_budget: crate::budget::ConnHandle = Arc::new(crate::budget::ConnBudget::default());
 
     if actor
         .send(ActorMsg::Connected {
             conn,
             tx: out_tx.clone(),
             deflate,
+            budget: Arc::clone(&conn_budget),
         })
         .await
         .is_err()
@@ -148,24 +167,35 @@ async fn serve_connection(
     // Writer: owns the socket's write half for this connection's lifetime, and
     // writes pre-built frames verbatim. It does no framing and no compression —
     // that already happened once, in the shard, for every recipient at once.
-    let writer = tokio::spawn(async move {
-        while let Some(out) = out_rx.recv().await {
-            let result = match out {
-                Outbound::Frame(bytes) => write_half.write_all(&bytes).await,
-                Outbound::Close(reason) => {
-                    tracing::debug!(%conn, reason, "closing");
-                    let _ = write_half
-                        .write_all(&ws::frame::close(CLOSE_GOING_AWAY, reason))
-                        .await;
-                    let _ = write_half.flush().await;
+    let writer = {
+        let conn_budget = Arc::clone(&conn_budget);
+        tokio::spawn(async move {
+            while let Some(out) = out_rx.recv().await {
+                let result = match out {
+                    Outbound::Frame(bytes) => {
+                        let size = bytes.len();
+                        let written = write_half.write_all(&bytes).await;
+                        // Released once the bytes are the kernel's problem
+                        // rather than ours, which is what makes the budget a
+                        // measure of what pahoa is actually holding.
+                        crate::budget::Budget::release(&conn_budget, size);
+                        written
+                    }
+                    Outbound::Close(reason) => {
+                        tracing::debug!(%conn, reason, "closing");
+                        let _ = write_half
+                            .write_all(&ws::frame::close(CLOSE_GOING_AWAY, reason))
+                            .await;
+                        let _ = write_half.flush().await;
+                        break;
+                    }
+                };
+                if result.is_err() {
                     break;
                 }
-            };
-            if result.is_err() {
-                break;
             }
-        }
-    });
+        })
+    };
 
     // Reader: framing, inflation and JSON parsing all happen here, on this
     // connection's own task, so none of it lands on the actor.
