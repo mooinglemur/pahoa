@@ -112,7 +112,12 @@ Phase 1 — the protocol-complete headless server — is done: real clients play
 real seed to completion, and a 6000-connection load run sustains a mass release.
 Deliberately absent so far, and reachable from no flag:
 
-- **TLS and the PROXY protocol.** Terminate at an ingress for now.
+- **TLS and the PROXY protocol.** Terminate at an ingress for now. A TLS client
+  reaching a pahoa port is refused immediately with a `handshake_failure` alert
+  rather than left to time out, so a client that probes `wss://` before `ws://`
+  falls back at once. When TLS does land, one port will serve both schemes —
+  the accept path already sniffs the first byte — with plaintext fallback opt-in
+  and never the default once a certificate is configured.
 - **The `/` console command set**, and therefore what `!admin` dispatches into.
   It overlaps the admin REST API heavily and is worth writing once, with it.
 - **Per-slot passwords**, the lobby integration, the tracker APIs and the admin
