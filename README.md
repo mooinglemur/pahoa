@@ -36,6 +36,7 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--snapshot <file.json>` | — | Data package snapshot, from `tools/export-datapackage.py` |
 | `--save-dir <dir>` | — | Where the room persists itself |
 | `--save-interval <secs>` | `60` | Save cadence |
+| `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
 
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
@@ -46,6 +47,14 @@ That covers item and location names and ids for every game in the seed, so a
 room runs fine on it; what it never carries is each world's hint blacklist, so
 `!hint` cannot refuse a non-hintable name. The server warns at startup for the
 games affected.
+
+The outbound budget defaults to 288 KiB per slot — three connections each, since
+players commonly run a game client, a text client and a tracker — with a 64 MiB
+floor, so a 2000-slot room gets 562 MiB and a small one gets 64 MiB rather than a
+cap it could never reach. It bounds what may sit queued for clients that have
+stopped reading; a connection past its share is dropped rather than buffered,
+which is safe because the protocol resyncs on reconnect. The room prints the
+figure it derived at startup.
 
 **`--save-dir` is optional and the room says so loudly when it is missing** —
 without it nothing survives a restart, which is right for a throwaway room and a

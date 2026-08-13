@@ -20,6 +20,8 @@ pub struct ServeArgs<'a> {
     /// is fine for a throwaway room and a data-loss bug for anything else.
     pub save_dir: Option<&'a Path>,
     pub save_interval: Duration,
+    /// `None` derives it from the seed's slot count.
+    pub outbound_budget_bytes: Option<usize>,
     pub options: RoomOptions,
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
@@ -99,9 +101,16 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         }
     };
 
+    // Sized from the seed rather than left at a constant: the cap is there to
+    // survive clients that stop reading, and how much that is depends entirely
+    // on how many of them there are.
+    let budget = args
+        .outbound_budget_bytes
+        .unwrap_or_else(|| pahoa_net::outbound_budget_for(data.slot_info.len()));
     let config = NetConfig {
         bind: args.bind,
         port: args.port,
+        outbound_budget_bytes: budget,
         ..Default::default()
     };
     let runtime = build_runtime(&config).map_err(|e| format!("runtime: {e}"))?;
@@ -111,11 +120,13 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             .await
             .map_err(|e| format!("bind: {e}"))?;
         println!(
-            "pahoa serving {} slots, {} locations, seed {} on {}",
+            "pahoa serving {} slots, {} locations, seed {} on {} \
+             (outbound budget {} MiB)",
             data.slot_info.len(),
             data.locations.len(),
             data.seed_name,
             server.local_addr,
+            budget / (1024 * 1024),
         );
 
         tokio::signal::ctrl_c().await.ok();

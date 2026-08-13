@@ -178,12 +178,47 @@ pub struct PrintJson {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DataPackage {
-    pub data: DataPackageContents,
+    /// Pre-rendered `{"games": {…}}`.
+    ///
+    /// Held rendered and shared rather than typed, because this is the one
+    /// reply whose size comes from the *seed* rather than from anything a
+    /// client did — 1.1 MiB on a 35-game seed — and `GetDataPackage` is one of
+    /// the two packets accepted **before authentication**. Building it per
+    /// request cost the actor 5.5 ms, which one socket in a loop turns into a
+    /// room-wide stall, and a 6000-client reconnect storm turns into half a
+    /// minute of it. Shared, a reply is a refcount bump and one copy.
+    ///
+    /// [`DataPackageContents`] is how it gets built; see its `render`.
+    #[serde(serialize_with = "serialize_shared_raw")]
+    pub data: std::sync::Arc<RawValue>,
 }
 
+/// Serialize through the `Arc` rather than enabling serde's `rc` feature, which
+/// would silently change how every `Arc` in the dependency tree serializes for
+/// the sake of one field.
+fn serialize_shared_raw<S: serde::Serializer>(
+    value: &std::sync::Arc<RawValue>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    (**value).serialize(s)
+}
+
+/// The typed shape of [`DataPackage::data`], used to produce it.
 #[derive(Debug, Clone, Serialize)]
 pub struct DataPackageContents {
     pub games: BTreeMap<String, GameData>,
+}
+
+impl DataPackageContents {
+    /// Render once, for sharing across every reply.
+    ///
+    /// Going through the same serializer as any other packet is what keeps the
+    /// bytes identical to the typed path, so the byte-exact vectors still
+    /// describe what goes on the wire.
+    pub fn render(&self) -> std::sync::Arc<RawValue> {
+        let json = serde_json::to_string(self).expect("a data package always serializes");
+        std::sync::Arc::from(RawValue::from_string(json).expect("serde emits valid JSON"))
+    }
 }
 
 /// What clients cache, keyed by `checksum`.
@@ -366,7 +401,8 @@ mod tests {
                         checksum: None,
                     },
                 )]),
-            },
+            }
+            .render(),
         });
         let s = json(&p);
         assert!(!s.contains("checksum"), "{s}");

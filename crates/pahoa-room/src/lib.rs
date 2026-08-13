@@ -8,6 +8,7 @@
 //! touching a single game rule.
 
 mod conn;
+mod datapackage;
 mod effect;
 pub mod fuzzy;
 pub mod hints;

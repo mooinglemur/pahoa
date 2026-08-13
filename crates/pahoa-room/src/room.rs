@@ -7,6 +7,7 @@
 mod commands;
 
 use crate::conn::{Client, ConnId, non_game_verb, python_list_repr};
+use crate::datapackage::DataPackageCache;
 use crate::effect::{CloseReason, EffectSink, Recipients};
 use crate::hints::HintStore;
 use crate::options::RoomOptions;
@@ -60,6 +61,10 @@ struct Countdown {
 pub struct Room {
     data: Arc<MultiData>,
     datapackage: Arc<NameTables>,
+    /// The `GetDataPackage` reply, rendered once at construction.
+    ///
+    /// See [`DataPackageCache`] for why this is not built per request.
+    served_datapackage: DataPackageCache,
     pub options: RoomOptions,
 
     clients: HashMap<ConnId, Client>,
@@ -149,10 +154,12 @@ impl Room {
         }
 
         let rng = PyRandom::seed_str(&data.seed_name);
+        let served_datapackage = DataPackageCache::build(&datapackage);
 
         Self {
             data,
             datapackage,
+            served_datapackage,
             options,
             clients: HashMap::new(),
             by_slot: HashMap::new(),
@@ -567,37 +574,22 @@ impl Room {
         args: cmd::GetDataPackage,
         out: &mut dyn EffectSink,
     ) {
-        let wanted: Vec<String> = match (&args.games, &args.exclusions) {
-            (Some(games), _) => games.clone(),
+        let wanted: Vec<&str> = match (&args.games, &args.exclusions) {
+            (Some(games), _) => games.iter().map(String::as_str).collect(),
             // Deprecated, past its own removal TODO, still honored.
             (None, Some(excluded)) => self
                 .datapackage
                 .games()
-                .map(|(g, _)| g.clone())
-                .filter(|g| !excluded.contains(g))
+                .map(|(g, _)| g.as_str())
+                .filter(|g| !excluded.iter().any(|e| e == g))
                 .collect(),
-            (None, None) => self.datapackage.games().map(|(g, _)| g.clone()).collect(),
+            (None, None) => self.datapackage.games().map(|(g, _)| g.as_str()).collect(),
         };
-
-        let mut games = BTreeMap::new();
-        for game in wanted {
-            let Some(names) = self.datapackage.get(&game) else {
-                continue;
-            };
-            games.insert(
-                game,
-                GameData {
-                    item_name_to_id: names.package.item_name_to_id.clone(),
-                    location_name_to_id: names.package.location_name_to_id.clone(),
-                    checksum: names.package.checksum.clone(),
-                },
-            );
-        }
 
         out.send(
             conn,
             &[ServerPacket::DataPackage(DataPackage {
-                data: DataPackageContents { games },
+                data: self.served_datapackage.select(&wanted),
             })],
         );
     }

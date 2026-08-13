@@ -37,6 +37,9 @@ SERVE OPTIONS
     --snapshot <file.json>   Data package snapshot, from export-datapackage.py
     --save-dir <dir>         Where the room persists itself
     --save-interval <secs>   Save cadence (default 60)
+    --outbound-budget <MiB>  Cap on queued outbound data across all clients.
+                             Defaults to 288 KiB per slot, floored at 64 MiB —
+                             a 2000-slot room gets 562 MiB, a small one 64.
 
 ROOM OPTIONS
     --password <pw>              Required from every client on connect
@@ -76,6 +79,7 @@ const SERVE_OPTS: &[Opt] = &[
     value("--snapshot", &[]),
     value("--save-dir", &[]),
     value("--save-interval", &[]),
+    value("--outbound-budget", &[]),
     value("--password", &[]),
     value("--server-password", &["--server_password"]),
     value("--hint-cost", &["--hint_cost"]),
@@ -184,9 +188,16 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         None => Duration::from_secs(60),
     };
 
+    let outbound_budget_bytes = match args.number::<usize>("--outbound-budget")? {
+        Some(0) => return Err("--outbound-budget: must be at least 1 MiB".to_string()),
+        Some(mib) => Some(mib * 1024 * 1024),
+        None => None,
+    };
+
     serve::run(serve::ServeArgs {
         multidata: Path::new(multidata),
         snapshot: args.get("--snapshot").map(Path::new),
+        outbound_budget_bytes,
         port: args.number("--port")?.unwrap_or(38281),
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
         save_dir: args.get("--save-dir").map(Path::new),

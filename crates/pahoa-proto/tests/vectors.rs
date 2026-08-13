@@ -326,7 +326,8 @@ fn data_package() {
                         },
                     ),
                 ]),
-            },
+            }
+            .render(),
         }),
     );
 }
