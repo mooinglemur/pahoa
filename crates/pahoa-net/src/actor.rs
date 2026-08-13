@@ -12,11 +12,15 @@
 //! are encoded here once and then handed to shards as [`Bytes`], whose clone is
 //! a refcount bump. Everything genuinely expensive lives off this task.
 
+use crate::save::SaveSink;
 use crate::shard::{Outbound, ShardMsg, Shards};
 use bytes::Bytes;
 use pahoa_proto::{ClientPacket, ServerPacket, encode};
 use pahoa_room::{CloseReason, ConnId, EffectSink, Recipients, Room};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 pub enum ActorMsg {
     Connected {
@@ -102,30 +106,174 @@ fn now() -> f64 {
         .unwrap_or(0.0)
 }
 
-pub async fn run(mut room: Room, shards: Shards, mut rx: mpsc::Receiver<ActorMsg>) {
-    let mut dirty = false;
+/// Where and how often the room persists itself.
+#[derive(Clone)]
+pub struct SaveConfig {
+    /// `None` runs the room without persistence, which is what most tests want.
+    pub store: Option<Arc<dyn SaveSink>>,
+    /// How long the room may lose on an unclean stop. Also the coalescing
+    /// window: ticks that land while a save is running are dropped, not queued.
+    pub interval: Duration,
+    /// Deflate the body. Costs CPU on a background thread and saves bytes on a
+    /// network filesystem, which is the trade worth making.
+    pub compress: bool,
+    /// How long a shutdown flush may take before the room stops waiting for it.
+    ///
+    /// The flush is a nicety, not the guarantee: SIGKILL past
+    /// `terminationGracePeriodSeconds`, node loss, OOM kill and spot preemption
+    /// all skip it. The cadence above is what actually bounds data loss.
+    pub shutdown_timeout: Duration,
+}
+
+impl Default for SaveConfig {
+    fn default() -> Self {
+        Self {
+            store: None,
+            interval: Duration::from_secs(60),
+            compress: true,
+            shutdown_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+/// A save running on a blocking thread, plus what the room knows about it.
+///
+/// The rule this exists to enforce: **at most one save is ever in flight, and
+/// the actor never waits for it.** Without the first half, a slow filesystem
+/// accumulates snapshots in memory — each pinning the `Arc`s it captured — and
+/// that is an out-of-memory path that only shows up on a bad day. Without the
+/// second, the room stalls for as long as the disk does.
+struct Saver {
+    config: SaveConfig,
+    in_flight: Option<JoinHandle<std::io::Result<usize>>>,
+    /// State has changed since the last save was *started*.
+    dirty: bool,
+}
+
+impl Saver {
+    fn new(config: SaveConfig) -> Self {
+        Self {
+            config,
+            in_flight: None,
+            dirty: false,
+        }
+    }
+
+    /// Start a save if one is warranted and none is running.
+    ///
+    /// Returns immediately either way. A tick that arrives while a save is in
+    /// flight is *dropped* rather than queued — `dirty` stays set, so the next
+    /// free tick covers the same ground.
+    fn maybe_start(&mut self, room: &Room) {
+        let Some(store) = self.config.store.clone() else {
+            return;
+        };
+        if !self.dirty || self.in_flight.is_some() {
+            return;
+        }
+        // The only part that touches the actor: `Arc` clones, measured at tens
+        // of microseconds on a 2000-slot room.
+        let snapshot = room.snapshot();
+        let compress = self.config.compress;
+        self.dirty = false;
+        self.in_flight = Some(tokio::task::spawn_blocking(move || {
+            // `spawn_blocking`, not a regular task: `fsync` blocks its thread,
+            // and on CephFS so can every other call in here.
+            let bytes = snapshot.encode(compress);
+            store.store(&bytes)?;
+            Ok(bytes.len())
+        }));
+    }
+
+    /// Resolve a finished save. Never called unless one is in flight.
+    async fn finished(&mut self) {
+        let Some(handle) = self.in_flight.as_mut() else {
+            // Nothing running: park forever and let another select branch win.
+            std::future::pending::<()>().await;
+            return;
+        };
+        let outcome = handle.await;
+        self.in_flight = None;
+        match outcome {
+            Ok(Ok(bytes)) => tracing::debug!(bytes, "saved"),
+            Ok(Err(e)) => {
+                // Loudly, and then carry on. A room that dies because its
+                // filesystem hiccuped is a worse outcome than a stale save.
+                tracing::error!(error = %e, "save failed; the room is still running but \
+                     its recovery point is stale");
+                self.dirty = true;
+            }
+            Err(e) => tracing::error!(error = %e, "save task did not complete"),
+        }
+    }
+
+    /// Final save on the way out, bounded so a hung filesystem cannot hold the
+    /// process open past its grace period.
+    async fn flush(&mut self, room: &Room) {
+        if self.config.store.is_none() {
+            return;
+        }
+        // Wait out an in-flight save first, so the last one to land is the
+        // newest rather than whichever finished last.
+        if self.in_flight.is_some() {
+            let _ = tokio::time::timeout(self.config.shutdown_timeout, self.finished()).await;
+        }
+        self.dirty = true;
+        self.maybe_start(room);
+        if tokio::time::timeout(self.config.shutdown_timeout, self.finished())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout = ?self.config.shutdown_timeout,
+                "the final save did not finish in time; state since the last \
+                 completed save is lost"
+            );
+        }
+    }
+}
+
+pub async fn run(mut room: Room, shards: Shards, rx: mpsc::Receiver<ActorMsg>) {
+    run_with_saves(&mut room, shards, rx, SaveConfig::default()).await;
+}
+
+pub async fn run_with_saves(
+    room: &mut Room,
+    shards: Shards,
+    mut rx: mpsc::Receiver<ActorMsg>,
+    save_config: SaveConfig,
+) {
+    let mut saver = Saver::new(save_config);
+    let mut save_timer = tokio::time::interval(saver.config.interval);
+    // The first tick of an `Interval` completes immediately, which would save an
+    // untouched room the moment it starts.
+    save_timer.tick().await;
 
     loop {
         // The room says when it next wants poking — only a running countdown
         // does today. With nothing pending this waits on the mailbox alone, so
         // an idle room costs nothing.
-        let msg = match room.next_tick() {
-            None => rx.recv().await,
-            Some(at) => {
-                let delay = std::time::Duration::from_secs_f64((at - now()).max(0.0));
-                tokio::select! {
-                    msg = rx.recv() => msg,
-                    // Waiting on a timer is not a violation of "awaits only its
-                    // mailbox": the point of that rule is that no *client* can
-                    // make the actor wait, and a clock is not a client.
-                    _ = tokio::time::sleep(delay) => {
-                        let mut sink = Dispatcher::new(&shards);
-                        room.tick(now(), &mut sink);
-                        dirty |= sink.dirty;
-                        continue;
-                    }
-                }
+        let countdown = room
+            .next_tick()
+            .map(|at| Duration::from_secs_f64((at - now()).max(0.0)));
+
+        let msg = tokio::select! {
+            msg = rx.recv() => msg,
+            // Waiting on a timer is not a violation of "awaits only its
+            // mailbox": the point of that rule is that no *client* can make the
+            // actor wait, and a clock is not a client. Neither is a save that
+            // has already finished on another thread.
+            _ = tokio::time::sleep(countdown.unwrap_or_default()), if countdown.is_some() => {
+                let mut sink = Dispatcher::new(&shards);
+                room.tick(now(), &mut sink);
+                saver.dirty |= sink.dirty;
+                continue;
             }
+            _ = save_timer.tick() => {
+                saver.maybe_start(room);
+                continue;
+            }
+            () = saver.finished() => continue,
         };
         let Some(msg) = msg else { break };
 
@@ -138,13 +286,13 @@ pub async fn run(mut room: Room, shards: Shards, mut rx: mpsc::Receiver<ActorMsg
             ActorMsg::Connected { conn, tx } => {
                 shards.tell(conn, ShardMsg::Add { conn, tx });
                 room.on_connect(conn, &mut sink);
-                push_membership(&room, conn, &mut sink);
+                push_membership(room, conn, &mut sink);
             }
             ActorMsg::Packets { conn, packets } => {
                 for packet in packets {
                     room.handle(conn, packet, &mut sink);
                 }
-                push_membership(&room, conn, &mut sink);
+                push_membership(room, conn, &mut sink);
             }
             ActorMsg::DecodeFailed { conn, detail } => {
                 tracing::info!(%conn, %detail, "dropping connection after a bad frame");
@@ -164,11 +312,12 @@ pub async fn run(mut room: Room, shards: Shards, mut rx: mpsc::Receiver<ActorMsg
             }
             ActorMsg::Shutdown => {
                 room.shutdown(&mut sink);
+                saver.dirty |= sink.dirty;
                 break;
             }
         }
 
-        dirty |= sink.dirty;
+        saver.dirty |= sink.dirty;
         for (conn, (auth, no_text, slot)) in std::mem::take(&mut sink.updates) {
             shards.tell(
                 conn,
@@ -182,7 +331,8 @@ pub async fn run(mut room: Room, shards: Shards, mut rx: mpsc::Receiver<ActorMsg
         }
     }
 
-    tracing::info!(dirty, "room actor stopped");
+    saver.flush(room).await;
+    tracing::info!("room actor stopped");
 }
 
 /// Tell the owning shard what it needs to filter broadcasts for this connection.

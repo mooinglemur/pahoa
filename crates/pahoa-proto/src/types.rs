@@ -372,6 +372,21 @@ impl From<u8> for Permission {
 }
 
 impl Permission {
+    /// Strict parse, for contexts where an unrecognized value means the input
+    /// is corrupt rather than merely unknown — a save file, not a packet.
+    ///
+    /// [`From<u8>`] is the lenient counterpart and is what the protocol uses.
+    pub fn from_wire(v: i64) -> Option<Self> {
+        Some(match v {
+            0b000 => Self::Disabled,
+            0b001 => Self::Enabled,
+            0b010 => Self::Goal,
+            0b110 => Self::Auto,
+            0b111 => Self::AutoEnabled,
+            _ => return None,
+        })
+    }
+
     /// The option text this permission came from.
     ///
     /// The reference keeps these modes as *strings* on the context and only

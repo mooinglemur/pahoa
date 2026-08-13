@@ -21,3 +21,7 @@ pahoa-datastore = { path = "../pahoa-datastore" }
 strsim = "0.11"
 pahoa-pyrandom = { path = "../pahoa-pyrandom" }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+thiserror.workspace = true
+# The save codec only — pure CPU on a background thread, no I/O, so this does
+# not compromise the crate's transport-independence.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

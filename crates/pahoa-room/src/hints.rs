@@ -35,18 +35,26 @@
 use pahoa_multidata::{Hint, HintIdentity, HintStatus, MultiData, item_flags};
 use pahoa_pyrandom::PyRandom;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::room::SlotKey;
 
 /// Every slot's hints, in insertion order.
+///
+/// Each list is behind an `Arc` so a save snapshot is a refcount bump rather
+/// than a deep clone — a hint carries an owned entrance string, so cloning the
+/// lot would mean one allocation per hint per save.
 #[derive(Debug, Default)]
 pub struct HintStore {
-    by_slot: HashMap<SlotKey, Vec<Hint>>,
+    by_slot: HashMap<SlotKey, Arc<Vec<Hint>>>,
 }
 
 impl HintStore {
     pub fn get(&self, key: SlotKey) -> &[Hint] {
-        self.by_slot.get(&key).map(Vec::as_slice).unwrap_or(&[])
+        self.by_slot
+            .get(&key)
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
     }
 
     /// The hint covering `location` in `finder`'s world, if one exists.
@@ -61,7 +69,7 @@ impl HintStore {
 
     /// Insert or replace by identity. Returns true if this was new.
     pub fn upsert(&mut self, key: SlotKey, hint: Hint) -> bool {
-        let list = self.by_slot.entry(key).or_default();
+        let list = Arc::make_mut(self.by_slot.entry(key).or_default());
         let identity = hint.identity();
         match list.iter_mut().find(|h| h.identity() == identity) {
             Some(existing) => {
@@ -85,23 +93,28 @@ impl HintStore {
     pub fn recheck(&mut self, finder: u32, checked: &dyn Fn(u32, i64) -> bool) -> Vec<SlotKey> {
         let mut changed = Vec::new();
         for (key, hints) in self.by_slot.iter_mut() {
-            let mut touched = false;
-            for hint in hints.iter_mut() {
-                if hint.finding_player != finder {
-                    continue;
-                }
-                if hint.found && hint.status == HintStatus::Found {
-                    continue;
-                }
-                if checked(hint.finding_player, hint.location) {
-                    hint.found = true;
-                    hint.status = HintStatus::Found;
-                    touched = true;
-                }
+            // Which hints move is decided before touching the `Arc`, so a slot
+            // with nothing to update is never cloned out from under a save in
+            // flight. This runs on every check batch, so it matters.
+            let touched: Vec<usize> = hints
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| {
+                    h.finding_player == finder
+                        && !(h.found && h.status == HintStatus::Found)
+                        && checked(h.finding_player, h.location)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if touched.is_empty() {
+                continue;
             }
-            if touched {
-                changed.push(*key);
+            let hints = Arc::make_mut(hints);
+            for i in touched {
+                hints[i].found = true;
+                hints[i].status = HintStatus::Found;
             }
+            changed.push(*key);
         }
         changed.sort_unstable();
         changed
@@ -116,27 +129,29 @@ impl HintStore {
         status: HintStatus,
     ) -> Option<Hint> {
         let list = self.by_slot.get_mut(&key)?;
-        let hint = list
-            .iter_mut()
-            .find(|h| h.finding_player == finder && h.location == location)?;
-        let status = if hint.found {
+        // Located before `make_mut`, so a no-op status change never clones.
+        let index = list
+            .iter()
+            .position(|h| h.finding_player == finder && h.location == location)?;
+        let status = if list[index].found {
             HintStatus::Found
         } else {
             status
         };
-        if hint.status == status {
+        if list[index].status == status {
             return None;
         }
+        let hint = &mut Arc::make_mut(list)[index];
         hint.status = status;
         Some(hint.clone())
     }
 
     /// Replace a slot's hints wholesale, for save restore.
     pub fn replace(&mut self, key: SlotKey, hints: Vec<Hint>) {
-        self.by_slot.insert(key, hints);
+        self.by_slot.insert(key, Arc::new(hints));
     }
 
-    pub fn slots(&self) -> impl Iterator<Item = (&SlotKey, &Vec<Hint>)> {
+    pub fn slots(&self) -> impl Iterator<Item = (&SlotKey, &Arc<Vec<Hint>>)> {
         self.by_slot.iter()
     }
 }

@@ -8,8 +8,10 @@
 
 pub mod actor;
 pub mod config;
+pub mod save;
 pub mod server;
 pub mod shard;
 
 pub use config::NetConfig;
+pub use save::{SaveSink, SaveStore};
 pub use server::{Server, build_runtime, serve};

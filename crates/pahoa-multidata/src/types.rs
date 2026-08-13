@@ -49,20 +49,23 @@ pub enum ClientStatus {
 }
 
 impl ClientStatus {
-    pub fn from_i64(v: i64, path: &Path) -> Result<Self> {
-        Ok(match v {
+    /// The one table. Callers that have a path to blame use [`Self::from_i64`].
+    pub fn from_wire(v: i64) -> Option<Self> {
+        Some(match v {
             0 => Self::Unknown,
             5 => Self::Connected,
             10 => Self::Ready,
             20 => Self::Playing,
             30 => Self::Goal,
-            _ => {
-                return Err(Error::Enum {
-                    path: path.clone(),
-                    name: "ClientStatus",
-                    value: v,
-                });
-            }
+            _ => return None,
+        })
+    }
+
+    pub fn from_i64(v: i64, path: &Path) -> Result<Self> {
+        Self::from_wire(v).ok_or_else(|| Error::Enum {
+            path: path.clone(),
+            name: "ClientStatus",
+            value: v,
         })
     }
 }
@@ -78,20 +81,23 @@ pub enum HintStatus {
 }
 
 impl HintStatus {
-    pub fn from_i64(v: i64, path: &Path) -> Result<Self> {
-        Ok(match v {
+    /// The one table. Callers that have a path to blame use [`Self::from_i64`].
+    pub fn from_wire(v: i64) -> Option<Self> {
+        Some(match v {
             0 => Self::Unspecified,
             10 => Self::NoPriority,
             20 => Self::Avoid,
             30 => Self::Priority,
             40 => Self::Found,
-            _ => {
-                return Err(Error::Enum {
-                    path: path.clone(),
-                    name: "HintStatus",
-                    value: v,
-                });
-            }
+            _ => return None,
+        })
+    }
+
+    pub fn from_i64(v: i64, path: &Path) -> Result<Self> {
+        Self::from_wire(v).ok_or_else(|| Error::Enum {
+            path: path.clone(),
+            name: "HintStatus",
+            value: v,
         })
     }
 

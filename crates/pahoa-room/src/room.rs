@@ -10,6 +10,7 @@ use crate::conn::{Client, ConnId, non_game_verb};
 use crate::effect::{CloseReason, EffectSink, Recipients};
 use crate::hints::HintStore;
 use crate::options::RoomOptions;
+use crate::save::{SaveError, Snapshot};
 use pahoa_multidata::{DataPackage as NameTables, Hint, MultiData, SlotType};
 use pahoa_proto::server::*;
 use pahoa_proto::types::*;
@@ -35,6 +36,13 @@ const PRINT_JSON_CHUNK: usize = 140;
 /// retrofitting it later would touch every structure, so it is kept from the start.
 pub type SlotKey = (u32, u32);
 
+/// `(team, slot, remote_items)` — the key of one of a slot's two item queues.
+///
+/// Two, not one, because a client that handles its own world's items locally
+/// gets a different stream from one that wants everything back from the server
+/// (`MultiServer.py:1126-1131`).
+pub type QueueKey = (u32, u32, bool);
+
 /// A running `!countdown`.
 ///
 /// The reference spawns a task that sleeps a second per step
@@ -59,11 +67,19 @@ pub struct Room {
     /// list, not a single entry.
     by_slot: HashMap<SlotKey, Vec<ConnId>>,
 
-    location_checks: HashMap<SlotKey, HashSet<i64>>,
+    /// Behind an `Arc` so [`Room::snapshot`] is a refcount bump per slot rather
+    /// than a deep clone. At 2000 slots and 400k checks a deep clone is tens of
+    /// milliseconds of mailbox stall on every save, however fast the disk is.
+    /// Mutated through [`Arc::make_mut`]: with no save in flight the refcount is
+    /// 1 and that is free, and with one in flight only the slots actually
+    /// touched are cloned.
+    location_checks: HashMap<SlotKey, Arc<HashSet<i64>>>,
     /// Two queues per slot, keyed on the connection's `remote_items` setting:
     /// a client that does not want its own world's items gets a different
     /// stream from one that does (`MultiServer.py:1126-1131`).
-    received_items: HashMap<(u32, u32, bool), Vec<NetworkItem>>,
+    ///
+    /// `Arc` for the same reason as `location_checks`.
+    received_items: HashMap<QueueKey, Arc<Vec<NetworkItem>>>,
     client_game_state: HashMap<SlotKey, ClientStatus>,
     name_aliases: HashMap<SlotKey, String>,
     hints_used: HashMap<SlotKey, i64>,
@@ -88,7 +104,11 @@ pub struct Room {
     countdown: Option<Countdown>,
 
     /// Free-form client key-value store.
-    stored_data: HashMap<String, Value>,
+    ///
+    /// `Arc` per value for the snapshot's sake, as above. No `make_mut` is ever
+    /// needed here: `Set` computes a fresh value and replaces the entry, so a
+    /// snapshot's `Arc` is never the one being written through.
+    stored_data: HashMap<String, Arc<Value>>,
     /// Who to notify when a key changes.
     stored_data_subscriptions: HashMap<String, HashSet<ConnId>>,
 
@@ -606,7 +626,9 @@ impl Room {
             let value = if key.starts_with(Self::READ_PREFIX) {
                 self.read_data(key).unwrap_or(Value::Null)
             } else {
-                self.stored_data.get(key).cloned().unwrap_or(Value::Null)
+                self.stored_data
+                    .get(key)
+                    .map_or(Value::Null, |v| (**v).clone())
             };
             values.insert(key.clone(), value);
         }
@@ -641,11 +663,10 @@ impl Room {
 
         // An absent key falls back to the packet's `default`, or 0 — not null
         // (`MultiServer.py:2183`).
-        let original = self
-            .stored_data
-            .get(&args.key)
-            .cloned()
-            .unwrap_or_else(|| args.default.clone().unwrap_or(Value::from(0)));
+        let original = self.stored_data.get(&args.key).map_or_else(
+            || args.default.clone().unwrap_or(Value::from(0)),
+            |v| (**v).clone(),
+        );
 
         let operations: Vec<(String, Value)> = args
             .operations
@@ -670,7 +691,8 @@ impl Room {
             }
         };
 
-        self.stored_data.insert(args.key.clone(), value.clone());
+        self.stored_data
+            .insert(args.key.clone(), Arc::new(value.clone()));
         out.mark_dirty();
 
         let slot = self.clients.get(&conn).map(|c| c.slot).unwrap_or(0);
@@ -945,10 +967,7 @@ impl Room {
             out.broadcast(Recipients::AllText, &feed);
         }
 
-        self.location_checks
-            .entry(key)
-            .or_default()
-            .extend(fresh.iter().copied());
+        Arc::make_mut(self.location_checks.entry(key).or_default()).extend(fresh.iter().copied());
 
         self.send_new_items(&dirty_slots, out);
 
@@ -1205,15 +1224,14 @@ impl Room {
         let members = self.group_members_of(target);
         if members.is_empty() {
             if item.player != target {
-                self.received_items
-                    .entry((team, target, false))
-                    .or_default()
-                    .push(item);
-            }
-            self.received_items
-                .entry((team, target, true))
-                .or_default()
+                Arc::make_mut(
+                    self.received_items
+                        .entry((team, target, false))
+                        .or_default(),
+                )
                 .push(item);
+            }
+            Arc::make_mut(self.received_items.entry((team, target, true)).or_default()).push(item);
         } else {
             for member in members {
                 self.send_item_to(team, member, item);
@@ -1895,7 +1913,7 @@ impl Room {
 
     /// How many locations a slot has checked.
     pub fn checked_count(&self, key: SlotKey) -> usize {
-        self.location_checks.get(&key).map_or(0, HashSet::len)
+        self.location_checks.get(&key).map_or(0, |c| c.len())
     }
 
     fn checked_locations(&self, key: SlotKey) -> Vec<i64> {
@@ -1922,7 +1940,7 @@ impl Room {
     /// `location_check_points * checks - hint_cost_absolute * hints_used`
     /// (`MultiServer.py:1845-1852`).
     pub fn slot_points(&self, key: SlotKey) -> i64 {
-        let checks = self.location_checks.get(&key).map_or(0, HashSet::len) as i64;
+        let checks = self.checked_count(key) as i64;
         let total = self.data.locations.count_for(key.1);
         let used = self.hints_used.get(&key).copied().unwrap_or(0);
         self.options.location_check_points as i64 * checks
@@ -1971,9 +1989,110 @@ impl Room {
         self.resolve(&Recipients::All)
     }
 
-    /// Snapshot of the key-value store, for saving and for tests.
-    pub fn stored_data(&self) -> &HashMap<String, Value> {
+    /// The key-value store, for tests. Saving goes through [`Room::snapshot`].
+    pub fn stored_data(&self) -> &HashMap<String, Arc<Value>> {
         &self.stored_data
+    }
+
+    // --- persistence -----------------------------------------------------
+
+    /// Take a consistent point-in-time copy of everything persistent.
+    ///
+    /// Runs on the actor, so it must stay O(slots): every bulky field is an
+    /// `Arc` clone. Nothing here allocates per location, per item or per hint,
+    /// which is what keeps a save off the room's critical path however slow the
+    /// backing store turns out to be.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            seed_name: self.data.seed_name.clone(),
+            options: self.options.clone(),
+            rng_state: self.rng.to_state().to_vec(),
+            location_checks: self
+                .location_checks
+                .iter()
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect(),
+            received_items: self
+                .received_items
+                .iter()
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect(),
+            hints: self
+                .hints
+                .slots()
+                .map(|(k, v)| (*k, Arc::clone(v)))
+                .collect(),
+            hints_used: self.hints_used.iter().map(|(k, v)| (*k, *v)).collect(),
+            name_aliases: self
+                .name_aliases
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
+            client_game_state: self
+                .client_game_state
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect(),
+            group_collected: self
+                .group_collected
+                .iter()
+                .map(|(k, v)| (*k, v.iter().copied().collect()))
+                .collect(),
+            allow_releases: self.allow_releases.iter().copied().collect(),
+            stored_data: self
+                .stored_data
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect(),
+        }
+    }
+
+    /// Restore a snapshot over a freshly constructed room.
+    ///
+    /// Refuses a save from a different seed. The reference compares
+    /// `connect_names` and raises (`MultiServer.py:686-687`); refusing either
+    /// way is right, because one seed's checks against another's location table
+    /// would present as corruption rather than as an error.
+    ///
+    /// Everything the save carries is replaced wholesale rather than merged.
+    /// The reference `update`s these maps onto whatever the fresh room built,
+    /// which differs only for slots the save does not mention — and since every
+    /// map is keyed by slot, both approaches leave those untouched.
+    ///
+    /// Live connections are deliberately not part of a save: a restored room
+    /// starts with nobody attached, and clients resync on `Connect`.
+    pub fn restore(&mut self, snapshot: Snapshot) -> Result<(), SaveError> {
+        if snapshot.seed_name != self.data.seed_name {
+            return Err(SaveError::WrongSeed {
+                expected: self.data.seed_name.clone(),
+                found: snapshot.seed_name,
+            });
+        }
+        let Some(rng) = PyRandom::from_state(&snapshot.rng_state) else {
+            return Err(SaveError::Malformed("random state is the wrong shape"));
+        };
+
+        self.options = snapshot.options;
+        self.rng = rng;
+        self.location_checks = snapshot.location_checks.into_iter().collect();
+        self.received_items = snapshot.received_items.into_iter().collect();
+        self.hints = HintStore::default();
+        for (key, list) in snapshot.hints {
+            self.hints
+                .replace(key, Arc::try_unwrap(list).unwrap_or_else(|a| (*a).clone()));
+        }
+        self.hints_used = snapshot.hints_used.into_iter().collect();
+        self.name_aliases = snapshot.name_aliases.into_iter().collect();
+        self.client_game_state = snapshot.client_game_state.into_iter().collect();
+        self.group_collected = snapshot
+            .group_collected
+            .into_iter()
+            .map(|(group, members)| (group, members.into_iter().collect()))
+            .collect();
+        self.allow_releases = snapshot.allow_releases.into_iter().collect();
+        self.stored_data = snapshot.stored_data.into_iter().collect();
+
+        Ok(())
     }
 
     pub fn shutdown(&mut self, out: &mut dyn EffectSink) {

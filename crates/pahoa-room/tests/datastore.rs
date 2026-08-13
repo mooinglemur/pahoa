@@ -133,7 +133,7 @@ fn a_set_stores_the_value_and_reports_both_sides() {
     // An absent key defaults to 0, not null.
     assert_eq!(replies[0]["original_value"], json!(0));
     assert_eq!(replies[0]["value"], json!(5));
-    assert_eq!(room.stored_data()["counter"], json!(5));
+    assert_eq!(*room.stored_data()["counter"], json!(5));
     assert!(sink.dirty);
 }
 
@@ -152,7 +152,7 @@ fn no_reply_is_sent_unless_asked_for() {
     );
 
     assert!(echoes(&sink, conn, &room).is_empty());
-    assert_eq!(room.stored_data()["quiet"], json!(1));
+    assert_eq!(*room.stored_data()["quiet"], json!(1));
 }
 
 #[test]

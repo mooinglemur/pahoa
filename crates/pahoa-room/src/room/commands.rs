@@ -411,7 +411,7 @@ impl Room {
                 "\n{} has {connected} connection{}{tag_text}{status_text} ({}/{})",
                 self.slot_alias(key),
                 if connected == 1 { "" } else { "s" },
-                self.location_checks.get(&key).map_or(0, HashSet::len),
+                self.checked_count(key),
                 self.data.locations.count_for(*slot),
             ));
         }
@@ -755,10 +755,7 @@ impl Room {
             flags: 0,
         };
         for remote in [false, true] {
-            self.received_items
-                .entry((team, slot, remote))
-                .or_default()
-                .push(item);
+            Arc::make_mut(self.received_items.entry((team, slot, remote)).or_default()).push(item);
         }
 
         out.broadcast(

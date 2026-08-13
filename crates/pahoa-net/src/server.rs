@@ -5,7 +5,7 @@
 //! compression, therefore happen per-connection on worker threads rather than
 //! on the single task that owns room state.
 
-use crate::actor::{self, ActorMsg};
+use crate::actor::{self, ActorMsg, SaveConfig};
 use crate::config::NetConfig;
 use crate::shard::{Outbound, Shards};
 use futures_util::{SinkExt, StreamExt};
@@ -24,19 +24,39 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 pub struct Server {
     pub local_addr: SocketAddr,
     actor_tx: mpsc::Sender<ActorMsg>,
+    /// Fires when the actor loop has returned, final save included. Taken by
+    /// the first `shutdown` caller; a second call has nothing left to wait for.
+    stopped: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl Server {
-    /// Bind and start serving. Returns once the listener is up, so tests can
-    /// connect without racing.
+    /// Bind and start serving, without persistence. Returns once the listener
+    /// is up, so tests can connect without racing.
     pub async fn start(room: Room, config: NetConfig) -> io::Result<Self> {
+        Self::start_with_saves(room, config, SaveConfig::default()).await
+    }
+
+    /// As [`Server::start`], persisting to a [`crate::SaveStore`].
+    ///
+    /// Restoring is the caller's job and happens *before* this: a room is
+    /// constructed, restored, and only then served, so no client can ever see
+    /// a half-loaded room.
+    pub async fn start_with_saves(
+        mut room: Room,
+        config: NetConfig,
+        saves: SaveConfig,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((config.bind.as_str(), config.port)).await?;
         let local_addr = listener.local_addr()?;
 
         let shards = Shards::spawn(config.shards_resolved(), 4096);
         let (actor_tx, actor_rx) = mpsc::channel(8192);
 
-        tokio::spawn(actor::run(room, shards, actor_rx));
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            actor::run_with_saves(&mut room, shards, actor_rx, saves).await;
+            let _ = stopped_tx.send(());
+        });
 
         let accept_tx = actor_tx.clone();
         let cfg = config.clone();
@@ -67,11 +87,21 @@ impl Server {
         Ok(Self {
             local_addr,
             actor_tx,
+            stopped: tokio::sync::Mutex::new(Some(stopped_rx)),
         })
     }
 
+    /// Stop the room and wait for it to finish, including its final save.
+    ///
+    /// Waiting matters: without it the process can exit while the flush is
+    /// still on a blocking thread, which throws away the very state the flush
+    /// exists to keep. The flush has its own timeout, so this cannot hang
+    /// indefinitely on a stuck filesystem.
     pub async fn shutdown(&self) {
         let _ = self.actor_tx.send(ActorMsg::Shutdown).await;
+        if let Some(stopped) = self.stopped.lock().await.take() {
+            let _ = stopped.await;
+        }
     }
 }
 

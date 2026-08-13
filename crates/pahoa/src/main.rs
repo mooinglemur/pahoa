@@ -22,6 +22,7 @@ USAGE:
                                        Summarize a multidata file
     pahoa serve <file.archipelago> [--snapshot <datapackage.json>]
                 [--port <n>] [--bind <addr>] [--password <pw>]
+                [--save-dir <dir>] [--save-interval <seconds>]
                                        Host a multiworld
     pahoa selftest                     Verify the build against known-answer tests
     pahoa --version
@@ -29,6 +30,11 @@ USAGE:
 The data package snapshot is produced by tools/export-datapackage.py. Without
 it, games are resolved from the seed's embedded package alone, which covers
 names and ids but never hint blacklists.
+
+--save-dir is an ordinary directory; one room per directory, claimed with an
+exclusive lock for as long as the process runs. Without it the room keeps
+nothing across a restart. --save-interval (default 60) is how much play the
+room may lose on an unclean stop.
 ";
 
 fn main() -> ExitCode {
@@ -53,6 +59,7 @@ fn main() -> ExitCode {
                         .cloned()
                 };
                 let snapshot = opt("--snapshot");
+                let save_dir = opt("--save-dir");
                 serve::run(serve::ServeArgs {
                     multidata: Path::new(path),
                     snapshot: snapshot.as_deref().map(Path::new),
@@ -65,6 +72,17 @@ fn main() -> ExitCode {
                     },
                     bind: opt("--bind").unwrap_or_else(|| "0.0.0.0".to_string()),
                     password: opt("--password"),
+                    save_dir: save_dir.as_deref().map(Path::new),
+                    save_interval: match opt("--save-interval") {
+                        Some(s) => match s.parse::<u64>() {
+                            // Zero would spin the actor on a timer that fires
+                            // continuously, so it is an error rather than a
+                            // clever way to ask for constant saving.
+                            Ok(v) if v > 0 => std::time::Duration::from_secs(v),
+                            _ => return report(Err(format!("bad --save-interval {s:?}"))),
+                        },
+                        None => std::time::Duration::from_secs(60),
+                    },
                 })
             }
             None => Err("serve needs a multidata path".to_string()),

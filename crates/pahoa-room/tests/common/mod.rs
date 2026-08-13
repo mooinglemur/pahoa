@@ -1,4 +1,8 @@
 //! Shared fixtures for room tests.
+//!
+//! Every test binary compiles this module separately, so a helper only one of
+//! them needs reads as dead code in all the others.
+#![allow(dead_code)]
 
 use pahoa_multidata::{GamePackage, MultiData};
 use pahoa_proto::types::Version;
@@ -8,7 +12,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[allow(dead_code)]
 pub fn fixture_dir() -> PathBuf {
     std::env::var_os("PAHOA_FIXTURE_DIR")
         .map(PathBuf::from)
@@ -83,9 +86,6 @@ pub fn skip_without(name: &str) -> bool {
     false
 }
 
-/// Test binaries each compile this module separately, so a helper used by only
-/// one of them reads as dead code in the others.
-#[allow(dead_code)]
 pub fn packet_name(p: &pahoa_proto::ServerPacket) -> &'static str {
     use pahoa_proto::ServerPacket as S;
     match p {
