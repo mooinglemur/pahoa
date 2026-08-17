@@ -37,10 +37,17 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--save-dir <dir>` | — | Where the room persists itself |
 | `--save-interval <secs>` | `60` | Save cadence |
 | `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
+| `--log-level <level>` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
 
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+**Logs go to stderr and stdout carries exactly one line** — the startup line
+naming slots, locations, seed, address and build. That split is what makes
+`pahoa serve … 2>/dev/null` a way to read the line a machine is meant to parse.
+A room stops cleanly on SIGINT or SIGTERM alike, so a container teardown gets
+the same final save that Ctrl-C does.
 
 Without `--snapshot`, games resolve from the seed's own embedded data package.
 That covers item and location names and ids for every game in the seed, so a
@@ -122,9 +129,10 @@ Deliberately absent so far, and reachable from no flag:
   It overlaps the admin REST API heavily and is worth writing once, with it.
 - **Per-slot passwords**, the lobby integration, the tracker APIs and the admin
   REST API.
-- `--loglevel`, `--logtime`, `--auto_shutdown` and `--disable_save`, which the
-  reference has. The first two want a logging surface pahoa does not have yet;
-  the last two are covered by omitting `--save-dir`.
+- `--auto_shutdown` and `--disable_save`, which the reference has. Both are
+  covered by omitting `--save-dir`. Its `--loglevel` is spelled `--log-level`
+  here and aliased, and `--logtime` has no equivalent because every line is
+  timestamped already.
 
 ## Development
 

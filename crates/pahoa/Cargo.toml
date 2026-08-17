@@ -25,3 +25,11 @@ tokio = { version = "1", features = ["signal", "rt"] }
 pahoa-pickle = { path = "../pahoa-pickle" }
 pahoa-pyrandom = { path = "../pahoa-pyrandom" }
 mimalloc = { version = "0.1", default-features = false, optional = true }
+tracing = "0.1"
+# Deliberately not `env-filter`: it pulls `regex` and its automata tables into a
+# binary that keeps its dependency list thin on purpose, and the only filtering
+# pahoa offers is a single global level from `--log-level`.
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "ansi",
+] }

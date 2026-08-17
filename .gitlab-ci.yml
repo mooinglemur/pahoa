@@ -91,6 +91,23 @@ image-pahoa:
     - k8s
   variables:
     CONTAINERS_STORAGE_CONF: /tmp/storage.conf
+    # Sized from a measured build, not a guess: a clean `cargo build --release`
+    # of this workspace peaks at ~950 MiB resident (fat LTO with
+    # codegen-units = 1 is the high-water mark, and it is single-threaded, which
+    # is also why more than 8 CPUs buys very little here). Call it ~1.5 GiB with
+    # buildah's overlay and push on top; 4 GiB leaves room for the tree to grow
+    # without a job that OOM-kills halfway through a link.
+    #
+    # request == limit on both, so the pod lands in Guaranteed QoS and a build
+    # cannot be evicted partway through.
+    #
+    # These do nothing unless the runner permits the overwrite — its config.toml
+    # needs the matching cpu/memory `*_overwrite_max_allowed` entries under
+    # [runners.kubernetes], set at least this high.
+    KUBERNETES_CPU_REQUEST: "8"
+    KUBERNETES_CPU_LIMIT: "8"
+    KUBERNETES_MEMORY_REQUEST: "4Gi"
+    KUBERNETES_MEMORY_LIMIT: "4Gi"
   rules:
     - if: '$CI_COMMIT_BRANCH'
       changes: *pahoa-changes

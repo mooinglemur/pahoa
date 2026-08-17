@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::level_filters::LevelFilter;
 
 pub struct ServeArgs<'a> {
     pub multidata: &'a Path,
@@ -25,9 +26,12 @@ pub struct ServeArgs<'a> {
     pub options: RoomOptions,
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
+    pub log_level: LevelFilter,
 }
 
 pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
+    init_logging(args.log_level);
+
     let raw =
         std::fs::read(args.multidata).map_err(|e| format!("{}: {e}", args.multidata.display()))?;
     let data =
@@ -45,17 +49,17 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     if !report.unresolved.is_empty() {
         // Not fatal — names degrade to "Unknown item (ID:n)" — but an operator
         // should be told rather than left to notice in chat.
-        eprintln!(
-            "warning: no data package for {} game(s): {}",
-            report.unresolved.len(),
+        tracing::warn!(
+            games = report.unresolved.len(),
+            "no data package for {}",
             report.unresolved.join(", ")
         );
     }
     if !report.missing_hint_blacklist.is_empty() {
-        eprintln!(
-            "warning: no hint blacklist for {} game(s); !hint will not refuse \
-             non-hintable names for them (export one with tools/export-datapackage.py)",
-            report.missing_hint_blacklist.len()
+        tracing::warn!(
+            games = report.missing_hint_blacklist.len(),
+            "no hint blacklist; !hint will not refuse non-hintable names for \
+             them (export one with tools/export-datapackage.py)"
         );
     }
 
@@ -75,7 +79,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     // holds fails here rather than after we have started answering.
     let saves = match args.save_dir {
         None => {
-            eprintln!("warning: no --save-dir, so this room keeps nothing across a restart");
+            tracing::warn!("no --save-dir, so this room keeps nothing across a restart");
             SaveConfig {
                 store: None,
                 ..Default::default()
@@ -89,9 +93,9 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
                     let slots = snapshot.location_checks.len();
                     room.restore(snapshot)
                         .map_err(|e| format!("{}: {e}", store.path().display()))?;
-                    println!("restored {} from {}", plural(slots), store.path().display());
+                    tracing::info!("restored {} from {}", plural(slots), store.path().display());
                 }
-                None => println!("no save in {}; starting fresh", dir.display()),
+                None => tracing::info!("no save in {}; starting fresh", dir.display()),
             }
             SaveConfig {
                 store: Some(Arc::new(store)),
@@ -119,21 +123,74 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         let server = Server::start_with_saves(room, config, saves)
             .await
             .map_err(|e| format!("bind: {e}"))?;
+        // The one line on stdout, and the only machine-readable evidence a room
+        // came up. The build version is appended rather than inserted so every
+        // field that was already here keeps its position.
         println!(
             "pahoa serving {} slots, {} locations, seed {} on {} \
-             (outbound budget {} MiB)",
+             (outbound budget {} MiB, version {})",
             data.slot_info.len(),
             data.locations.len(),
             data.seed_name,
             server.local_addr,
             budget / (1024 * 1024),
+            env!("CARGO_PKG_VERSION"),
         );
 
-        tokio::signal::ctrl_c().await.ok();
-        println!("shutting down");
+        let signal = shutdown_signal().await;
+        tracing::info!(signal, "shutting down");
         server.shutdown().await;
         Ok(())
     })
+}
+
+/// Start collecting the `tracing` events the crates below this one emit.
+///
+/// Without a subscriber every one of them is discarded, which is how a room
+/// whose saves are failing — `actor.rs` logs that at `error!` — could run
+/// completely silently.
+///
+/// Logs go to **stderr**, which leaves stdout carrying only the startup line.
+/// That is what makes `pahoa serve … 2>/dev/null` a way to read the one line a
+/// machine is meant to parse.
+fn init_logging(level: LevelFilter) {
+    use std::io::IsTerminal;
+
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        // Color when a person is watching, plain text when the kubelet is.
+        .with_ansi(std::io::stderr().is_terminal())
+        .init();
+}
+
+/// Resolve on the first signal asking this process to stop, naming it.
+///
+/// SIGTERM is the one that matters in a container: Kubernetes sends it and
+/// SIGKILLs after the grace period, so a room waiting only on SIGINT never runs
+/// `server.shutdown()` and silently loses up to `--save-interval` of play on
+/// every teardown — a rollout, a node drain, a rescheduled pod.
+async fn shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    // Failing to install the handler is not worth refusing to serve over. The
+    // room still saves on its timer and SIGINT still works; say so and carry on.
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(term) => term,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "cannot handle SIGTERM; only SIGINT will stop this room cleanly"
+            );
+            tokio::signal::ctrl_c().await.ok();
+            return "SIGINT";
+        }
+    };
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+        _ = term.recv() => "SIGTERM",
+    }
 }
 
 /// Overlay the seed's own `server_options` onto what the command line asked for.
@@ -152,7 +209,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 /// option, skipping" (`:785-791`).
 fn apply_embedded(options: &mut RoomOptions, server_options: Option<&PyObj>) {
     let Some(dict) = server_options.and_then(PyObj::as_dict) else {
-        eprintln!("warning: --use-embedded-options, but this seed carries no server_options");
+        tracing::warn!("--use-embedded-options, but this seed carries no server_options");
         return;
     };
 
@@ -210,17 +267,17 @@ fn apply_embedded(options: &mut RoomOptions, server_options: Option<&PyObj>) {
         };
         match taken {
             Some(line) => applied.push(line),
-            None => eprintln!(
-                "warning: ignoring embedded server option {key}: unusable {}",
+            None => tracing::warn!(
+                "ignoring embedded server option {key}: unusable {}",
                 raw.type_name()
             ),
         }
     }
 
     if applied.is_empty() {
-        eprintln!("warning: --use-embedded-options, but this seed sets no room options");
+        tracing::warn!("--use-embedded-options, but this seed sets no room options");
     } else {
-        println!("room options from the seed: {}", applied.join(" "));
+        tracing::info!("room options from the seed: {}", applied.join(" "));
     }
 }
 
@@ -284,8 +341,8 @@ fn load_save(store: &SaveStore, dir: &Path) -> Result<Option<Snapshot>, String> 
                     return;
                 }
             }
-            eprintln!(
-                "warning: reading the save in {} is taking a long time. If this is a \
+            tracing::warn!(
+                "reading the save in {} is taking a long time. If this is a \
                  network filesystem it may be recovering; the room will start once it \
                  responds.",
                 dir.display()

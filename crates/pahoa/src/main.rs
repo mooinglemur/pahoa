@@ -15,6 +15,7 @@ use pahoa_room::RoomOptions;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
+use tracing::level_filters::LevelFilter;
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
@@ -40,6 +41,9 @@ SERVE OPTIONS
     --outbound-budget <MiB>  Cap on queued outbound data across all clients.
                              Defaults to 288 KiB per slot, floored at 64 MiB —
                              a 2000-slot room gets 562 MiB, a small one 64.
+    --log-level <level>      trace, debug, info, warn, error (default info).
+                             Logs go to stderr; stdout carries only the one
+                             startup line.
 
 ROOM OPTIONS
     --password <pw>              Required from every client on connect
@@ -80,6 +84,7 @@ const SERVE_OPTS: &[Opt] = &[
     value("--save-dir", &[]),
     value("--save-interval", &[]),
     value("--outbound-budget", &[]),
+    value("--log-level", &["--loglevel"]),
     value("--password", &[]),
     value("--server-password", &["--server_password"]),
     value("--hint-cost", &["--hint_cost"]),
@@ -111,6 +116,23 @@ const REMAINING_MODES: &[Permission] =
     &[Permission::Enabled, Permission::Disabled, Permission::Goal];
 const COUNTDOWN_MODES: &[Permission] =
     &[Permission::Enabled, Permission::Disabled, Permission::Auto];
+
+/// What `--log-level` advertises, and what its error message lists.
+const LOG_LEVELS: &[(&str, LevelFilter)] = &[
+    ("trace", LevelFilter::TRACE),
+    ("debug", LevelFilter::DEBUG),
+    ("info", LevelFilter::INFO),
+    ("warn", LevelFilter::WARN),
+    ("error", LevelFilter::ERROR),
+];
+
+/// Also accepted, and not advertised — the same bargain [`Opt::aliases`] makes.
+/// These are Python `logging`'s spellings, which is what anyone arriving from
+/// the reference server's `--loglevel` will type.
+const LOG_LEVEL_ALIASES: &[(&str, LevelFilter)] = &[
+    ("warning", LevelFilter::WARN),
+    ("critical", LevelFilter::ERROR),
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -194,10 +216,16 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         None => None,
     };
 
+    let log_level = match args.get("--log-level") {
+        Some(v) => log_level(v)?,
+        None => LevelFilter::INFO,
+    };
+
     serve::run(serve::ServeArgs {
         multidata: Path::new(multidata),
         snapshot: args.get("--snapshot").map(Path::new),
         outbound_budget_bytes,
+        log_level,
         port: args.number("--port")?.unwrap_or(38281),
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
         save_dir: args.get("--save-dir").map(Path::new),
@@ -249,6 +277,23 @@ fn mode(name: &str, text: &str, choices: &[Permission]) -> Result<Permission, St
         .ok_or_else(|| {
             let names: Vec<&str> = choices.iter().map(|p| p.as_text()).collect();
             format!("{name}: expected one of {}, got {text:?}", names.join(" "))
+        })
+}
+
+/// Strict level parsing, on the same terms as [`mode`]: a typo is told what the
+/// choices are rather than silently leaving the room at its default verbosity.
+fn log_level(text: &str) -> Result<LevelFilter, String> {
+    LOG_LEVELS
+        .iter()
+        .chain(LOG_LEVEL_ALIASES)
+        .find(|(name, _)| *name == text)
+        .map(|(_, level)| *level)
+        .ok_or_else(|| {
+            let names: Vec<&str> = LOG_LEVELS.iter().map(|(n, _)| *n).collect();
+            format!(
+                "--log-level: expected one of {}, got {text:?}",
+                names.join(" ")
+            )
         })
 }
 
