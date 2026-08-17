@@ -1,0 +1,145 @@
+# Image build pipeline for pahoa.
+#
+# One image, unlike the lobby's five: the `Dockerfile` here is already
+# self-contained multi-stage — builder, a `verify` stage that runs
+# `pahoa selftest` and asserts a static ELF, then `FROM scratch` — so there is
+# no separate cargo job staging a `build-result` binary next to it. The whole
+# pipeline is a test job and a buildah job.
+#
+# Images are built on every branch and always pushed as :sha-<short sha>, which
+# is what puna's pod specs pin. The moving tags are branch-gated: main pushes
+# :latest, ionium-dev pushes :dev, every other branch pushes no moving tag.
+#
+# Every job's `changes:` filter includes .gitlab-ci.yml -- the build recipe
+# itself. Otherwise a fix to this file can only be deployed via a manual
+# web-triggered run.
+
+# Only run on the canonical GitLab instance. If this YAML ends up on a fork,
+# a different instance, or a mirror elsewhere, no pipeline is created at all.
+workflow:
+  rules:
+    - if: '$CI_SERVER_HOST == "git.mooinglemur.com"'
+
+default:
+  interruptible: true
+
+stages:
+  - test
+  - image
+
+# Everything in the tree feeds the one binary, so there is no useful narrower
+# filter than "the code, the build recipe, or the toolchain moved".
+.pahoa-changes: &pahoa-changes
+  - "Cargo.*"
+  - "crates/**/*"
+  - "rust-toolchain.toml"
+  - ".cargo/**/*"
+  - "Dockerfile"
+  - ".dockerignore"
+  - ".gitlab-ci.yml"
+
+# ---- test stage ----
+
+# Runs against the host gnu target, not musl: this is checking that the code is
+# correct, and the Dockerfile's `verify` stage is what checks that the shipped
+# musl artifact is static and computes the right answers.
+#
+# No apt install step. pahoa links no OpenSSL, no libpq and no system zlib —
+# the only C in the tree is vendored inside mimalloc, and the rust image
+# already has a compiler for it.
+test:
+  stage: test
+  image: rust:1.95-trixie
+  tags:
+    - linux
+    - k8s
+  cache:
+    key: cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - target/
+      - .cargo/
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+      changes: *pahoa-changes
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  script:
+    - cargo fmt --all --check
+    - cargo clippy --workspace --all-targets -- -D warnings
+    # Hermetic by design: the `.archipelago` seeds are large, not ours to
+    # redistribute, and therefore gitignored symlinks. Every test that wants one
+    # skips loudly rather than passing silently — see
+    # crates/pahoa-pickle/tests/fixtures.rs. The differential half additionally
+    # needs python3 and skips without it.
+    - cargo test --workspace
+
+# ---- image stage ----
+
+# Buildah, not dind: nothing untrusted is built here, so this needs a builder
+# rather than an isolation boundary. Storage setup mirrors the lobby's working
+# pipeline.
+image:
+  stage: image
+  image: quay.io/buildah/stable
+  tags:
+    - linux
+    - k8s
+  variables:
+    CONTAINERS_STORAGE_CONF: /tmp/storage.conf
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+      changes: *pahoa-changes
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  before_script:
+    # Native kernel overlay. The image's storage.conf sets mount_program =
+    # fuse-overlayfs, but FUSE needs CAP_SYS_ADMIN, which this tier lacks;
+    # /dev/fuse does not help, it fails EPERM at mount time. Dropping
+    # mount_program lets buildah mount overlay directly.
+    #
+    # Must be a config file via $CONTAINERS_STORAGE_CONF, not
+    # `--storage-driver overlay`: containers-storage persists driver options
+    # into the graphroot on first use, so the flag inherits mount_program anyway
+    # depending on what touched the store first.
+    #
+    # graphroot stays on the container filesystem (node NVMe), not the build dir
+    # (emptyDir).
+    - |
+      cat > "$CONTAINERS_STORAGE_CONF" <<'CONF'
+      [storage]
+      driver = "overlay"
+      runroot = "/var/run/containers/storage"
+      graphroot = "/var/lib/containers/storage"
+      [storage.options.overlay]
+      mountopt = "nodev"
+      CONF
+    # Build output says nothing about storage. GraphOptions shows whether this
+    # config won: overlay.mountopt=nodev alone is right, a mount_program entry
+    # means it didn't. A fall back to vfs is slow, not broken.
+    - buildah info
+    - echo "$CI_REGISTRY_PASSWORD" | buildah login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # Which moving tag (if any) this branch owns. Everything else gets only the
+    # immutable sha- tag.
+    - |
+      case "$CI_COMMIT_BRANCH" in
+        main)        MOVING_TAG=latest ;;
+        ionium-dev)  MOVING_TAG=dev ;;
+        *)           MOVING_TAG= ;;
+      esac
+      echo "branch=$CI_COMMIT_BRANCH moving tag=${MOVING_TAG:-<none>}"
+      # push_image <image> -- pushes :sha-<short sha> plus the branch's moving
+      # tag. Tagged after the build so both names are guaranteed to be the same
+      # image.
+      push_image() {
+        buildah push "$1:sha-$CI_COMMIT_SHORT_SHA"
+        if [ -n "$MOVING_TAG" ]; then
+          buildah tag "$1:sha-$CI_COMMIT_SHORT_SHA" "$1:$MOVING_TAG"
+          buildah push "$1:$MOVING_TAG"
+        fi
+      }
+  script:
+    # The project's own registry path rather than a sub-image: pahoa produces
+    # exactly one image, so `$CI_REGISTRY_IMAGE` already reads as `.../pahoa`.
+    - IMAGE="$CI_REGISTRY_IMAGE"
+    - buildah build -t "$IMAGE:sha-$CI_COMMIT_SHORT_SHA" .
+    - push_image "$IMAGE"
