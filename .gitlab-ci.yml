@@ -79,7 +79,11 @@ test:
 # Buildah, not dind: nothing untrusted is built here, so this needs a builder
 # rather than an isolation boundary. Storage setup mirrors the lobby's working
 # pipeline.
-image:
+#
+# Named `image-pahoa`, not `image`: a top-level `image:` key is the reserved
+# global job-image setting, so a job by that name is parsed as a malformed one
+# of those rather than as a job at all ("image name should be a string").
+image-pahoa:
   stage: image
   image: quay.io/buildah/stable
   tags:
