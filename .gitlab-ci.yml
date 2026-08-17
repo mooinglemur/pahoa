@@ -53,13 +53,47 @@ test:
   tags:
     - linux
     - k8s
+  # The registry only, deliberately not `target/`. A cold clippy-plus-test of
+  # this workspace measures 77 s on 8 CPUs, against a `target/` that is over
+  # 3 GB — zipping, uploading, downloading and unpacking that every run costs
+  # more than the build it would save. Downloading crates is the part actually
+  # worth keeping.
+  #
+  # Keyed on Cargo.lock rather than the branch, because what is cached is a
+  # function of the dependency set and nothing else: every branch resolving the
+  # same lockfile shares one cache, and changing a dependency invalidates it.
   cache:
-    key: cargo-$CI_COMMIT_REF_SLUG
+    key:
+      files:
+        - Cargo.lock
     paths:
-      - target/
       - .cargo/
   variables:
     CARGO_HOME: $CI_PROJECT_DIR/.cargo
+    # This is the job worth giving CPU to. Unlike the image build — whose tail is
+    # a single-threaded LTO link — nearly all of this is compiling many crates
+    # and linking many test binaries, which parallelizes well.
+    #
+    # It also matters more than it looks: cargo picks its default job count from
+    # `available_parallelism()`, which respects the cgroup CPU quota. A pod with
+    # a small default quota therefore builds at that many jobs no matter how big
+    # the node is, so the quota *is* the build's parallelism.
+    #
+    # Measured on 8 CPUs, from cold with no cache: clippy 64 s, test 13 s
+    # (dependencies are built during clippy and reused), peaking at 2.27 GiB
+    # while test binaries link. 4 GiB leaves ~1.8x headroom; raise it if the
+    # tree grows enough to close that gap.
+    #
+    # request == limit on both, so the pod lands in Guaranteed QoS and cannot be
+    # evicted partway through.
+    #
+    # These do nothing unless the runner permits the overwrite — its config.toml
+    # needs the matching cpu/memory `*_overwrite_max_allowed` entries under
+    # [runners.kubernetes], set at least this high.
+    KUBERNETES_CPU_REQUEST: "8"
+    KUBERNETES_CPU_LIMIT: "8"
+    KUBERNETES_MEMORY_REQUEST: "4Gi"
+    KUBERNETES_MEMORY_LIMIT: "4Gi"
   rules:
     - if: '$CI_COMMIT_BRANCH'
       changes: *pahoa-changes
@@ -91,23 +125,10 @@ image-pahoa:
     - k8s
   variables:
     CONTAINERS_STORAGE_CONF: /tmp/storage.conf
-    # Sized from a measured build, not a guess: a clean `cargo build --release`
-    # of this workspace peaks at ~950 MiB resident (fat LTO with
-    # codegen-units = 1 is the high-water mark, and it is single-threaded, which
-    # is also why more than 8 CPUs buys very little here). Call it ~1.5 GiB with
-    # buildah's overlay and push on top; 4 GiB leaves room for the tree to grow
-    # without a job that OOM-kills halfway through a link.
-    #
-    # request == limit on both, so the pod lands in Guaranteed QoS and a build
-    # cannot be evicted partway through.
-    #
-    # These do nothing unless the runner permits the overwrite — its config.toml
-    # needs the matching cpu/memory `*_overwrite_max_allowed` entries under
-    # [runners.kubernetes], set at least this high.
-    KUBERNETES_CPU_REQUEST: "8"
-    KUBERNETES_CPU_LIMIT: "8"
-    KUBERNETES_MEMORY_REQUEST: "4Gi"
-    KUBERNETES_MEMORY_LIMIT: "4Gi"
+  # No resource override here on purpose. This job's wall time is dominated by
+  # the fat-LTO link, which is single-threaded, so extra CPU buys almost
+  # nothing — a measured 8-CPU release build ran at ~1.2x parallelism over its
+  # own wall time. It peaks around 950 MiB, comfortably inside any sane default.
   rules:
     - if: '$CI_COMMIT_BRANCH'
       changes: *pahoa-changes
