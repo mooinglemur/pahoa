@@ -460,9 +460,16 @@ impl Snapshot {
     }
 }
 
+/// Everything about a room's configuration **except its secrets**.
+///
+/// Passwords are deliberately absent. They used to be the first two fields
+/// here, and because [`Room::restore`](crate::Room::restore) assigns the
+/// decoded options wholesale, a saved password silently replaced the configured
+/// one on every restart — so rotating a password appeared to work and then
+/// reverted, and the configured value was never authoritative. The environment
+/// is the only source now, re-read on every start, which is also what lets a
+/// live rotation survive a restart.
 fn encode_options(w: &mut Writer, o: &RoomOptions) {
-    w.opt_str(o.password.as_deref());
-    w.opt_str(o.server_password.as_deref());
     w.uvar(o.hint_cost as u64);
     w.uvar(o.location_check_points as u64);
     for mode in [
@@ -482,8 +489,6 @@ fn encode_options(w: &mut Writer, o: &RoomOptions) {
 }
 
 fn decode_options(r: &mut Reader<'_>) -> Result<RoomOptions> {
-    let password = r.opt_str()?;
-    let server_password = r.opt_str()?;
     let hint_cost = r.u32var()?;
     let location_check_points = r.u32var()?;
     let mut modes = [Permission::Disabled; 4];
@@ -498,8 +503,11 @@ fn decode_options(r: &mut Reader<'_>) -> Result<RoomOptions> {
         tags.push(r.str()?);
     }
     Ok(RoomOptions {
-        password,
-        server_password,
+        // Never restored, so the configured values survive. See
+        // `encode_options`.
+        password: None,
+        server_password: None,
+        slot_passwords: Default::default(),
         hint_cost,
         location_check_points,
         release_mode: modes[0],
@@ -553,18 +561,6 @@ impl Writer {
 
     fn str(&mut self, s: &str) {
         self.bytes(s.as_bytes());
-    }
-
-    /// `None` and `Some("")` must stay distinguishable: an empty password is
-    /// not the same as no password.
-    fn opt_str(&mut self, s: Option<&str>) {
-        match s {
-            None => self.byte(0),
-            Some(s) => {
-                self.byte(1);
-                self.str(s);
-            }
-        }
     }
 
     fn key(&mut self, (team, slot): SlotKey) {
@@ -658,13 +654,6 @@ impl<'a> Reader<'a> {
     fn str(&mut self) -> Result<String> {
         let raw = self.bytes()?;
         String::from_utf8(raw.to_vec()).map_err(|_| SaveError::Malformed("string is not UTF-8"))
-    }
-
-    fn opt_str(&mut self) -> Result<Option<String>> {
-        match self.byte()? {
-            0 => Ok(None),
-            _ => Ok(Some(self.str()?)),
-        }
     }
 
     fn key(&mut self) -> Result<SlotKey> {
@@ -773,18 +762,44 @@ mod tests {
         assert!(matches!(r.uvar(), Err(SaveError::Malformed(_))));
     }
 
+    /// The save carries no secrets, so a room started with a password keeps it
+    /// across a restore rather than having it replaced by what was on disk.
+    /// This is the regression test for the bug that motivated dropping them:
+    /// the saved value used to win, so a rotated password reverted on restart.
     #[test]
-    fn an_empty_string_is_not_a_missing_one() {
-        // `Some("")` and `None` are different passwords, and conflating them
-        // would turn a blank password into no password on every restart.
+    fn restoring_does_not_disturb_the_configured_passwords() {
+        let mut options = RoomOptions {
+            password: Some("from-the-environment".to_string()),
+            server_password: Some("admin-secret".to_string()),
+            hint_cost: 42,
+            ..Default::default()
+        };
+        options
+            .slot_passwords
+            .insert(3, "per-slot-secret".to_string());
+
         let mut w = Writer::default();
-        w.opt_str(None);
-        w.opt_str(Some(""));
-        w.opt_str(Some("hunter2"));
+        encode_options(&mut w, &options);
         let body = w.into_inner();
-        let mut r = Reader::new(&body);
-        assert_eq!(r.opt_str().unwrap(), None);
-        assert_eq!(r.opt_str().unwrap(), Some(String::new()));
-        assert_eq!(r.opt_str().unwrap(), Some("hunter2".to_string()));
+
+        // Nothing secret reaches the encoding at all.
+        for secret in ["from-the-environment", "admin-secret", "per-slot-secret"] {
+            assert!(
+                !body.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "{secret:?} was written into the save"
+            );
+        }
+
+        // And what comes back carries none of them, so a wholesale assignment
+        // could only ever clear what was configured — which is why
+        // `Room::restore` puts them back explicitly.
+        let decoded = decode_options(&mut Reader::new(&body)).expect("decodes");
+        assert_eq!(decoded.password, None);
+        assert_eq!(decoded.server_password, None);
+        assert!(decoded.slot_passwords.is_empty());
+        assert_eq!(
+            decoded.hint_cost, 42,
+            "the non-secret options still survive"
+        );
     }
 }

@@ -104,6 +104,44 @@ second `pahoa serve` pointed at it exits rather than silently overwriting. The
 save cadence is what bounds how much play an unclean stop can lose; the flush on
 shutdown is a nicety, since SIGKILL, node loss and OOM kills all skip it.
 
+### Passwords
+
+Paths and ports are argv; **secrets are read from the environment**, because
+argv is readable with `ps` inside the container and in `kubectl get pod -o yaml`
+outside it. An environment value written literally into a pod spec is just as
+visible, so the win only arrives when an orchestrator sources these from a
+Kubernetes Secret with `envFrom`, leaving a reference rather than a value.
+
+| variable | equivalent | |
+|---|---|---|
+| `PAHOA_PASSWORD` | `--password` | One password for the whole room |
+| `PAHOA_SLOT_PASSWORDS` | — | A password per slot, as JSON |
+| `PAHOA_SERVER_PASSWORD` | `--server-password` | Enables `!admin login` |
+
+A room runs in one of three modes: passwordless, one room-wide password, or one
+per slot. `PAHOA_SLOT_PASSWORDS` is a flat JSON object, and since JSON object
+keys are strings the slot number is quoted:
+
+```json
+{"1": "quiet-harbor-ledger", "2": "amber-ferry-quartz"}
+```
+
+Slots absent from the object have no password. Setting a room-wide *and* a
+per-slot password is an error at startup rather than a silent preference for
+one. `--server-password` is a third, orthogonal thing — it gates `!admin`, not
+joining — so it coexists with either mode.
+
+**Precedence is environment, then seed, then flag.** The flags still work,
+because pahoa is also a tool someone runs by hand, but a secret arriving that
+way is warned about. The seed sits in the middle because `--use-embedded-options`
+exists to honor what a seed was generated with — but a password baked in at
+generation time is readable by anyone holding the seed, so it cannot override
+one the operator configured.
+
+**Passwords are never written to `room.save`.** The environment is authoritative
+on every start, which is what makes rotating one survive a restart rather than
+reverting to whatever was on disk.
+
 ### Room options
 
 | option | default | |
@@ -155,10 +193,12 @@ Deliberately absent so far, and reachable from no flag:
 - **The PROXY protocol.** With TLS terminated here there is less call for it,
   but a room behind a load balancer still sees the balancer's address rather
   than the client's.
+- **The scoped feed** — a second port on which a client receives only what is
+  relevant to its own slot, for clients that cannot handle the `PrintJSON`
+  firehose. Designed in [docs/scoped-feed.md](docs/scoped-feed.md).
 - **The `/` console command set**, and therefore what `!admin` dispatches into.
   It overlaps the admin REST API heavily and is worth writing once, with it.
-- **Per-slot passwords**, the lobby integration, the tracker APIs and the admin
-  REST API.
+- The lobby integration, the tracker APIs and the admin REST API.
 - `--auto_shutdown` and `--disable_save`, which the reference has. Both are
   covered by omitting `--save-dir`. Its `--loglevel` is spelled `--log-level`
   here and aliased, and `--logtime` has no equivalent because every line is

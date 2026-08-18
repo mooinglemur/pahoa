@@ -263,7 +263,8 @@ fn options_survive_a_restart() {
         return;
     }
     // `/option` changes these while the room is live, so they are state, not
-    // configuration, and the reference saves them for the same reason.
+    // configuration, and the reference saves them for the same reason. The
+    // secrets are the exception and are covered by the test below.
     let data = load(FIXTURE).unwrap();
     let room = room_for(
         data,
@@ -274,9 +275,6 @@ fn options_survive_a_restart() {
             collect_mode: pahoa_proto::Permission::Goal,
             remaining_mode: pahoa_proto::Permission::Disabled,
             item_cheat: false,
-            // An empty password is not the same as no password.
-            password: Some(String::new()),
-            server_password: Some("hunter2".to_string()),
             ..Default::default()
         },
     );
@@ -289,8 +287,82 @@ fn options_survive_a_restart() {
     assert_eq!(o.collect_mode, pahoa_proto::Permission::Goal);
     assert_eq!(o.remaining_mode, pahoa_proto::Permission::Disabled);
     assert!(!o.item_cheat);
-    assert_eq!(o.password.as_deref(), Some(""));
-    assert_eq!(o.server_password.as_deref(), Some("hunter2"));
+}
+
+/// Secrets are configuration, not state: the environment is authoritative on
+/// every start.
+///
+/// This is the regression test for a real bug. Passwords used to be the first
+/// two fields of the saved options, and `Room::restore` assigns them wholesale
+/// — so the value on disk won, a rotated password reverted on the next restart,
+/// and the configured value was never actually in force.
+#[test]
+fn a_saved_password_never_replaces_the_configured_one() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // A room started with one set of secrets, and saved.
+    let mut before = room_for(
+        load(FIXTURE).unwrap(),
+        RoomOptions {
+            password: Some("original".to_string()),
+            server_password: Some("original-admin".to_string()),
+            ..Default::default()
+        },
+    );
+    before
+        .options
+        .slot_passwords
+        .insert(3, "original-slot-3".to_string());
+    let bytes = before.snapshot().encode(true);
+
+    // Restarted with a different set. Rotation has to survive the restart,
+    // which is the whole point.
+    let mut after = room_for(
+        load(FIXTURE).unwrap(),
+        RoomOptions {
+            password: Some("rotated".to_string()),
+            server_password: Some("rotated-admin".to_string()),
+            ..Default::default()
+        },
+    );
+    after
+        .options
+        .slot_passwords
+        .insert(3, "rotated-slot-3".to_string());
+    after
+        .restore(Snapshot::decode(&bytes).expect("save decodes"))
+        .expect("save restores");
+
+    assert_eq!(after.options.password.as_deref(), Some("rotated"));
+    assert_eq!(
+        after.options.server_password.as_deref(),
+        Some("rotated-admin")
+    );
+    assert_eq!(
+        after.options.slot_passwords.get(&3).map(String::as_str),
+        Some("rotated-slot-3")
+    );
+}
+
+/// The other direction, and the one that would be silent: a room restarted
+/// *without* a password must not have one restored from disk either.
+#[test]
+fn restoring_into_a_passwordless_room_leaves_it_passwordless() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let before = room_for(
+        load(FIXTURE).unwrap(),
+        RoomOptions {
+            password: Some("was-set-once".to_string()),
+            ..Default::default()
+        },
+    );
+    let bytes = before.snapshot().encode(true);
+
+    let restored = reload(&bytes);
+    assert_eq!(restored.options.password, None);
 }
 
 #[test]

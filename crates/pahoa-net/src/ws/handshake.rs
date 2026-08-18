@@ -30,7 +30,11 @@ pub struct Request {
     pub accept_key: String,
     /// The client's `permessage-deflate` offer, if it made one we can accept.
     pub deflate: Option<Offer>,
-    /// Request target, kept for a future scoped-feed path.
+    /// Request target, kept for the HTTP surface to route on.
+    ///
+    /// Not for the scoped feed, despite what this once said: that is a second
+    /// *port*, because the clients that need it cannot select a path either.
+    /// See `docs/scoped-feed.md`.
     pub path: String,
 }
 

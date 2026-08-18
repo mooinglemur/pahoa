@@ -447,6 +447,7 @@ dependencies = [
  "pahoa-proto",
  "pahoa-pyrandom",
  "pahoa-room",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -15,6 +15,7 @@ pub mod hints;
 mod options;
 mod room;
 pub mod save;
+pub mod secret;
 mod slot_data;
 
 pub use conn::{Client, ConnId};

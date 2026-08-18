@@ -151,6 +151,134 @@ fn a_wrong_password_is_refused() {
     assert_eq!(refusal(&sink, conn, &room), [Refused::InvalidPassword]);
 }
 
+/// `connect`, with a password supplied.
+fn connect_with(name: &str, game: &str, password: &str) -> ClientPacket {
+    match connect(name, game, 0b001) {
+        ClientPacket::Connect(mut args) => {
+            args.password = Some(password.to_string());
+            ClientPacket::Connect(args)
+        }
+        other => other,
+    }
+}
+
+/// Attempt one connection and report what the room refused it for.
+fn attempt(room: &mut Room, conn: ConnId, packet: ClientPacket) -> Vec<Refused> {
+    let mut sink = Recorder::default();
+    room.on_connect(conn, &mut sink);
+    sink.clear();
+    room.handle(conn, packet, &mut sink);
+    refusal(&sink, conn, room)
+}
+
+#[test]
+fn a_per_slot_password_gates_only_its_own_slot() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+
+    // Every other slot in the seed is left without one, which is what "slots
+    // absent from the object have no password" has to mean in practice.
+    let mut options = RoomOptions::default();
+    options
+        .slot_passwords
+        .insert(slot, "quiet-harbor-ledger".to_string());
+    let mut room = room_for(data.clone(), options);
+
+    assert_eq!(
+        attempt(&mut room, ConnId(1), connect(&name, &game, 0b001)),
+        [Refused::InvalidPassword],
+        "no password supplied"
+    );
+    assert_eq!(
+        attempt(
+            &mut room,
+            ConnId(2),
+            connect_with(&name, &game, "amber-ferry-quartz")
+        ),
+        [Refused::InvalidPassword],
+        "the wrong password"
+    );
+    assert_eq!(
+        attempt(
+            &mut room,
+            ConnId(3),
+            connect_with(&name, &game, "quiet-harbor-ledger")
+        ),
+        [] as [Refused; 0],
+        "the right password"
+    );
+
+    // A different slot, which was given none, is unaffected.
+    let (other_slot, other_name, other_game) = data
+        .player_slots()
+        .nth(1)
+        .map(|(s, i)| (*s, i.name.clone(), i.game.clone()))
+        .expect("the fixture has a second player");
+    assert_ne!(other_slot, slot);
+    assert_eq!(
+        attempt(
+            &mut room,
+            ConnId(4),
+            connect(&other_name, &other_game, 0b001)
+        ),
+        [] as [Refused; 0],
+        "a slot with no password of its own stays open"
+    );
+}
+
+/// `RoomInfo` is sent before the slot name is known, so it cannot report a
+/// per-slot password per slot. It still has to say a password will be wanted,
+/// or a client will not prompt for one.
+#[test]
+fn room_info_announces_a_password_in_per_slot_mode_too() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, ..) = first_player(&data);
+    let mut options = RoomOptions::default();
+    options.slot_passwords.insert(slot, "secret".to_string());
+
+    let mut room = room_for(data, options);
+    let mut sink = Recorder::default();
+    room.on_connect(ConnId(1), &mut sink);
+
+    match sink.packets_for(ConnId(1), &room)[0] {
+        ServerPacket::RoomInfo(info) => assert!(info.password),
+        other => panic!("expected RoomInfo, got {}", packet_name(other)),
+    }
+}
+
+/// The two modes must not be distinguishable from outside: whichever is in
+/// force, a bad password is the same `InvalidPassword` as any other.
+#[test]
+fn a_per_slot_refusal_is_indistinguishable_from_a_room_wide_one() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+
+    let mut per_slot = RoomOptions::default();
+    per_slot.slot_passwords.insert(slot, "secret".to_string());
+    let mut a = room_for(data.clone(), per_slot);
+
+    let room_wide = RoomOptions {
+        password: Some("secret".to_string()),
+        ..Default::default()
+    };
+    let mut b = room_for(data, room_wide);
+
+    let wrong = connect_with(&name, &game, "wrong");
+    assert_eq!(
+        attempt(&mut a, ConnId(1), wrong.clone()),
+        attempt(&mut b, ConnId(1), wrong)
+    );
+}
+
 #[test]
 fn an_old_client_is_refused() {
     if skip_without(FIXTURE) {

@@ -7,6 +7,7 @@
 
 mod cli;
 mod inspect;
+mod secrets;
 mod serve;
 
 use cli::{Opt, flag, value};
@@ -178,11 +179,16 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
     }
     let multidata = one_path(&args, "serve")?;
 
-    let mut options = RoomOptions {
-        password: args.get("--password").map(str::to_string),
-        server_password: args.get("--server-password").map(str::to_string),
-        ..Default::default()
-    };
+    // Resolved before anything else can fail on a typo, so a room with a
+    // contradictory password configuration says so rather than starting.
+    let secrets = secrets::resolve(secrets::FromArgv {
+        password: args.get("--password"),
+        server_password: args.get("--server-password"),
+    })?;
+
+    // Without the secrets: `serve::run` applies those over the top, so that the
+    // seed's embedded options land between argv and the environment.
+    let mut options = RoomOptions::default();
     if let Some(v) = args.number::<u32>("--hint-cost")? {
         options.hint_cost = v;
     }
@@ -258,6 +264,7 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         snapshot: args.get("--snapshot").map(Path::new),
         outbound_budget_bytes,
         log_level,
+        secrets,
         tls,
         allow_plaintext,
         port: args.number("--port")?.unwrap_or(38281),

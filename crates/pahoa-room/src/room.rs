@@ -318,9 +318,10 @@ impl Room {
     fn handle_connect(&mut self, conn: ConnId, args: cmd::Connect, out: &mut dyn EffectSink) {
         let mut errors: Vec<ConnectionRefusedReason> = Vec::new();
 
-        if let Some(expected) = &self.options.password
-            && args.password.as_deref() != Some(expected.as_str())
-        {
+        // The room-wide password can be checked before anything about the
+        // client is known. A per-slot one cannot, so it waits until the name has
+        // resolved, below.
+        if !crate::secret::ct_eq_opt(self.options.password.as_deref(), args.password.as_deref()) {
             errors.push(ConnectionRefusedReason::InvalidPassword);
         }
 
@@ -330,6 +331,17 @@ impl Room {
         match resolved {
             None => errors.push(ConnectionRefusedReason::InvalidSlot),
             Some((_team, slot)) => {
+                // Now that the slot is known, its own password applies. A slot
+                // absent from the map has none. Pushed as the same
+                // `InvalidPassword` the room-wide check uses, so which of the
+                // two modes is in force is not something a caller can probe.
+                if !crate::secret::ct_eq_opt(
+                    self.options.slot_passwords.get(&slot).map(String::as_str),
+                    args.password.as_deref(),
+                ) {
+                    errors.push(ConnectionRefusedReason::InvalidPassword);
+                }
+
                 let ignore_game = Client::ignores_game(&args.game, &args.tags);
                 let expected_game = self.slot_game(slot);
 
@@ -1860,7 +1872,11 @@ impl Room {
             version: SERVER_VERSION,
             generator_version: Version::from(self.data.generator_version),
             tags: self.options.tags.clone(),
-            password: self.options.password.is_some(),
+            // "This room will ask you for a password", not "which mode it
+            // uses". `RoomInfo` goes out before the slot name is known, so a
+            // per-slot password cannot be reported per slot — and reporting
+            // `false` would stop a client prompting for one it does need.
+            password: self.options.password.is_some() || !self.options.slot_passwords.is_empty(),
             permissions: BTreeMap::from([
                 ("release".to_string(), self.options.release_mode),
                 ("collect".to_string(), self.options.collect_mode),
@@ -2100,7 +2116,17 @@ impl Room {
             return Err(SaveError::Malformed("random state is the wrong shape"));
         };
 
-        self.options = snapshot.options;
+        // Everything except the secrets, which the save deliberately does not
+        // carry (see `save::encode_options`). Restoring wholesale would replace
+        // the configured passwords with the `None` the decoder produces, which
+        // is the same bug in the other direction: a room that quietly stopped
+        // asking for the password it was started with.
+        self.options = RoomOptions {
+            password: self.options.password.take(),
+            server_password: self.options.server_password.take(),
+            slot_passwords: std::mem::take(&mut self.options.slot_passwords),
+            ..snapshot.options
+        };
         self.rng = rng;
         self.location_checks = snapshot.location_checks.into_iter().collect();
         self.received_items = snapshot.received_items.into_iter().collect();

@@ -5,11 +5,21 @@
 //! `/option` may change any of them while the room is live.
 
 use pahoa_proto::Permission;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct RoomOptions {
     /// Required by every client on `Connect`. `None` means no password.
+    ///
+    /// Mutually exclusive with [`slot_passwords`](Self::slot_passwords): a room
+    /// has one password, a password per slot, or none at all.
     pub password: Option<String>,
+    /// Per-slot passwords, keyed by slot number. A slot absent from the map has
+    /// none, and an empty map means the mode is unused.
+    ///
+    /// Checked *after* the slot name is resolved, unlike [`password`](Self::password),
+    /// which can be checked before anything about the client is known.
+    pub slot_passwords: BTreeMap<u32, String>,
     /// Enables `!admin login`. `None` disables remote administration entirely.
     pub server_password: Option<String>,
     /// Hint price as a *percentage* of a slot's total locations, not an
@@ -31,6 +41,7 @@ impl Default for RoomOptions {
     fn default() -> Self {
         Self {
             password: None,
+            slot_passwords: BTreeMap::new(),
             server_password: None,
             hint_cost: 10,
             location_check_points: 1,

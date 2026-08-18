@@ -27,6 +27,9 @@ pub struct ServeArgs<'a> {
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
     pub log_level: LevelFilter,
+    /// Passwords, and where each came from. Applied over `options` and, for
+    /// anything the environment supplied, protected from the seed.
+    pub secrets: crate::secrets::Secrets,
     /// `None` serves plaintext only.
     pub tls: Option<pahoa_net::TlsPaths>,
     pub allow_plaintext: bool,
@@ -34,6 +37,11 @@ pub struct ServeArgs<'a> {
 
 pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     init_logging(args.log_level);
+
+    // Resolved before the subscriber existed, so they are said now.
+    for warning in &args.secrets.warnings {
+        tracing::warn!("{warning}");
+    }
 
     let raw =
         std::fs::read(args.multidata).map_err(|e| format!("{}: {e}", args.multidata.display()))?;
@@ -71,9 +79,15 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
 
+    // Secrets first, so that a seed's embedded `server_options` can still
+    // override one that came from a flag — and, in `apply_embedded`, cannot
+    // override one that came from the environment.
     let mut options = args.options;
+    options.password = args.secrets.password.clone();
+    options.server_password = args.secrets.server_password.clone();
+    options.slot_passwords = args.secrets.slot_passwords.clone();
     if args.use_embedded_options {
-        apply_embedded(&mut options, data.server_options.as_ref());
+        apply_embedded(&mut options, data.server_options.as_ref(), &args.secrets);
     }
     let mut room = Room::new(data.clone(), Arc::new(names), options, start_time);
 
@@ -228,7 +242,11 @@ async fn shutdown_signal() -> &'static str {
 /// was told where to listen on its command line. A key pahoa *does* implement
 /// but cannot use warns instead, matching the reference's "Could not set server
 /// option, skipping" (`:785-791`).
-fn apply_embedded(options: &mut RoomOptions, server_options: Option<&PyObj>) {
+fn apply_embedded(
+    options: &mut RoomOptions,
+    server_options: Option<&PyObj>,
+    secrets: &crate::secrets::Secrets,
+) {
     let Some(dict) = server_options.and_then(PyObj::as_dict) else {
         tracing::warn!("--use-embedded-options, but this seed carries no server_options");
         return;
@@ -238,14 +256,44 @@ fn apply_embedded(options: &mut RoomOptions, server_options: Option<&PyObj>) {
     for (key, raw) in dict {
         let Some(key) = key.as_str() else { continue };
         let taken = match key {
-            "password" => text(raw).map(|v| {
-                options.password = v;
-                format!("password={}", shown(&options.password))
-            }),
-            "server_password" => text(raw).map(|v| {
-                options.server_password = v;
-                format!("server_password={}", shown(&options.server_password))
-            }),
+            // The seed outranks the command line, but not the environment. A
+            // password baked in at generation time is readable by anyone
+            // holding the seed, and letting it shadow the configured one is the
+            // same failure as persisting a password into `room.save`: rotation
+            // appears to work and then reverts.
+            "password" => {
+                if secrets.password_from_env {
+                    tracing::warn!(
+                        "the seed sets a room password, but one is configured in the \
+                         environment and wins; ignoring the seed's"
+                    );
+                    continue;
+                }
+                if !secrets.slot_passwords.is_empty() {
+                    tracing::warn!(
+                        "the seed sets a room password, but this room is in per-slot \
+                         password mode; ignoring the seed's"
+                    );
+                    continue;
+                }
+                text(raw).map(|v| {
+                    options.password = v;
+                    format!("password={}", shown(&options.password))
+                })
+            }
+            "server_password" => {
+                if secrets.server_password_from_env {
+                    tracing::warn!(
+                        "the seed sets a server password, but one is configured in the \
+                         environment and wins; ignoring the seed's"
+                    );
+                    continue;
+                }
+                text(raw).map(|v| {
+                    options.server_password = v;
+                    format!("server_password={}", shown(&options.server_password))
+                })
+            }
             "hint_cost" => count(raw).map(|v| {
                 options.hint_cost = v;
                 format!("hint_cost={v}")
@@ -409,6 +457,12 @@ mod tests {
         PyObj::Str(v.into())
     }
 
+    /// Apply a seed's options with nothing configured against them, which is
+    /// the case for every test that is not specifically about precedence.
+    fn embed(options: &mut RoomOptions, server_options: Option<&PyObj>) {
+        apply_embedded(options, server_options, &crate::secrets::Secrets::default());
+    }
+
     /// The exact key set every fixture in `crates/pahoa-pickle/tests/fixtures`
     /// carries, values from `AP_56807069331869547085`.
     ///
@@ -418,7 +472,7 @@ mod tests {
     #[test]
     fn a_real_seeds_options_are_applied() {
         let mut o = RoomOptions::default();
-        apply_embedded(
+        embed(
             &mut o,
             Some(&dict(&[
                 ("host", PyObj::None),
@@ -461,7 +515,7 @@ mod tests {
             password: Some("from-the-flag".to_string()),
             ..Default::default()
         };
-        apply_embedded(
+        embed(
             &mut o,
             Some(&dict(&[
                 ("hint_cost", PyObj::Int(20)),
@@ -472,13 +526,68 @@ mod tests {
         assert_eq!(o.password.as_deref(), Some("from-the-seed"));
     }
 
+    /// ...but not over the environment. Precedence is environment, then seed,
+    /// then argv.
+    ///
+    /// A password baked into a seed at generation time is readable by anyone
+    /// holding the seed, and letting it win would make the configured password
+    /// silently not the one in force — the same class of bug as persisting a
+    /// password into `room.save`, where rotation appears to work and reverts.
+    #[test]
+    fn the_environment_overrides_even_the_seed() {
+        let mut o = RoomOptions {
+            password: Some("from-the-environment".to_string()),
+            server_password: Some("admin-from-the-environment".to_string()),
+            ..Default::default()
+        };
+        apply_embedded(
+            &mut o,
+            Some(&dict(&[
+                ("hint_cost", PyObj::Int(20)),
+                ("password", s("from-the-seed")),
+                ("server_password", s("admin-from-the-seed")),
+            ])),
+            &crate::secrets::Secrets {
+                password_from_env: true,
+                server_password_from_env: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(o.password.as_deref(), Some("from-the-environment"));
+        assert_eq!(
+            o.server_password.as_deref(),
+            Some("admin-from-the-environment")
+        );
+        // Non-secret options are unaffected — the seed still wins those.
+        assert_eq!(o.hint_cost, 20);
+    }
+
+    /// A seed carrying a room-wide password must not quietly re-enable that
+    /// mode in a room configured for per-slot passwords.
+    #[test]
+    fn a_seed_password_is_ignored_in_per_slot_mode() {
+        let mut o = RoomOptions::default();
+        let mut secrets = crate::secrets::Secrets::default();
+        secrets.slot_passwords.insert(1, "per-slot".to_string());
+
+        apply_embedded(
+            &mut o,
+            Some(&dict(&[("password", s("from-the-seed"))])),
+            &secrets,
+        );
+        assert_eq!(
+            o.password, None,
+            "the seed must not set a room password here"
+        );
+    }
+
     #[test]
     fn options_the_seed_omits_keep_their_command_line_value() {
         let mut o = RoomOptions {
             hint_cost: 5,
             ..Default::default()
         };
-        apply_embedded(&mut o, Some(&dict(&[("release_mode", s("goal"))])));
+        embed(&mut o, Some(&dict(&[("release_mode", s("goal"))])));
         assert_eq!(o.hint_cost, 5);
         assert_eq!(o.release_mode, Permission::Goal);
     }
@@ -491,7 +600,7 @@ mod tests {
             release_mode: Permission::Enabled,
             ..Default::default()
         };
-        apply_embedded(&mut o, Some(&dict(&[("release_mode", s("enable"))])));
+        embed(&mut o, Some(&dict(&[("release_mode", s("enable"))])));
         assert_eq!(o.release_mode, Permission::Enabled);
     }
 
@@ -499,7 +608,7 @@ mod tests {
     fn auto_enabled_is_accepted_spelled_either_way() {
         for spelling in ["auto-enabled", "auto_enabled"] {
             let mut o = RoomOptions::default();
-            apply_embedded(&mut o, Some(&dict(&[("collect_mode", s(spelling))])));
+            embed(&mut o, Some(&dict(&[("collect_mode", s(spelling))])));
             assert_eq!(o.collect_mode, Permission::AutoEnabled, "{spelling}");
         }
     }
@@ -508,7 +617,7 @@ mod tests {
     fn disable_item_cheat_inverts_the_field_it_sets() {
         let mut o = RoomOptions::default();
         assert!(o.item_cheat);
-        apply_embedded(
+        embed(
             &mut o,
             Some(&dict(&[("disable_item_cheat", PyObj::Bool(true))])),
         );
@@ -523,7 +632,7 @@ mod tests {
                 password: Some("from-the-flag".to_string()),
                 ..Default::default()
             };
-            apply_embedded(&mut o, Some(&dict(&[("password", empty.clone())])));
+            embed(&mut o, Some(&dict(&[("password", empty.clone())])));
             assert!(o.password.is_none(), "{empty:?}");
         }
     }
@@ -534,7 +643,7 @@ mod tests {
             hint_cost: 7,
             ..Default::default()
         };
-        apply_embedded(&mut o, None);
+        embed(&mut o, None);
         assert_eq!(o.hint_cost, 7);
     }
 }
