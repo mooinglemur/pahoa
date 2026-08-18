@@ -57,6 +57,13 @@ impl HintStore {
             .unwrap_or_default()
     }
 
+    /// The list itself, shared. For callers that hold it past the borrow —
+    /// a save snapshot, or the tracker — where copying every hint's owned
+    /// entrance string would be an allocation apiece.
+    pub fn shared(&self, key: SlotKey) -> Arc<Vec<Hint>> {
+        self.by_slot.get(&key).cloned().unwrap_or_default()
+    }
+
     /// The hint covering `location` in `finder`'s world, if one exists.
     ///
     /// Both the receiving and the finding player hold a copy, so a lookup has

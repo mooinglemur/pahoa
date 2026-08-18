@@ -115,6 +115,20 @@ pub struct Snapshot {
     /// a few bytes.
     pub allow_releases: Vec<SlotKey>,
     pub stored_data: Vec<(String, Arc<Value>)>,
+
+    /// When each slot last checked a new location, and when it last connected,
+    /// as **whole unix seconds**.
+    ///
+    /// Saved because an async routinely outlives the process serving it: a room
+    /// that restarts and reported "never connected" for everyone would lose the
+    /// one thing a tracker uses to tell an abandoned slot from an active one.
+    /// The reference persists these for the same reason
+    /// (`MultiServer.py:667-670`).
+    ///
+    /// Second resolution rather than the float the room holds: RFC 1123, which
+    /// is what the tracker renders, has no room for anything finer.
+    pub activity_at: Vec<(SlotKey, u64)>,
+    pub connected_at: Vec<(SlotKey, u64)>,
 }
 
 impl Snapshot {
@@ -317,6 +331,17 @@ impl Snapshot {
             w.bytes(&json);
         }
 
+        // Last, so every field that was already here keeps its position.
+        for timers in [&self.activity_at, &self.connected_at] {
+            let mut timers: Vec<_> = timers.iter().collect();
+            timers.sort_unstable_by_key(|(key, _)| *key);
+            w.uvar(timers.len() as u64);
+            for (key, at) in timers {
+                w.key(*key);
+                w.uvar(*at);
+            }
+        }
+
         w.into_inner()
     }
 
@@ -443,6 +468,14 @@ impl Snapshot {
             stored_data.push((key, Arc::new(value)));
         }
 
+        let mut timers = [Vec::new(), Vec::new()];
+        for slot in &mut timers {
+            for _ in 0..r.count()? {
+                slot.push((r.key()?, r.uvar()?));
+            }
+        }
+        let [activity_at, connected_at] = timers;
+
         Ok(Self {
             seed_name,
             options,
@@ -456,6 +489,8 @@ impl Snapshot {
             group_collected,
             allow_releases,
             stored_data,
+            activity_at,
+            connected_at,
         })
     }
 }

@@ -633,6 +633,103 @@ async fn the_scoped_port_accepts_websocket_clients() {
     server.shutdown().await;
 }
 
+/// The tracker is fetched by JavaScript served from another origin, so the
+/// header that lets a browser read the response is part of the contract.
+#[tokio::test]
+async fn the_tracker_endpoints_are_readable_cross_origin() {
+    let server = start(RoomOptions::default()).await;
+    for path in ["/api/tracker", "/api/static_tracker"] {
+        let response = get(server.local_addr, path).await;
+        let (status, _) = split(&response);
+        assert_eq!(status, "HTTP/1.1 200 OK", "{path}");
+        assert!(
+            response.contains("Access-Control-Allow-Origin: *"),
+            "{path} must be readable cross-origin: {response}"
+        );
+        assert!(
+            response.contains("Content-Type: application/json"),
+            "{path}"
+        );
+    }
+    server.shutdown().await;
+}
+
+/// Field for field what the reference WebHost emits, because a tracker page
+/// written against archipelago.gg has to work here unchanged.
+#[tokio::test]
+async fn the_tracker_documents_mirror_the_reference_shape() {
+    let server = start(RoomOptions::default()).await;
+
+    let live: serde_json::Value =
+        serde_json::from_str(&split(&get(server.local_addr, "/api/tracker").await).1).unwrap();
+    for key in [
+        "aliases",
+        "player_items_received",
+        "player_checks_done",
+        "total_checks_done",
+        "hints",
+        "activity_timers",
+        "connection_timers",
+        "player_status",
+    ] {
+        assert!(live[key].is_array(), "missing {key}: {live}");
+    }
+    assert_eq!(live["aliases"].as_array().unwrap().len(), 2);
+    assert_eq!(live["aliases"][0]["team"], 0);
+    assert_eq!(live["aliases"][0]["player"], 1);
+    // Null, never a placeholder: nobody has connected.
+    assert!(live["aliases"][0]["alias"].is_null());
+    assert!(live["activity_timers"][0]["time"].is_null());
+    assert_eq!(live["player_status"][0]["status"], 0);
+    assert_eq!(live["total_checks_done"][0]["checks_done"], 0);
+
+    let stat: serde_json::Value =
+        serde_json::from_str(&split(&get(server.local_addr, "/api/static_tracker").await).1)
+            .unwrap();
+    for key in [
+        "groups",
+        "datapackage",
+        "player_locations_total",
+        "player_game",
+    ] {
+        assert!(!stat[key].is_null(), "missing {key}: {stat}");
+    }
+    assert_eq!(stat["player_game"][0]["game"], "A Link to the Past");
+    // A checksum manifest, not the packages themselves.
+    assert!(stat["datapackage"].is_object());
+
+    server.shutdown().await;
+}
+
+/// The cache is what keeps a tracker page off the actor's back, so its effect
+/// has to be observable rather than assumed.
+#[tokio::test]
+async fn the_tracker_is_cached_within_its_window() {
+    let server = start_with_admin().await;
+
+    let before = split(&get(server.local_addr, "/api/tracker").await).1;
+    let parsed: serde_json::Value = serde_json::from_str(&before).unwrap();
+    assert_eq!(parsed["total_checks_done"][0]["checks_done"], 0);
+
+    // Change the room underneath it.
+    let released = command(server.local_addr, r#"{"command":"release","slot":1}"#).await;
+    assert_eq!(released["ok"], true, "{released}");
+
+    // Within the 60-second window the answer is the one already rendered.
+    let after = split(&get(server.local_addr, "/api/tracker").await).1;
+    assert_eq!(
+        after, before,
+        "a second request inside the TTL should be served from the cache"
+    );
+
+    // The static document has its own, longer window and its own entry, so a
+    // hit on one must not have populated the other.
+    let stat = split(&get(server.local_addr, "/api/static_tracker").await).1;
+    assert!(stat.contains("player_locations_total"), "{stat}");
+
+    server.shutdown().await;
+}
+
 /// The whole point of the surface: it shares the port with the game.
 #[tokio::test]
 async fn the_websocket_still_upgrades_on_the_same_port() {

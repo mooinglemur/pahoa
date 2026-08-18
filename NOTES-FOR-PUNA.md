@@ -174,8 +174,8 @@ All on the room port, all over the same TLS. Five routes so far, matching `HANDO
 | `GET /admin/v1/metrics` | bearer | Prometheus text exposition |
 | `POST /admin/v1/shutdown` | bearer | `202`, then quiesce, save, exit 0 |
 
-`POST /admin/v1/command` and `POST /admin/v1/slots/<n>/password` are implemented too — see below.
-`/tracker/…` is still `404`.
+`POST /admin/v1/command`, `POST /admin/v1/slots/<n>/password` and the tracker are implemented too —
+see below. Every route on the handoff's list now exists.
 
 **Use `GET /healthz` as the readiness probe, not a TCP check.** The listener binds only after the
 save is restored, so either works today, but the HTTP probe stays correct if that ever changes.
@@ -248,3 +248,48 @@ and *not* mirrored into `PAHOA_SLOT_PASSWORDS` will revert to the environment's 
 the pod restarts. That is deliberate — it is what stops a stale on-disk password shadowing the
 configured one — but it means **puna must treat its own Secret as the source of truth and use this
 route to avoid the bounce, not instead of updating the Secret.**
+
+---
+
+## The tracker: `GET /api/tracker` and `GET /api/static_tracker`
+
+Mirrors of the reference WebHost's endpoints of the same names, field for field, verified against a
+live `archipelago.gg` document. A tracker page written for the reference works against a pahoa room
+with only its base URL changed. `docs/tracker.md` has the shapes and the reasoning.
+
+**Serve the tracker's assets from puna and let its JavaScript fetch the room directly.** That is
+cross-origin — a different port alone makes it so — and it works: both endpoints send
+`Access-Control-Allow-Origin: *`, exactly as the reference does. Because they are plain `GET`s with
+no custom headers they are *simple requests*, so there is no preflight and pahoa needs no `OPTIONS`
+route.
+
+Three things that would break it, none of them CORS:
+
+- **Mixed content.** An `https://` puna page cannot fetch an `http://` room at all, whatever the
+  headers say. The room must be serving TLS with a **browser-trusted** certificate — cert-manager,
+  not a self-signed pair.
+- **Adding an `Authorization` header** would make the request non-simple and require a preflight
+  pahoa does not answer. The tracker is deliberately public; do not put a token on it.
+- **Cookies.** `Access-Control-Allow-Origin: *` is rejected by browsers for credentialed requests.
+  Nothing here needs them, and `credentials: "omit"` (the default) is correct.
+
+**Both documents are cached** — 60 seconds for `/api/tracker`, 300 for `/api/static_tracker`, the
+same windows the reference memoizes with. Polling faster than that gains nothing and costs a round
+trip. The staleness is bounded and identical to what `archipelago.gg` already gives, so a page
+cannot tell the difference.
+
+**`activity_timers` and `connection_timers` survive a restart**, at whole-second resolution. That
+matters because an async routinely outlives the pod serving it: a room that came back reporting
+"never connected" for every slot would lose the one signal that tells an abandoned slot from an
+active one, which is exactly what an organizer reads a tracker for. A slot that has genuinely never
+acted still reports `null`, never a zero that would render as 1970.
+
+They ride in the save, so this is another reason the drain-time budget in the first section of this
+document matters — a room SIGKILLed past its grace period loses them back to the last completed
+save along with everything else.
+
+**Where this is going.** The polling API is for compatibility. The direction is a WebSocket path a
+tracker connects to, receiving the current state once and then deltas for as long as it stays
+connected — which is the thing pahoa can do and a database-backed WebHost structurally cannot,
+since the room knows a check landed in the tick it processed it. Recorded in `docs/tracker.md`.
+Puna should treat the polling endpoints as the contract now and the fallback later.

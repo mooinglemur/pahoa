@@ -345,6 +345,75 @@ fn a_saved_password_never_replaces_the_configured_one() {
     );
 }
 
+/// An async routinely outlives the process serving it, so the timestamps a
+/// tracker reports have to survive a restart. Without this a restarted room
+/// says "never connected" for everyone, and an abandoned slot becomes
+/// indistinguishable from an active one.
+#[test]
+fn tracker_timestamps_survive_a_restart() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data.clone(), RoomOptions::default());
+
+    // Connecting stamps the connection timer; checking a location stamps the
+    // activity timer.
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+    let first_location = data.locations.for_slot(slot)[0].location;
+    let mut sink = pahoa_room::Recorder::default();
+    room.handle(
+        conn,
+        pahoa_proto::ClientPacket::LocationChecks(pahoa_proto::client::LocationChecks {
+            locations: vec![first_location],
+        }),
+        &mut sink,
+    );
+
+    let before = room.tracker_data();
+    let seen = before
+        .slots
+        .iter()
+        .find(|s| s.slot == slot)
+        .expect("the slot is in the seed");
+    assert!(seen.last_connection.is_some(), "should have connected");
+    assert!(
+        seen.last_activity.is_some(),
+        "should have checked something"
+    );
+
+    let restored = reload(&room.snapshot().encode(true));
+    let after = restored.tracker_data();
+    let kept = after
+        .slots
+        .iter()
+        .find(|s| s.slot == slot)
+        .expect("the slot is in the seed");
+
+    // Whole seconds, which is all the tracker's RFC 1123 rendering can carry.
+    assert_eq!(
+        kept.last_connection.map(|t| t as u64),
+        seen.last_connection.map(|t| t as u64),
+        "the connection timer should have survived"
+    );
+    assert_eq!(
+        kept.last_activity.map(|t| t as u64),
+        seen.last_activity.map(|t| t as u64),
+        "the activity timer should have survived"
+    );
+
+    // A slot that never did anything still reports nothing, rather than a zero
+    // that would render as 1970.
+    let untouched = after
+        .slots
+        .iter()
+        .find(|s| s.slot != slot)
+        .expect("the fixture has more than one slot");
+    assert!(untouched.last_connection.is_none());
+    assert!(untouched.last_activity.is_none());
+}
+
 /// The other direction, and the one that would be silent: a room restarted
 /// *without* a password must not have one restored from disk either.
 #[test]

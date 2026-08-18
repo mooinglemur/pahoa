@@ -90,6 +90,15 @@ pub struct Room {
     received_items: HashMap<QueueKey, Arc<Vec<NetworkItem>>>,
     client_game_state: HashMap<SlotKey, ClientStatus>,
     name_aliases: HashMap<SlotKey, String>,
+    /// When each slot last checked a *new* location, and when it last
+    /// connected, as unix seconds. Both are what the tracker reports.
+    ///
+    /// Persisted, because an async routinely outlives the process serving it:
+    /// a room that restarted and reported "never connected" for everyone would
+    /// lose the one signal that tells an abandoned slot from an active one. The
+    /// reference saves them for the same reason (`MultiServer.py:667-670`).
+    activity_at: HashMap<SlotKey, f64>,
+    connected_at: HashMap<SlotKey, f64>,
     hints_used: HashMap<SlotKey, i64>,
     hints: HintStore,
     /// Seeded from the seed name, exactly as the reference does at load
@@ -170,6 +179,8 @@ impl Room {
             received_items: HashMap::new(),
             client_game_state,
             name_aliases: HashMap::new(),
+            activity_at: HashMap::new(),
+            connected_at: HashMap::new(),
             hints_used: HashMap::new(),
             hints,
             rng,
@@ -438,6 +449,7 @@ impl Room {
         };
 
         self.by_slot.entry(key).or_default().push(conn);
+        self.connected_at.insert(key, self.clock);
         self.client_game_state
             .entry(key)
             .or_insert(ClientStatus::Connected);
@@ -994,6 +1006,12 @@ impl Room {
         }
         fresh.sort_unstable();
         fresh.dedup();
+
+        // "Last new item check", which is what the reference records here too
+        // (`MultiServer.py:1141`) — and deliberately only when something was
+        // actually new, so a client re-sending its whole list on reconnect does
+        // not read as activity.
+        self.activity_at.insert(key, self.clock);
 
         let mut sortable: Vec<(u32, i64, i64, u32)> = Vec::with_capacity(fresh.len());
         for &loc in &fresh {
@@ -2122,6 +2140,82 @@ impl Room {
         self.options.password.is_some() || !self.options.slot_passwords.is_empty()
     }
 
+    /// Snapshot everything the tracker API reports.
+    ///
+    /// Cheap on purpose — `Arc` clones and small copies — because the caller
+    /// renders megabytes from it and must not do that while holding the actor.
+    /// See [`crate::tracker`].
+    pub fn tracker_data(&self) -> crate::tracker::TrackerData {
+        use crate::tracker::{TrackerData, TrackerGroup, TrackerSlot};
+
+        let empty_checks: Arc<HashSet<i64>> = Arc::new(HashSet::new());
+        let empty_items: Arc<Vec<NetworkItem>> = Arc::new(Vec::new());
+
+        let slots: Vec<TrackerSlot> = self
+            .data
+            .slot_info
+            .iter()
+            .map(|(number, info)| {
+                let key = (0, *number);
+                TrackerSlot {
+                    team: key.0,
+                    slot: *number,
+                    game: info.game.clone(),
+                    alias: self.name_aliases.get(&key).cloned(),
+                    status: self.status(key),
+                    total_locations: self.data.locations.count_for(*number),
+                    checks: self
+                        .location_checks
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| Arc::clone(&empty_checks)),
+                    // The remote queue, matching the reference's
+                    // `(team, player, True)`.
+                    items_received: self
+                        .received_items
+                        .get(&(key.0, *number, true))
+                        .cloned()
+                        .unwrap_or_else(|| Arc::clone(&empty_items)),
+                    hints: self.hints.shared(key),
+                    last_activity: self.activity_at.get(&key).copied(),
+                    last_connection: self.connected_at.get(&key).copied(),
+                }
+            })
+            .collect();
+
+        let groups: Vec<TrackerGroup> = self
+            .data
+            .slot_info
+            .iter()
+            .filter(|(_, info)| !info.group_members.is_empty())
+            .map(|(number, info)| TrackerGroup {
+                slot: *number,
+                name: info.name.clone(),
+                members: info.group_members.clone(),
+            })
+            .collect();
+
+        let total_checks = vec![(0u32, slots.iter().map(|s| s.checks.len()).sum())];
+
+        TrackerData {
+            datapackage: self
+                .data
+                .games()
+                .into_iter()
+                .map(|game| {
+                    let checksum = self
+                        .datapackage
+                        .get(&game)
+                        .and_then(|names| names.package.checksum.clone());
+                    (game, checksum)
+                })
+                .collect(),
+            slots,
+            groups,
+            total_checks,
+        }
+    }
+
     /// Whether a slot has any connection on a scoped feed.
     ///
     /// The question the item router asks per message, so it is a lookup in the
@@ -2205,6 +2299,8 @@ impl Room {
                 .iter()
                 .map(|(k, v)| (k.clone(), Arc::clone(v)))
                 .collect(),
+            activity_at: seconds(&self.activity_at),
+            connected_at: seconds(&self.connected_at),
         }
     }
 
@@ -2244,6 +2340,12 @@ impl Room {
             slot_passwords: std::mem::take(&mut self.options.slot_passwords),
             ..snapshot.options
         };
+        // Timestamps a tracker reports. Restored because an async outlives the
+        // process serving it, and a restarted room that reported "never
+        // connected" for everyone would lose the one signal that distinguishes
+        // an abandoned slot from an active one.
+        self.activity_at = float_seconds(snapshot.activity_at);
+        self.connected_at = float_seconds(snapshot.connected_at);
         self.rng = rng;
         self.location_checks = snapshot.location_checks.into_iter().collect();
         self.received_items = snapshot.received_items.into_iter().collect();
@@ -2284,6 +2386,27 @@ impl Room {
 }
 
 /// Parse the `{team}_{slot}` suffix of a `_read_` key.
+/// Room clock to save format: whole unix seconds, sorted for a stable encoding.
+///
+/// The room holds these as the `f64` its clock is; RFC 1123, which is what the
+/// tracker renders them as, has no room for anything finer.
+fn seconds(timers: &HashMap<SlotKey, f64>) -> Vec<(SlotKey, u64)> {
+    let mut out: Vec<(SlotKey, u64)> = timers
+        .iter()
+        .map(|(key, at)| (*key, at.max(0.0) as u64))
+        .collect();
+    out.sort_unstable_by_key(|(key, _)| *key);
+    out
+}
+
+/// The counterpart of [`seconds`].
+fn float_seconds(timers: Vec<(SlotKey, u64)>) -> HashMap<SlotKey, f64> {
+    timers
+        .into_iter()
+        .map(|(key, at)| (key, at as f64))
+        .collect()
+}
+
 fn parse_team_slot(s: &str) -> Option<(u32, u32)> {
     let (team, slot) = s.split_once('_')?;
     Some((team.parse().ok()?, slot.parse().ok()?))

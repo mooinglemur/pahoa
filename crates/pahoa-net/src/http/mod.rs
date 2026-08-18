@@ -18,14 +18,15 @@ mod admin;
 mod command;
 mod response;
 mod status;
+mod tracker;
 
 pub use admin::Admin;
 pub use response::Response;
 pub use status::{SlotStatus, Status};
 
 use crate::actor::ActorMsg;
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, oneshot};
 
 /// Everything the HTTP surface needs, shared across every listener.
@@ -44,6 +45,9 @@ struct Inner {
     /// Fired by `POST /admin/v1/shutdown`, and awaited by whatever owns the
     /// process's exit.
     shutdown: Arc<tokio::sync::Notify>,
+    /// Rendered tracker documents, held for their TTL.
+    tracker_cache: Mutex<Cached>,
+    static_tracker_cache: Mutex<Cached>,
 }
 
 impl Router {
@@ -60,6 +64,8 @@ impl Router {
             admin: Admin::new(config.admin_token.clone()),
             outbound_budget_bytes: config.outbound_budget_bytes,
             shutdown,
+            tracker_cache: Mutex::default(),
+            static_tracker_cache: Mutex::default(),
         }))
     }
 
@@ -93,11 +99,60 @@ impl Router {
         match (method, path) {
             ("GET", "/healthz") => Response::text(200, "ok\n"),
             ("GET", "/api/v1/room") => self.room().await,
+            ("GET", "/api/tracker") => self.tracker(Which::Live).await,
+            ("GET", "/api/static_tracker") => self.tracker(Which::Static).await,
             // A path that exists but not for this verb is worth distinguishing
             // from one that does not exist at all.
-            (_, "/healthz" | "/api/v1/room") => Response::status(405, "Method Not Allowed"),
+            (_, "/healthz" | "/api/v1/room" | "/api/tracker" | "/api/static_tracker") => {
+                Response::status(405, "Method Not Allowed")
+            }
             _ => Response::not_found(),
         }
+    }
+
+    /// Serve a tracker document, from the cache when one is warm.
+    ///
+    /// Cross-origin by design — an orchestrator serves the tracker's assets and
+    /// its JavaScript fetches from the room — so both carry
+    /// `Access-Control-Allow-Origin: *`, exactly as the reference does. These
+    /// are plain `GET`s with no custom headers, which makes them simple
+    /// requests: no preflight, and no `OPTIONS` route to write.
+    async fn tracker(&self, which: Which) -> Response {
+        let (cache, ttl) = match which {
+            Which::Live => (&self.0.tracker_cache, TRACKER_TTL),
+            Which::Static => (&self.0.static_tracker_cache, STATIC_TRACKER_TTL),
+        };
+
+        if let Some(body) = cache.lock().expect("not poisoned").fresh(ttl) {
+            return tracker_response(body);
+        }
+
+        // Missed. The snapshot is `Arc` clones taken on the actor; rendering it
+        // — megabytes, on a large room — happens here, on this task.
+        let (tx, rx) = oneshot::channel();
+        if self
+            .0
+            .actor
+            .send(ActorMsg::Tracker { reply: tx })
+            .await
+            .is_err()
+        {
+            return stopping();
+        }
+        let Ok(data) = rx.await else {
+            return stopping();
+        };
+
+        let document = match which {
+            Which::Live => tracker::tracker(&data),
+            Which::Static => tracker::static_tracker(&data),
+        };
+        let body: Arc<[u8]> = serde_json::to_vec(&document)
+            .unwrap_or_else(|_| b"{}".to_vec())
+            .into();
+
+        cache.lock().expect("not poisoned").store(Arc::clone(&body));
+        tracker_response(body)
     }
 
     /// Authenticated already, by the time anything here runs.
@@ -295,6 +350,51 @@ impl Router {
 pub struct Live {
     pub clients_connected: usize,
     pub password_required: bool,
+}
+
+/// Which tracker document is being asked for.
+#[derive(Debug, Clone, Copy)]
+enum Which {
+    Live,
+    Static,
+}
+
+/// How long a rendered tracker document is served before it is rebuilt.
+///
+/// The same windows the reference memoizes with. Not premature: the live
+/// document measures megabytes on a large room and assembling it walks every
+/// slot on the actor, so without this every open tracker tab is steady
+/// background work on the one task that must not become a bottleneck. The
+/// staleness is bounded and is exactly what `archipelago.gg` already gives.
+const TRACKER_TTL: Duration = Duration::from_secs(60);
+const STATIC_TRACKER_TTL: Duration = Duration::from_secs(300);
+
+/// A rendered document and when it was rendered.
+#[derive(Default)]
+struct Cached {
+    at: Option<Instant>,
+    body: Option<Arc<[u8]>>,
+}
+
+impl Cached {
+    fn fresh(&self, ttl: Duration) -> Option<Arc<[u8]>> {
+        let at = self.at?;
+        if at.elapsed() >= ttl {
+            return None;
+        }
+        self.body.clone()
+    }
+
+    fn store(&mut self, body: Arc<[u8]>) {
+        self.at = Some(Instant::now());
+        self.body = Some(body);
+    }
+}
+
+/// Both tracker endpoints, with the header that lets a page on another origin
+/// read them.
+fn tracker_response(body: Arc<[u8]>) -> Response {
+    Response::json_bytes(200, body.to_vec()).with_header("Access-Control-Allow-Origin", "*")
 }
 
 /// Match `/admin/v1/slots/<n>/password`, returning the slot number.

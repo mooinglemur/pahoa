@@ -174,6 +174,8 @@ these are `https://`; without it, `http://`.
 |---|---|---|
 | `GET /healthz` | none | `200` once the room is serving |
 | `GET /api/v1/room` | none | What a room page shows. No secrets |
+| `GET /api/tracker` | none | The reference WebHost's tracker document |
+| `GET /api/static_tracker` | none | The half that only changes with the seed |
 | `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress |
 | `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
 | `POST /admin/v1/command` | bearer | The typed command set below |
@@ -182,6 +184,17 @@ these are `https://`; without it, `http://`.
 
 `/healthz` needs no state to answer: the listener binds only after the save has
 been restored, so reaching it at all is the readiness signal.
+
+**The tracker endpoints mirror the reference WebHost's** field for field, so a
+tracker page written against `archipelago.gg` works against a pahoa room with
+only its base URL changed — down to `NetworkItem` and `Hint` serializing as
+arrays and timestamps being RFC 1123, both of which are artifacts of how Flask
+renders Python and both of which pahoa reproduces deliberately. They carry
+`Access-Control-Allow-Origin: *`, because the intended deployment is a tracker
+page served from somewhere else fetching the room directly. Rendered documents
+are cached for 60 seconds, and the static half for 300, matching the windows the
+reference memoizes with. [docs/tracker.md](docs/tracker.md) covers the shapes,
+the CORS rules, and the live-tracker direction this is a stepping stone to.
 
 **The admin surface is authenticated by `PAHOA_ADMIN_TOKEN` and nothing else.**
 It is mutating and reachable from the internet by design — driving it with
@@ -286,7 +299,7 @@ Deliberately absent so far, and reachable from no flag:
   than the client's.
 - **The `/` console command set**, and therefore what `!admin` dispatches into.
   It overlaps the admin REST API heavily and is worth writing once, with it.
-- The lobby integration and the tracker APIs.
+- The lobby integration.
 - `--auto_shutdown` and `--disable_save`, which the reference has. Both are
   covered by omitting `--save-dir`. Its `--loglevel` is spelled `--log-level`
   here and aliased, and `--logtime` has no equivalent because every line is

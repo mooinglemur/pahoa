@@ -17,6 +17,7 @@ mod room;
 pub mod save;
 pub mod secret;
 mod slot_data;
+pub mod tracker;
 
 pub use conn::{Client, ConnId, FeedPolicy};
 pub use effect::{CloseReason, Counter, EffectSink, Event, Recipients, Recorder};

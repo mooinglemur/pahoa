@@ -47,6 +47,18 @@ impl Response {
         }
     }
 
+    /// JSON that is already rendered.
+    ///
+    /// For documents built once and served many times, where re-serializing per
+    /// request would be the expensive part.
+    pub fn json_bytes(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            content_type: "application/json",
+            body,
+            ..Self::status(status, reason_for(status))
+        }
+    }
+
     /// Prometheus text exposition, which has its own content type.
     pub fn prometheus(body: String) -> Self {
         Self {

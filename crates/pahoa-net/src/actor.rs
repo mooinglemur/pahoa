@@ -67,6 +67,14 @@ pub enum ActorMsg {
     Status {
         reply: tokio::sync::oneshot::Sender<crate::http::Status>,
     },
+    /// A snapshot for the tracker API.
+    ///
+    /// Answers with `Arc` clones rather than a rendered document: the JSON runs
+    /// to megabytes on a large room, and serializing it on the actor would put
+    /// that on the one task that owns room state.
+    Tracker {
+        reply: tokio::sync::oneshot::Sender<pahoa_room::tracker::TrackerData>,
+    },
     /// An administrative command, with its target already resolved.
     Admin {
         command: pahoa_room::AdminCommand,
@@ -432,6 +440,9 @@ pub async fn run_with_saves(
                         })
                         .collect(),
                 });
+            }
+            ActorMsg::Tracker { reply } => {
+                let _ = reply.send(room.tracker_data());
             }
             ActorMsg::Admin { command, reply } => {
                 let outcome = room.admin(command, &mut sink);
