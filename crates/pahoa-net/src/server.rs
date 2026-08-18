@@ -10,7 +10,7 @@ use crate::config::NetConfig;
 use crate::shard::{Outbound, Shards};
 use crate::ws;
 use pahoa_proto::decode;
-use pahoa_room::{ConnId, Room};
+use pahoa_room::{ConnId, FeedPolicy, Room};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,6 +23,8 @@ use tokio::sync::mpsc;
 /// A running server.
 pub struct Server {
     pub local_addr: SocketAddr,
+    /// Where the scoped feed is listening, if it was asked for.
+    pub filtered_addr: Option<SocketAddr>,
     actor_tx: mpsc::Sender<ActorMsg>,
     /// Fires when the actor loop has returned, final save included. Taken by
     /// the first `shutdown` caller; a second call has nothing left to wait for.
@@ -31,7 +33,7 @@ pub struct Server {
     shutdown_requested: Arc<tokio::sync::Notify>,
     /// The accept loop, so shutting down can stop taking new connections rather
     /// than racing them against a room that is going away.
-    accepting: tokio::task::JoinHandle<()>,
+    accepting: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Server {
@@ -66,6 +68,19 @@ impl Server {
         let listener = TcpListener::bind((config.bind.as_str(), config.port)).await?;
         let local_addr = listener.local_addr()?;
 
+        // The scoped feed's listener, if one was asked for. Bound here too, so a
+        // port already in use fails at startup rather than leaving a room that
+        // serves half of what it advertised.
+        let filtered = match config.filtered_port {
+            None => None,
+            Some(port) => {
+                let listener = TcpListener::bind((config.bind.as_str(), port)).await?;
+                let addr = listener.local_addr()?;
+                Some((listener, addr))
+            }
+        };
+        let filtered_addr = filtered.as_ref().map(|(_, addr)| *addr);
+
         let budget = crate::budget::Budget::new(
             config.outbound_budget_bytes,
             config.per_connection_budget_bytes,
@@ -95,39 +110,32 @@ impl Server {
             let _ = stopped_tx.send(());
         });
 
-        let accept_tx = actor_tx.clone();
-        let cfg = config.clone();
-        let accepting = tokio::spawn(async move {
-            let next_id = AtomicU64::new(1);
-            loop {
-                match listener.accept().await {
-                    Ok((stream, peer)) => {
-                        let conn = ConnId(next_id.fetch_add(1, Ordering::Relaxed));
-                        let tx = accept_tx.clone();
-                        let cfg = cfg.clone();
-                        // Both cheap: a `TlsAcceptor` is an `Arc<ServerConfig>`
-                        // and a `Router` is an `Arc` of its own.
-                        let tls = tls.clone();
-                        let router = router.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                serve_connection(stream, peer, conn, tx, cfg, tls, router).await
-                            {
-                                tracing::debug!(%conn, error = %e, "connection ended");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "accept failed");
-                        // Back off briefly rather than spinning on a persistent
-                        // error such as EMFILE.
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                }
-            }
-        });
+        // One counter across both listeners: a `ConnId` identifies a connection
+        // to the room, and two ports handing out the same one would be two
+        // clients the actor could not tell apart.
+        let next_id = Arc::new(AtomicU64::new(1));
+
+        let port = Port {
+            actor: actor_tx.clone(),
+            config,
+            tls,
+            router,
+            feed: FeedPolicy::Full,
+        };
+        let mut accepting = vec![accept_loop(listener, port.clone(), Arc::clone(&next_id))];
+        if let Some((listener, _)) = filtered {
+            accepting.push(accept_loop(
+                listener,
+                Port {
+                    feed: FeedPolicy::Scoped,
+                    ..port
+                },
+                next_id,
+            ));
+        }
 
         Ok(Self {
+            filtered_addr,
             local_addr,
             actor_tx,
             stopped: tokio::sync::Mutex::new(Some(stopped_rx)),
@@ -155,7 +163,9 @@ impl Server {
         // Stop taking new connections first. A client that arrives during the
         // final save would be told about a room that is already going away, and
         // its `Connect` would race the actor's last message.
-        self.accepting.abort();
+        for accepting in &self.accepting {
+            accepting.abort();
+        }
 
         let _ = self.actor_tx.send(ActorMsg::Shutdown).await;
         if let Some(stopped) = self.stopped.lock().await.take() {
@@ -179,6 +189,49 @@ impl Server {
 /// invisible against a pod's termination grace period.
 const CLOSE_LINGER: Duration = Duration::from_millis(250);
 
+/// Everything every connection on one listener shares.
+///
+/// Cloned per connection, and cheap to clone: the acceptor and the router are
+/// each an `Arc`, and the sender is a channel handle. Only `feed` differs
+/// between the two listeners, and it is what makes the scoped port scoped.
+#[derive(Clone)]
+struct Port {
+    actor: mpsc::Sender<ActorMsg>,
+    config: NetConfig,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    router: crate::http::Router,
+    feed: FeedPolicy,
+}
+
+/// Take connections until the task is aborted. One of these per listener.
+fn accept_loop(
+    listener: TcpListener,
+    port: Port,
+    next_id: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer)) => {
+                    let conn = ConnId(next_id.fetch_add(1, Ordering::Relaxed));
+                    let port = port.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = serve_connection(stream, peer, conn, port).await {
+                            tracing::debug!(%conn, error = %e, "connection ended");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "accept failed");
+                    // Back off briefly rather than spinning on a persistent
+                    // error such as EMFILE.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    })
+}
+
 /// Decide the scheme, then hand off to [`run_session`].
 ///
 /// One port serves both, which is why the first byte is peeked rather than
@@ -188,11 +241,10 @@ async fn serve_connection(
     mut stream: TcpStream,
     peer: SocketAddr,
     conn: ConnId,
-    actor: mpsc::Sender<ActorMsg>,
-    config: NetConfig,
-    tls: Option<tokio_rustls::TlsAcceptor>,
-    router: crate::http::Router,
+    port: Port,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = &port.config;
+
     // Latency matters more than packing for a chat-and-checks protocol. Set on
     // the socket before anything wraps it.
     stream.set_nodelay(true).ok();
@@ -203,17 +255,17 @@ async fn serve_connection(
     let first = peek_first_byte(&stream, config.handshake_timeout).await?;
     let client_hello = first == Some(0x16);
 
-    match (client_hello, &tls) {
+    match (client_hello, &port.tls) {
         (true, Some(acceptor)) => {
             let mut stream = acceptor.accept(stream).await?;
-            let Some(upgraded) = handshake(&mut stream, &config, &router).await? else {
+            let Some(upgraded) = handshake(&mut stream, config, &port.router).await? else {
                 return Ok(());
             };
             // `TlsStream` has no `into_split`, so this pays for a `BiLock`. Only
             // TLS connections do; the plaintext path below keeps the cheaper
             // owned halves.
             let (read_half, write_half) = tokio::io::split(stream);
-            run_session(read_half, write_half, upgraded, peer, conn, actor, config).await
+            run_session(read_half, write_half, upgraded, peer, conn, &port).await
         }
         // No certificate configured. Unchanged from before TLS existed: the
         // handshake_failure alert is what turns a `wss://`-first client's probe
@@ -233,11 +285,11 @@ async fn serve_connection(
             Err("plaintext refused: TLS is configured".into())
         }
         (false, _) => {
-            let Some(upgraded) = handshake(&mut stream, &config, &router).await? else {
+            let Some(upgraded) = handshake(&mut stream, config, &port.router).await? else {
                 return Ok(());
             };
             let (read_half, write_half) = stream.into_split();
-            run_session(read_half, write_half, upgraded, peer, conn, actor, config).await
+            run_session(read_half, write_half, upgraded, peer, conn, &port).await
         }
     }
 }
@@ -304,13 +356,15 @@ async fn run_session<R, W>(
     upgraded: ws::accept::Upgraded,
     peer: SocketAddr,
     conn: ConnId,
-    actor: mpsc::Sender<ActorMsg>,
-    config: NetConfig,
+    port: &Port,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let Port { actor, config, .. } = port;
+    let feed = port.feed;
+
     let deflate = upgraded.deflate;
     tracing::debug!(%conn, %peer, deflate, "upgraded");
 
@@ -330,6 +384,7 @@ where
 
     if actor
         .send(ActorMsg::Connected {
+            feed,
             conn,
             tx: out_tx.clone(),
             deflate,
@@ -385,7 +440,7 @@ where
             match ws::frame::decode(&mut buf, config.max_frame_bytes) {
                 Ok(Some(frame)) => match session.handle(frame) {
                     Ok(Some(event)) => {
-                        if let Some(reason) = handle_event(event, conn, &actor, &out_tx).await {
+                        if let Some(reason) = handle_event(event, conn, actor, &out_tx).await {
                             break 'read reason;
                         }
                     }

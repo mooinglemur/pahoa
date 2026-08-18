@@ -18,7 +18,7 @@ pub mod save;
 pub mod secret;
 mod slot_data;
 
-pub use conn::{Client, ConnId};
+pub use conn::{Client, ConnId, FeedPolicy};
 pub use effect::{CloseReason, Counter, EffectSink, Event, Recipients, Recorder};
 pub use options::RoomOptions;
 pub use room::{AdminCommand, AdminOutcome, Room, SERVER_VERSION, SlotKey};

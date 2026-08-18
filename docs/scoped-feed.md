@@ -1,7 +1,7 @@
 # The scoped feed, and why it is a second port
 
-Design for `--filtered-port` (HANDOFF P5). Not implemented yet; recorded here because the
-reasoning is settled and was previously only in a planning document.
+`--filtered-port` (HANDOFF P5). **Implemented.** This is the design and the reasoning behind it;
+what shipped follows it exactly, and the measurement at the end is from a real room.
 
 A second listening port on which a client receives only the messages relevant to its own slot.
 APX reportedly had something like this, but it was never publicly available, so there is no
@@ -94,4 +94,19 @@ That is a constraint on the HTTP work (P4) rather than on this: the router has t
 listener is given, not a thing wired into one listener.
 
 Both ports share one `TlsAcceptor`, one `CertResolver` and one reload timer, so a renewal cannot
-land on one port and not the other. `--allow-plaintext` and the `426` refusal apply to both.
+land on one port and not the other. `--allow-plaintext` and the `426` refusal apply to both. They
+also share one connection-id counter: a `ConnId` names a connection to the room, and two listeners
+minting the same one would be two clients the actor could not tell apart.
+
+## What it measures
+
+A 75-slot seed, one client watching slot 2 on each port, while slot 1 releases its whole world:
+
+| | `ItemSend` received | room-wide lines |
+|---|---|---|
+| full port | 130 | all |
+| scoped port | 4 | all |
+
+The four are the items that actually involved slot 2. Repeating it with a release of a slot that
+sends slot 2 nothing gives 94 against 0, while chat, the countdown and the release announcement
+still arrive on both — the filter drops firehose and never anything a human typed.

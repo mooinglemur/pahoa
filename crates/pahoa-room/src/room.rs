@@ -9,7 +9,7 @@ mod commands;
 
 pub use admin::{AdminCommand, AdminOutcome};
 
-use crate::conn::{Client, ConnId, non_game_verb, python_list_repr};
+use crate::conn::{Client, ConnId, FeedPolicy, non_game_verb, python_list_repr};
 use crate::datapackage::DataPackageCache;
 use crate::effect::{CloseReason, EffectSink, Recipients};
 use crate::hints::HintStore;
@@ -208,7 +208,18 @@ impl Room {
     /// A socket connected. Archipelago sends `RoomInfo` immediately, before any
     /// authentication (`MultiServer.py:921-940`).
     pub fn on_connect(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
-        self.clients.insert(conn, Client::new(conn));
+        self.on_connect_with_feed(conn, FeedPolicy::Full, out);
+    }
+
+    /// As [`Room::on_connect`], for a connection whose feed policy is decided by
+    /// the port it arrived on.
+    pub fn on_connect_with_feed(
+        &mut self,
+        conn: ConnId,
+        feed: FeedPolicy,
+        out: &mut dyn EffectSink,
+    ) {
+        self.clients.insert(conn, Client::with_feed(conn, feed));
         out.send(conn, &[ServerPacket::RoomInfo(self.room_info())]);
     }
 
@@ -259,8 +270,9 @@ impl Room {
             client.version,
             python_list_repr(&client.tags),
         );
+        // Attributable to one slot, so a scoped feed wants it only for itself.
         out.broadcast(
-            Recipients::AllText,
+            Recipients::AllTextAbout(key),
             &[ServerPacket::PrintJSON(PrintJson {
                 data: vec![JsonMessagePart::text(text)],
                 print_type: Some(PrintJsonType::Part),
@@ -490,8 +502,10 @@ impl Room {
             client.version,
             python_list_repr(&client.tags),
         );
+        // As with a part: a scoped feed hears about its own slot joining, not
+        // about the other two thousand.
         out.broadcast(
-            Recipients::AllText,
+            Recipients::AllTextAbout(key),
             &[ServerPacket::PrintJSON(PrintJson {
                 data: vec![JsonMessagePart::text(text)],
                 print_type: Some(PrintJsonType::Join),
@@ -993,6 +1007,16 @@ impl Room {
         let mut dirty_slots: HashSet<u32> = HashSet::new();
         let mut feed: Vec<ServerPacket> = Vec::with_capacity(PRINT_JSON_CHUNK);
 
+        // The scoped feed is a **route, not a filter**: each message is appended
+        // to the buffers of the two slots it concerns as the feed is built, so
+        // there is no second traversal and nothing is re-encoded. Only slots
+        // that actually have a scoped connection get a buffer, which the room
+        // can tell from the index it already maintains — so with nobody on the
+        // scoped port this is one lookup per message and no allocation at all.
+        // See `docs/scoped-feed.md`.
+        let mut scoped: HashMap<SlotKey, Vec<ServerPacket>> = HashMap::new();
+        let sender_scoped = self.has_scoped(key);
+
         for (receiver, item, location, flags) in sortable {
             let net = NetworkItem {
                 item,
@@ -1006,14 +1030,34 @@ impl Room {
                 dirty_slots.insert(member);
             }
 
+            let message = Self::item_send_message(receiver, net);
+
+            // At most two buffers: the slot that found it and the slot that
+            // receives it. They are the same slot for an own-world item.
+            let receiver_key = (team, receiver);
+            if sender_scoped {
+                scoped.entry(key).or_default().push(message.clone());
+            }
+            if receiver_key != key && self.has_scoped(receiver_key) {
+                scoped
+                    .entry(receiver_key)
+                    .or_default()
+                    .push(message.clone());
+            }
+
             if feed.len() >= PRINT_JSON_CHUNK {
-                out.broadcast(Recipients::AllText, &feed);
+                out.broadcast(Recipients::AllTextFull, &feed);
                 feed.clear();
             }
-            feed.push(Self::item_send_message(receiver, net));
+            feed.push(message);
         }
         if !feed.is_empty() {
-            out.broadcast(Recipients::AllText, &feed);
+            out.broadcast(Recipients::AllTextFull, &feed);
+        }
+        for (target, messages) in scoped {
+            for chunk in messages.chunks(PRINT_JSON_CHUNK) {
+                out.broadcast(Recipients::SlotScopedText(target), chunk);
+            }
         }
 
         Arc::make_mut(self.location_checks.entry(key).or_default()).extend(fresh.iter().copied());
@@ -2031,6 +2075,30 @@ impl Room {
                 .filter(|c| self.clients.get(c).is_some_and(|c| !c.no_text))
                 .copied()
                 .collect(),
+            Recipients::AllTextAbout(key) => self
+                .clients
+                .values()
+                .filter(|c| c.auth && !c.no_text && (!c.scoped() || (c.team, c.slot) == *key))
+                .map(|c| c.id)
+                .collect(),
+            Recipients::AllTextFull => self
+                .clients
+                .values()
+                .filter(|c| c.auth && !c.no_text && !c.scoped())
+                .map(|c| c.id)
+                .collect(),
+            Recipients::SlotScopedText(key) => self
+                .by_slot
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    self.clients
+                        .get(c)
+                        .is_some_and(|c| !c.no_text && c.scoped())
+                })
+                .copied()
+                .collect(),
             Recipients::These(list) => list.clone(),
         };
         v.sort_unstable();
@@ -2052,6 +2120,20 @@ impl Room {
     /// reported per slot anyway on a surface that has no slot in hand.
     pub fn password_required(&self) -> bool {
         self.options.password.is_some() || !self.options.slot_passwords.is_empty()
+    }
+
+    /// Whether a slot has any connection on a scoped feed.
+    ///
+    /// The question the item router asks per message, so it is a lookup in the
+    /// index the room already maintains rather than a scan.
+    fn has_scoped(&self, key: SlotKey) -> bool {
+        self.by_slot.get(&key).is_some_and(|conns| {
+            conns.iter().any(|c| {
+                self.clients
+                    .get(c)
+                    .is_some_and(|c| c.scoped() && !c.no_text)
+            })
+        })
     }
 
     /// How many authenticated connections a slot has open.

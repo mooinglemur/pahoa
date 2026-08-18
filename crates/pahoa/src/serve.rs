@@ -33,6 +33,8 @@ pub struct ServeArgs<'a> {
     /// `None` serves plaintext only.
     pub tls: Option<pahoa_net::TlsPaths>,
     pub allow_plaintext: bool,
+    /// A second port serving the scoped feed.
+    pub filtered_port: Option<u16>,
 }
 
 pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
@@ -154,6 +156,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         outbound_budget_bytes: budget,
         tls: args.tls,
         allow_plaintext: args.allow_plaintext,
+        filtered_port: args.filtered_port,
         admin_token: args.secrets.admin_token.clone(),
         ..Default::default()
     };
@@ -179,6 +182,10 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 
         // Every way out of a running room converges here, so they all get the
         // same quiesce and the same final save.
+        if let Some(addr) = server.filtered_addr {
+            tracing::info!(%addr, "serving the scoped feed");
+        }
+
         let reason = tokio::select! {
             signal = shutdown_signal() => signal,
             () = server.shutdown_requested() => "admin request",

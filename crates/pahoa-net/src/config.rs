@@ -79,6 +79,14 @@ pub struct NetConfig {
     /// than a hang.
     pub allow_plaintext: bool,
 
+    /// A second listener serving the scoped feed.
+    ///
+    /// `None` runs one port. Both ports terminate the same TLS and serve the
+    /// same HTTP surface; only the WebSocket feed differs, and the port is what
+    /// decides which a client gets — because the clients that need the quiet
+    /// feed cannot select a tag or a path. See `docs/scoped-feed.md`.
+    pub filtered_port: Option<u16>,
+
     /// Bearer token for `/admin/v1/**`.
     ///
     /// `None` makes the admin surface answer `404` — absent rather than merely
@@ -105,6 +113,7 @@ impl Default for NetConfig {
             max_body_bytes: 64 * 1024,
             tls: None,
             allow_plaintext: false,
+            filtered_port: None,
             admin_token: None,
         }
     }

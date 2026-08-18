@@ -777,7 +777,9 @@ impl Room {
         }
 
         out.broadcast(
-            Recipients::AllText,
+            // Attributable to the receiving slot, so a scoped feed hears about
+            // items granted to it and not about everyone else's.
+            Recipients::AllTextAbout((team, slot)),
             &[ServerPacket::PrintJSON(PrintJson {
                 data: vec![JsonMessagePart::text(format!(
                     "Cheat console: sending \"{name}\" to {}",

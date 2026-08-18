@@ -36,6 +36,10 @@ USAGE:
 SERVE OPTIONS
     --bind <addr>            Listen address (default 0.0.0.0)
     --port <n>               Listen port (default 38281)
+    --filtered-port <n>      A second port serving the scoped feed: a client
+                             connecting here receives only what concerns its own
+                             slot. Needs no client support — the port is the
+                             interface.
     --snapshot <file.json>   Data package snapshot, from export-datapackage.py
     --save-dir <dir>         Where the room persists itself
     --save-interval <secs>   Save cadence (default 60)
@@ -94,6 +98,7 @@ const SERVE_OPTS: &[Opt] = &[
     value("--save-interval", &[]),
     value("--outbound-budget", &[]),
     value("--log-level", &["--loglevel"]),
+    value("--filtered-port", &["--filtered_port"]),
     value("--tls-cert", &["--tls_cert"]),
     value("--tls-key", &["--tls_key"]),
     flag("--allow-plaintext", &["--allow_plaintext"]),
@@ -250,6 +255,11 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         (Some(_), None) => return Err("--tls-cert needs --tls-key".to_string()),
         (None, Some(_)) => return Err("--tls-key needs --tls-cert".to_string()),
     };
+    let filtered_port = args.number::<u16>("--filtered-port")?;
+    if filtered_port == Some(args.number("--port")?.unwrap_or(38281)) {
+        return Err("--filtered-port must differ from --port".to_string());
+    }
+
     let allow_plaintext = args.is_set("--allow-plaintext");
     if allow_plaintext && tls.is_none() {
         return Err(
@@ -267,6 +277,7 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         secrets,
         tls,
         allow_plaintext,
+        filtered_port,
         port: args.number("--port")?.unwrap_or(38281),
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
         save_dir: args.get("--save-dir").map(Path::new),

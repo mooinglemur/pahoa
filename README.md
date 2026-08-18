@@ -33,6 +33,7 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 |---|---|---|
 | `--bind <addr>` | `0.0.0.0` | Listen address |
 | `--port <n>` | `38281` | Listen port |
+| `--filtered-port <n>` | — | A second port serving the scoped feed |
 | `--snapshot <file.json>` | — | Data package snapshot, from `tools/export-datapackage.py` |
 | `--save-dir <dir>` | — | Where the room persists itself |
 | `--save-interval <secs>` | `60` | Save cadence |
@@ -45,6 +46,27 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+### The scoped feed
+
+`--filtered-port` opens a second port on which a client receives only what
+concerns its own slot: its own item traffic, its own hints, its own joins and
+parts. Chat, countdowns and the room-wide milestones — goals, releases,
+collects — still arrive in full, because the filter drops firehose and never
+anything a human typed.
+
+**It is a port because it needs no client support.** The clients that most need
+a quieter feed cannot handle the `PrintJSON` deluge *and* have no way to select
+a tag or a URL path, so the server applies the policy on their behalf based on
+where they connected. An unmodified client pointed at the scoped port simply
+gets a quieter room. On a 75-slot seed, a slot watching a neighbour release its
+whole world sees 4 item messages instead of 130.
+
+Both ports are the same server: they terminate the same TLS and serve the same
+HTTP surface, and only the WebSocket feed differs. The policy is fixed when the
+connection is accepted and a `ConnectUpdate` cannot lower it, which matters
+because trackers send those routinely and a policy living in the tags would be
+wiped mid-session. [docs/scoped-feed.md](docs/scoped-feed.md) has the design.
 
 ### TLS
 
@@ -262,9 +284,6 @@ Deliberately absent so far, and reachable from no flag:
 - **The PROXY protocol.** With TLS terminated here there is less call for it,
   but a room behind a load balancer still sees the balancer's address rather
   than the client's.
-- **The scoped feed** — a second port on which a client receives only what is
-  relevant to its own slot, for clients that cannot handle the `PrintJSON`
-  firehose. Designed in [docs/scoped-feed.md](docs/scoped-feed.md).
 - **The `/` console command set**, and therefore what `!admin` dispatches into.
   It overlaps the admin REST API heavily and is worth writing once, with it.
 - The lobby integration and the tracker APIs.

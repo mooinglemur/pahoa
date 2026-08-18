@@ -94,9 +94,10 @@ least legible.
 
 ---
 
-## P5: the filtered feed stays a second port — **keep reserving the pair**
+## P5: the filtered feed is a second port, and it is **implemented — publish `game-filtered`**
 
-Confirmed rather than changed. The design is now written down in
+`--filtered-port <n>` opens it. This supersedes the standing advice to reserve the pair and not
+publish it: there is a backend now, so the Service port should go live. The design is in
 [`docs/scoped-feed.md`](docs/scoped-feed.md); the short version for puna is:
 
 - The scoped port serves a client only the messages relevant to its own slot, dropping the
@@ -113,8 +114,20 @@ Confirmed rather than changed. The design is now written down in
 - They share one `TlsAcceptor`, one certificate and one reload timer, so a renewal cannot land on
   one port and not the other. `--allow-plaintext` and the `426` refusal apply to both.
 
-Nothing here is blocked on puna. Until it ships, keep reserving the pair and keep not publishing
-`game-filtered`.
+What puna needs to do differently:
+
+- **Pass `--filtered-port` and publish `game-filtered`.** It must differ from `--port`; pahoa
+  refuses to start otherwise, and refuses to start if either port is already in use rather than
+  coming up serving half of what it advertised.
+- **Both ports need the same treatment** — the same Service, the same TLS, the same
+  `readinessProbe` target if you probe either. `/healthz` answers on both.
+- **Advertise both to players.** The scoped port is the one to hand to someone whose client chokes
+  on a large multiworld; the full port stays the default. `advertised_filtered_port` in puna's
+  schema is what this fills in.
+
+Measured on a 75-slot seed: a client watching one slot while a neighbour released its entire world
+saw **4** item messages on the scoped port against **130** on the full one, with chat, the
+countdown and the release announcement arriving intact on both.
 
 ---
 

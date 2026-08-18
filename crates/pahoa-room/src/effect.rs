@@ -37,6 +37,27 @@ pub enum Recipients {
     /// must skip `NoText` clients, while the `RoomUpdate` that accompanies them
     /// must not (`MultiServer.py:836`).
     SlotText(SlotKey),
+
+    /// Everyone on a full feed, plus the connections of the slot this is
+    /// *about*.
+    ///
+    /// For messages attributable to one slot — a join, a part, a cheat-console
+    /// grant. A scoped connection wants these for itself and not for the other
+    /// two thousand slots, which is most of what makes its feed quiet. See
+    /// `docs/scoped-feed.md`.
+    AllTextAbout(SlotKey),
+    /// Only connections on a full feed.
+    ///
+    /// The item firehose, which scoped connections receive as a per-slot
+    /// subset through [`Recipients::SlotScopedText`] instead.
+    AllTextFull,
+    /// Only the *scoped* connections of one slot.
+    ///
+    /// Deliberately not [`Recipients::SlotText`]: a full-feed connection on the
+    /// same slot already had this message from the broadcast, and sending it
+    /// again would double every item it receives.
+    SlotScopedText(SlotKey),
+
     /// An explicit list, for the cases that genuinely need one.
     These(Vec<ConnId>),
 }

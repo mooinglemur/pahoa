@@ -563,6 +563,76 @@ async fn a_malformed_slot_password_path_is_not_found() {
     server.shutdown().await;
 }
 
+/// Both listeners are the same server: the scoped port serves the identical
+/// HTTP surface, so an orchestrator may probe or drive either one.
+#[tokio::test]
+async fn the_scoped_port_serves_the_same_http_surface() {
+    let server = Server::start(
+        room(RoomOptions::default()),
+        NetConfig {
+            port: 0,
+            filtered_port: Some(0),
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("both ports should bind");
+
+    let filtered = server.filtered_addr.expect("a scoped listener");
+    assert_ne!(filtered, server.local_addr, "two distinct ports");
+
+    for addr in [server.local_addr, filtered] {
+        let (status, body) = split(&get(addr, "/healthz").await);
+        assert_eq!(status, "HTTP/1.1 200 OK", "healthz on {addr}");
+        assert_eq!(body, "ok\n");
+
+        let (status, _) = split(&get(addr, "/api/v1/room").await);
+        assert_eq!(status, "HTTP/1.1 200 OK", "room on {addr}");
+
+        let response = authed(addr, "GET", "/admin/v1/status", TOKEN).await;
+        assert_eq!(
+            split(&response).0,
+            "HTTP/1.1 200 OK",
+            "the admin API should answer on {addr}"
+        );
+    }
+
+    server.shutdown().await;
+}
+
+/// A WebSocket client is counted the same whichever port it used — the ports
+/// differ in what they send, not in what they are.
+#[tokio::test]
+async fn the_scoped_port_accepts_websocket_clients() {
+    let server = Server::start(
+        room(RoomOptions::default()),
+        NetConfig {
+            port: 0,
+            filtered_port: Some(0),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("both ports should bind");
+    let filtered = server.filtered_addr.expect("a scoped listener");
+
+    let (ws, response) = tokio_tungstenite::client_async(
+        format!("ws://{filtered}/"),
+        TcpStream::connect(filtered).await.unwrap(),
+    )
+    .await
+    .expect("the scoped port should upgrade");
+    assert_eq!(response.status(), 101);
+
+    let during = get(server.local_addr, "/api/v1/room").await;
+    let during: serde_json::Value = serde_json::from_str(&split(&during).1).unwrap();
+    assert_eq!(during["clients_connected"], 1);
+
+    drop(ws);
+    server.shutdown().await;
+}
+
 /// The whole point of the surface: it shares the port with the game.
 #[tokio::test]
 async fn the_websocket_still_upgrades_on_the_same_port() {

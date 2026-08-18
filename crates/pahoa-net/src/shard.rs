@@ -47,6 +47,13 @@ struct Member {
     budget: ConnHandle,
     /// Already dropped for falling behind; nothing more is queued for it.
     lagged: bool,
+    /// This connection arrived on the scoped port and receives only what
+    /// concerns its own slot.
+    ///
+    /// Set once, on `Add`, and never by an `Update` — the policy comes from the
+    /// port, and nothing a client sends may lower it. See
+    /// `docs/scoped-feed.md`.
+    scoped: bool,
 }
 
 /// Membership flags a shard needs to filter broadcasts without consulting the
@@ -60,6 +67,8 @@ pub enum ShardMsg {
         tx: mpsc::Sender<Outbound>,
         deflate: Option<u8>,
         budget: ConnHandle,
+        /// From the port this connection arrived on, and fixed for its life.
+        scoped: bool,
     },
     Remove {
         conn: ConnId,
@@ -157,6 +166,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                 tx,
                 deflate,
                 budget,
+                scoped,
             } => {
                 members.insert(
                     conn,
@@ -168,6 +178,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                         deflate,
                         budget,
                         lagged: false,
+                        scoped,
                     },
                 );
             }
@@ -247,6 +258,28 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                                 .flatten()
                                 .filter_map(|c| members.get_key_value(c))
                                 .filter(|(_, m)| !m.no_text),
+                        );
+                    }
+                    Recipients::AllTextAbout(key) => {
+                        recipients.extend(members.iter().filter(|(_, m)| {
+                            m.auth && !m.no_text && (!m.scoped || m.slot == Some(*key))
+                        }));
+                    }
+                    Recipients::AllTextFull => {
+                        recipients.extend(
+                            members
+                                .iter()
+                                .filter(|(_, m)| m.auth && !m.no_text && !m.scoped),
+                        );
+                    }
+                    Recipients::SlotScopedText(key) => {
+                        recipients.extend(
+                            by_slot
+                                .get(key)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|c| members.get_key_value(c))
+                                .filter(|(_, m)| !m.no_text && m.scoped),
                         );
                     }
                     Recipients::These(list) => {

@@ -90,6 +90,22 @@ fn python_str_repr(s: &str) -> String {
     out
 }
 
+/// How much of the room's feed a connection wants.
+///
+/// See `docs/scoped-feed.md`. The distinction that matters: `NoText` is an
+/// *audience* filter — it decides who a message goes to — while this is a
+/// *content* filter, deciding which subset of a feed one connection receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FeedPolicy {
+    /// Everything, as every client has always received it.
+    #[default]
+    Full,
+    /// Only what concerns this connection's own slot: its own item traffic,
+    /// its own hints, its own joins and parts. Chat, countdowns and the
+    /// room-wide milestones still arrive in full.
+    Scoped,
+}
+
 #[derive(Debug, Clone)]
 pub struct Client {
     pub id: ConnId,
@@ -108,11 +124,27 @@ pub struct Client {
     pub no_locations: bool,
     /// Suppresses text broadcasts for bandwidth.
     pub no_text: bool,
+    /// How much of the feed this connection receives.
+    ///
+    /// **Sticky, and deliberately not derived from `tags`.** `ConnectUpdate`
+    /// calls [`Client::apply_tags`], which *replaces* the tag vector — and
+    /// trackers send `ConnectUpdate` routinely, to add `DeathLink` for
+    /// instance. A policy living in the tags would therefore be wiped
+    /// mid-session and the connection would silently fall back to the full
+    /// firehose, with no error anywhere. So the listener sets this once, at
+    /// accept time, and nothing the client sends can lower it.
+    pub feed: FeedPolicy,
 }
 
 impl Client {
     pub fn new(id: ConnId) -> Self {
+        Self::with_feed(id, FeedPolicy::Full)
+    }
+
+    /// A connection whose feed policy comes from the port it arrived on.
+    pub fn with_feed(id: ConnId, feed: FeedPolicy) -> Self {
         Self {
+            feed,
             id,
             auth: false,
             team: 0,
@@ -125,6 +157,11 @@ impl Client {
             no_locations: false,
             no_text: false,
         }
+    }
+
+    /// Whether this connection receives only what concerns its own slot.
+    pub fn scoped(&self) -> bool {
+        self.feed == FeedPolicy::Scoped
     }
 
     /// Recompute the tag-derived flags.

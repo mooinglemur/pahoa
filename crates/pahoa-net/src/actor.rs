@@ -31,6 +31,12 @@ pub enum ActorMsg {
         deflate: Option<u8>,
         /// This connection's share of the outbound byte budget.
         budget: crate::budget::ConnHandle,
+        /// Whether this connection arrived on the scoped port.
+        ///
+        /// Decided by the listener and fixed for the connection's life, because
+        /// a policy the client could change would be wiped by the next
+        /// `ConnectUpdate` — see `docs/scoped-feed.md`.
+        feed: pahoa_room::FeedPolicy,
     },
     Packets {
         conn: ConnId,
@@ -355,6 +361,7 @@ pub async fn run_with_saves(
                 tx,
                 deflate,
                 budget,
+                feed,
             } => {
                 shards.tell(
                     conn,
@@ -363,9 +370,10 @@ pub async fn run_with_saves(
                         tx,
                         deflate,
                         budget,
+                        scoped: feed == pahoa_room::FeedPolicy::Scoped,
                     },
                 );
-                room.on_connect(conn, &mut sink);
+                room.on_connect_with_feed(conn, feed, &mut sink);
                 push_membership(room, conn, &mut sink);
             }
             ActorMsg::Packets { conn, packets } => {
