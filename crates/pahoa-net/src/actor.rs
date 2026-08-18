@@ -45,6 +45,15 @@ pub enum ActorMsg {
     Disconnected {
         conn: ConnId,
     },
+    /// The live figures the HTTP surface reports.
+    ///
+    /// Answered from inside the loop, where `&mut Room` already is, and replied
+    /// to through a `oneshot` — whose `send` never blocks, so the actor's
+    /// "awaits exactly one thing, its mailbox" invariant survives even a caller
+    /// that has already gone away.
+    Live {
+        reply: tokio::sync::oneshot::Sender<crate::http::Live>,
+    },
     Shutdown,
 }
 
@@ -357,6 +366,14 @@ pub async fn run_with_saves(
             ActorMsg::Disconnected { conn } => {
                 room.on_disconnect(conn, &mut sink);
                 shards.tell(conn, ShardMsg::Remove { conn });
+            }
+            ActorMsg::Live { reply } => {
+                // The receiver may already be gone if the client hung up; that
+                // is not this loop's problem.
+                let _ = reply.send(crate::http::Live {
+                    clients_connected: room.client_count(),
+                    password_required: room.password_required(),
+                });
             }
             ActorMsg::Shutdown => {
                 room.shutdown(&mut sink);

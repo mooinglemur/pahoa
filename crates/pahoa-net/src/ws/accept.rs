@@ -20,6 +20,10 @@ pub enum AcceptError {
     Tls,
     #[error("not an HTTP request")]
     NotHttp,
+    #[error("request body exceeded {0} bytes")]
+    BodyTooLarge(usize),
+    #[error("chunked request bodies are not accepted")]
+    Chunked,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +34,27 @@ pub struct AcceptConfig {
     /// Cap on an inflated inbound message. A 2 KiB window still expands far
     /// enough to matter on a public endpoint.
     pub max_message: usize,
+    /// Cap on an HTTP request body. Generous for the largest admin command and
+    /// small enough that a public endpoint cannot be made to buffer.
+    pub max_body: usize,
+}
+
+/// What a connection turned out to be.
+///
+/// One port serves both, so this is an outcome rather than a success and a
+/// failure: an ordinary HTTP request is a thing to answer, not a rejected
+/// upgrade.
+#[derive(Debug)]
+pub enum Accepted {
+    WebSocket(Upgraded),
+    Http(Exchange),
+}
+
+/// An HTTP request and its body, ready for the router.
+#[derive(Debug)]
+pub struct Exchange {
+    pub request: handshake::HttpRequest,
+    pub body: Vec<u8>,
 }
 
 /// The result of a successful upgrade.
@@ -55,17 +80,21 @@ pub struct Upgraded {
     pub path: String,
 }
 
-/// Read the request, answer it, and report what was negotiated.
-pub async fn accept<S>(stream: &mut S, config: &AcceptConfig) -> Result<Upgraded, AcceptError>
+/// Read the request and decide what it is.
+///
+/// A WebSocket upgrade is answered here, because the response depends on what
+/// was negotiated. An ordinary HTTP request is handed back unanswered for the
+/// router to deal with.
+pub async fn accept<S>(stream: &mut S, config: &AcceptConfig) -> Result<Accepted, AcceptError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut buf = BytesMut::with_capacity(1024);
     let deadline = tokio::time::Instant::now() + config.timeout;
 
-    let request = loop {
+    let http = loop {
         if handshake::headers_complete(&buf) {
-            break handshake::parse(&buf, config.max_headers)?;
+            break handshake::parse_request(&buf, config.max_headers)?;
         }
         if buf.len() > config.max_headers {
             return Err(HandshakeError::HeadersTooLarge(config.max_headers).into());
@@ -77,6 +106,20 @@ where
             return Err(AcceptError::Closed);
         }
         sniff(&buf)?;
+    };
+
+    let request = match handshake::upgrade(&http) {
+        Ok(request) => request,
+        // Ordinary HTTP. Read whatever body it declared and hand it on.
+        Err(HandshakeError::NotAnUpgrade) => {
+            let body = read_body(stream, &mut buf, &http, deadline, config).await?;
+            return Ok(Accepted::Http(Exchange {
+                request: http,
+                body,
+            }));
+        }
+        // An upgrade that is broken, rather than absent.
+        Err(e) => return Err(e.into()),
     };
 
     let accepted = request
@@ -104,12 +147,52 @@ where
         )
     });
 
-    Ok(Upgraded {
+    Ok(Accepted::WebSocket(Upgraded {
         deflate: accepted.map(|a| a.server_max_window_bits),
         inflater,
         leftover,
         path: request.path,
-    })
+    }))
+}
+
+/// Read exactly as much body as the request declared.
+///
+/// Some of it is usually already in `buf` — a client that pipelines its body
+/// into the same segment as the head is the normal case for a small POST.
+async fn read_body<S>(
+    stream: &mut S,
+    buf: &mut BytesMut,
+    request: &handshake::HttpRequest,
+    deadline: tokio::time::Instant,
+    config: &AcceptConfig,
+) -> Result<Vec<u8>, AcceptError>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    if request.is_chunked() {
+        return Err(AcceptError::Chunked);
+    }
+    let want = request.content_length().unwrap_or(0);
+    if want > config.max_body {
+        return Err(AcceptError::BodyTooLarge(config.max_body));
+    }
+
+    let start = request.head_len;
+    while buf.len() - start < want {
+        let read = tokio::time::timeout_at(deadline, stream.read_buf(buf))
+            .await
+            .map_err(|_| AcceptError::Timeout(config.timeout))??;
+        if read == 0 {
+            return Err(AcceptError::Closed);
+        }
+        // A peer that keeps sending past what it declared is not something to
+        // keep buffering for.
+        if buf.len() - start > config.max_body {
+            return Err(AcceptError::BodyTooLarge(config.max_body));
+        }
+    }
+
+    Ok(buf[start..start + want].to_vec())
 }
 
 /// Recognize a connection that cannot become an HTTP request, as soon as it is
@@ -163,6 +246,8 @@ where
             "431 Request Header Fields Too Large"
         }
         AcceptError::Handshake(_) => "400 Bad Request",
+        AcceptError::BodyTooLarge(_) => "413 Content Too Large",
+        AcceptError::Chunked => "411 Length Required",
         _ => return,
     };
     let _ = stream.write_all(&handshake::error_response(status)).await;
@@ -184,6 +269,26 @@ mod tests {
             max_headers: 8192,
             timeout: Duration::from_secs(5),
             max_message: 1 << 20,
+            max_body: 64 * 1024,
+        }
+    }
+
+    /// Unwrap an outcome that should have been an upgrade.
+    fn upgraded(result: Result<Accepted, AcceptError>) -> Upgraded {
+        match result.expect("should not have failed") {
+            Accepted::WebSocket(u) => u,
+            Accepted::Http(e) => panic!(
+                "expected an upgrade, got {} {}",
+                e.request.method, e.request.path
+            ),
+        }
+    }
+
+    /// Unwrap an outcome that should have been a plain HTTP request.
+    fn http(result: Result<Accepted, AcceptError>) -> Exchange {
+        match result.expect("should not have failed") {
+            Accepted::Http(e) => e,
+            Accepted::WebSocket(_) => panic!("expected plain HTTP, got an upgrade"),
         }
     }
 
@@ -192,7 +297,7 @@ mod tests {
          Sec-WebSocket-Version: 13\r\n";
 
     /// A duplex pair standing in for a socket.
-    async fn exchange(request: &str) -> (Result<Upgraded, AcceptError>, String) {
+    async fn exchange(request: &str) -> (Result<Accepted, AcceptError>, String) {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let request = request.to_string();
         let writer = tokio::spawn(async move {
@@ -211,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn a_plain_upgrade_is_answered_without_the_extension() {
         let (result, response) = exchange(&format!("{REQUEST}\r\n")).await;
-        let upgraded = result.expect("upgrades");
+        let upgraded = upgraded(result);
         assert_eq!(upgraded.deflate, None);
         assert!(response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
         assert!(response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
@@ -224,7 +329,7 @@ mod tests {
             "{REQUEST}Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n"
         ))
         .await;
-        let upgraded = result.expect("upgrades");
+        let upgraded = upgraded(result);
         assert_eq!(upgraded.deflate, Some(11));
         assert!(upgraded.inflater.is_some());
         assert!(response.contains("server_no_context_takeover"));
@@ -241,7 +346,7 @@ mod tests {
             "{REQUEST}Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=9\r\n\r\n"
         ))
         .await;
-        let upgraded = result.expect("upgrades");
+        let upgraded = upgraded(result);
         assert_eq!(upgraded.deflate, Some(9));
         assert!(response.contains("server_max_window_bits=9"));
     }
@@ -255,7 +360,7 @@ mod tests {
         let (mut client, mut server) = tokio::io::duplex(4096);
         client.write_all(&request).await.unwrap();
 
-        let upgraded = accept(&mut server, &config()).await.expect("upgrades");
+        let upgraded = upgraded(accept(&mut server, &config()).await);
         assert_eq!(
             &upgraded.leftover[..],
             &[0x81, 0x80, 0, 0, 0, 0],
@@ -292,22 +397,129 @@ mod tests {
         ));
     }
 
+    /// This used to assert `400 Bad Request`, because a request that was not an
+    /// upgrade was the only kind this path could fail. Now it is a request to
+    /// route, and the caller decides what it means.
     #[tokio::test]
-    async fn a_non_upgrade_gets_an_http_error_rather_than_silence() {
+    async fn a_non_upgrade_is_handed_back_rather_than_refused() {
         let (mut client, mut server) = tokio::io::duplex(4096);
         client
-            .write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
             .await
             .unwrap();
-        let error = accept(&mut server, &config()).await.unwrap_err();
+
+        let exchange = http(accept(&mut server, &config()).await);
+        assert_eq!(exchange.request.method, "GET");
+        assert_eq!(exchange.request.path, "/healthz");
+        assert!(exchange.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_post_body_is_read() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        const BODY: &str = r#"{"command":"status"}"#;
+        client
+            .write_all(
+                format!(
+                    "POST /admin/v1/command HTTP/1.1\r\nHost: x\r\n\
+                     Content-Length: {}\r\n\r\n{BODY}",
+                    BODY.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let exchange = http(accept(&mut server, &config()).await);
+        assert_eq!(exchange.request.method, "POST");
+        assert_eq!(exchange.request.path, "/admin/v1/command");
+        assert_eq!(exchange.body, BODY.as_bytes());
+    }
+
+    /// A body split across segments, which is the normal case once it is bigger
+    /// than one write.
+    #[tokio::test]
+    async fn a_body_split_across_reads_is_reassembled() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            client
+                .write_all(b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabcde")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client.write_all(b"fghij").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let exchange = http(accept(&mut server, &config()).await);
+        assert_eq!(exchange.body, b"abcdefghij");
+    }
+
+    #[tokio::test]
+    async fn a_body_past_the_cap_is_refused_with_a_status() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let config = AcceptConfig {
+            max_body: 8,
+            ..config()
+        };
+        client
+            .write_all(b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 4096\r\n\r\n")
+            .await
+            .unwrap();
+
+        let error = accept(&mut server, &config).await.unwrap_err();
+        assert!(matches!(error, AcceptError::BodyTooLarge(8)), "{error:?}");
         reject(&mut server, &error).await;
         drop(server);
 
         let mut response = String::new();
         client.read_to_string(&mut response).await.unwrap();
         assert!(
-            response.starts_with("HTTP/1.1 400 Bad Request"),
+            response.starts_with("HTTP/1.1 413 Content Too Large"),
             "got {response:?}"
+        );
+    }
+
+    /// pahoa does not decode chunked bodies, so it says so rather than reading
+    /// the frames as if they were content.
+    #[tokio::test]
+    async fn a_chunked_body_is_refused() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        client
+            .write_all(b"POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+
+        let error = accept(&mut server, &config()).await.unwrap_err();
+        assert!(matches!(error, AcceptError::Chunked), "{error:?}");
+        reject(&mut server, &error).await;
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 411 Length Required"),
+            "got {response:?}"
+        );
+    }
+
+    /// An upgrade that is *broken*, rather than absent, is still an error —
+    /// routing it as plain HTTP would answer a WebSocket client with JSON.
+    #[tokio::test]
+    async fn a_broken_upgrade_is_still_refused() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                  Sec-WebSocket-Version: 8\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let error = accept(&mut server, &config()).await.unwrap_err();
+        assert!(
+            matches!(error, AcceptError::Handshake(HandshakeError::BadVersion(_))),
+            "{error:?}"
         );
     }
 

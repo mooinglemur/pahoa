@@ -73,6 +73,11 @@ impl Server {
         );
         let (actor_tx, actor_rx) = mpsc::channel(8192);
 
+        // Taken before the room moves into the actor. The seed is immutable and
+        // already an `Arc`, so the HTTP surface can describe the room without
+        // asking the actor for anything that does not change.
+        let router = crate::http::Router::new(room.multidata_arc(), actor_tx.clone());
+
         let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             actor::run_with_saves(&mut room, shards, actor_rx, saves).await;
@@ -89,10 +94,13 @@ impl Server {
                         let conn = ConnId(next_id.fetch_add(1, Ordering::Relaxed));
                         let tx = accept_tx.clone();
                         let cfg = cfg.clone();
-                        // Cheap: a `TlsAcceptor` is an `Arc<ServerConfig>`.
+                        // Both cheap: a `TlsAcceptor` is an `Arc<ServerConfig>`
+                        // and a `Router` is an `Arc` of its own.
                         let tls = tls.clone();
+                        let router = router.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = serve_connection(stream, peer, conn, tx, cfg, tls).await
+                            if let Err(e) =
+                                serve_connection(stream, peer, conn, tx, cfg, tls, router).await
                             {
                                 tracing::debug!(%conn, error = %e, "connection ended");
                             }
@@ -141,6 +149,7 @@ async fn serve_connection(
     actor: mpsc::Sender<ActorMsg>,
     config: NetConfig,
     tls: Option<tokio_rustls::TlsAcceptor>,
+    router: crate::http::Router,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Latency matters more than packing for a chat-and-checks protocol. Set on
     // the socket before anything wraps it.
@@ -155,7 +164,9 @@ async fn serve_connection(
     match (client_hello, &tls) {
         (true, Some(acceptor)) => {
             let mut stream = acceptor.accept(stream).await?;
-            let upgraded = handshake(&mut stream, &config).await?;
+            let Some(upgraded) = handshake(&mut stream, &config, &router).await? else {
+                return Ok(());
+            };
             // `TlsStream` has no `into_split`, so this pays for a `BiLock`. Only
             // TLS connections do; the plaintext path below keeps the cheaper
             // owned halves.
@@ -180,7 +191,9 @@ async fn serve_connection(
             Err("plaintext refused: TLS is configured".into())
         }
         (false, _) => {
-            let upgraded = handshake(&mut stream, &config).await?;
+            let Some(upgraded) = handshake(&mut stream, &config, &router).await? else {
+                return Ok(());
+            };
             let (read_half, write_half) = stream.into_split();
             run_session(read_half, write_half, upgraded, peer, conn, actor, config).await
         }
@@ -209,19 +222,30 @@ async fn peek_first_byte(stream: &TcpStream, timeout: Duration) -> io::Result<Op
     Ok((read > 0).then_some(buf[0]))
 }
 
-/// Run the WebSocket handshake, answering a request that is not an upgrade.
+/// Read the request and either upgrade, or answer it as HTTP.
+///
+/// `Ok(None)` means the request was served over HTTP and the connection is
+/// finished — which is the ordinary outcome for a readiness probe or an admin
+/// call, not an error.
 async fn handshake<S>(
     stream: &mut S,
     config: &NetConfig,
-) -> Result<ws::accept::Upgraded, ws::accept::AcceptError>
+    router: &crate::http::Router,
+) -> Result<Option<ws::accept::Upgraded>, ws::accept::AcceptError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     match ws::accept::accept(stream, &config.accept_config()).await {
-        Ok(upgraded) => Ok(upgraded),
+        Ok(ws::accept::Accepted::WebSocket(upgraded)) => Ok(Some(upgraded)),
+        Ok(ws::accept::Accepted::Http(exchange)) => {
+            let response = router.route(&exchange).await;
+            let _ = stream.write_all(&response.render()).await;
+            let _ = stream.flush().await;
+            Ok(None)
+        }
         Err(e) => {
-            // A health check or a stray browser gets an HTTP status rather than
-            // a silently dropped socket.
+            // A broken upgrade, or a request too large to read, gets a status
+            // rather than a silently dropped socket.
             ws::accept::reject(stream, &e).await;
             Err(e)
         }

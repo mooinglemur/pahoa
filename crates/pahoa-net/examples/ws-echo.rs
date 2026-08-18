@@ -48,10 +48,19 @@ async fn echo(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
         max_headers: 16 * 1024,
         timeout: Duration::from_secs(10),
         max_message: 64 * 1024 * 1024,
+        max_body: 64 * 1024,
     };
 
     let upgraded = match ws::accept::accept(&mut stream, &config).await {
-        Ok(u) => u,
+        Ok(ws::accept::Accepted::WebSocket(u)) => u,
+        // This harness serves the Autobahn suite and nothing else, so a plain
+        // HTTP request here is a stray probe rather than something to route.
+        Ok(ws::accept::Accepted::Http(exchange)) => {
+            let _ = stream
+                .write_all(&pahoa_net::http::Response::not_found().render())
+                .await;
+            return Err(format!("not a websocket request: {}", exchange.request.path).into());
+        }
         Err(e) => {
             ws::accept::reject(&mut stream, &e).await;
             return Err(e.into());

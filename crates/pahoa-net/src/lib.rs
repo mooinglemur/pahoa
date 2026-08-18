@@ -9,6 +9,7 @@
 pub mod actor;
 pub mod budget;
 pub mod config;
+pub mod http;
 pub mod metrics;
 pub mod save;
 pub mod server;

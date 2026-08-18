@@ -57,6 +57,13 @@ pub struct NetConfig {
     /// Header bytes accepted before the request is refused.
     pub max_header_bytes: usize,
 
+    /// Body bytes accepted on an HTTP request.
+    ///
+    /// Generous for the largest admin command — a `say` with a long message is
+    /// still under a kilobyte — and small enough that a public endpoint cannot
+    /// be made to buffer on anyone's say-so.
+    pub max_body_bytes: usize,
+
     /// Certificate and key to terminate TLS with. `None` serves plaintext only,
     /// answering a ClientHello with a `handshake_failure` alert so a client that
     /// probes `wss://` first falls back at once.
@@ -88,6 +95,7 @@ impl Default for NetConfig {
             compression_level: 6,
             max_message_bytes: 4 * 1024 * 1024,
             max_header_bytes: 16 * 1024,
+            max_body_bytes: 64 * 1024,
             tls: None,
             allow_plaintext: false,
         }
@@ -111,6 +119,7 @@ impl NetConfig {
             max_headers: self.max_header_bytes,
             timeout: self.handshake_timeout,
             max_message: self.max_message_bytes,
+            max_body: self.max_body_bytes,
         }
     }
 }

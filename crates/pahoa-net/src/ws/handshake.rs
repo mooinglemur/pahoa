@@ -150,66 +150,133 @@ pub fn headers_complete(buf: &[u8]) -> bool {
     buf.windows(4).any(|w| w == b"\r\n\r\n")
 }
 
-/// Validate an upgrade request.
-pub fn parse(buf: &[u8], max_headers: usize) -> Result<Request, HandshakeError> {
+/// An HTTP request, before anything has decided what kind it is.
+///
+/// Separate from [`Request`] because this port serves two things over one
+/// listener: a WebSocket upgrade is one possible *interpretation* of a request,
+/// not a precondition for having parsed one. Reading the request first is what
+/// lets `GET /healthz` be answered rather than refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: String,
+    /// Request target, as sent. Not decoded and not normalized — the router
+    /// matches on it exactly.
+    pub path: String,
+    headers: Vec<(String, String)>,
+    /// Bytes the request head occupies, so a caller knows where a body starts.
+    pub head_len: usize,
+}
+
+impl HttpRequest {
+    /// Case-insensitive lookup, trimmed, first match wins.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// `Content-Length`, if it is present and a number.
+    pub fn content_length(&self) -> Option<usize> {
+        self.header("Content-Length").and_then(|v| v.parse().ok())
+    }
+
+    /// Whether the body arrives chunked rather than with a length.
+    ///
+    /// pahoa does not decode chunked bodies: every client of this surface —
+    /// curl, the kubelet, an orchestrator — sends a length for a request this
+    /// small, and a decoder for the alternative is code with no caller.
+    pub fn is_chunked(&self) -> bool {
+        self.header("Transfer-Encoding").is_some_and(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+        })
+    }
+
+    /// Whether this request is asking to become a WebSocket.
+    ///
+    /// `Connection` is a comma-separated list and may carry other tokens, so a
+    /// whole-value comparison would reject real clients.
+    fn is_upgrade(&self) -> bool {
+        let upgrading = self.header("Connection").is_some_and(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+        });
+        let websocket = self
+            .header("Upgrade")
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+        upgrading && websocket
+    }
+}
+
+/// Parse a request line and headers, with no opinion about what they mean.
+pub fn parse_request(buf: &[u8], max_headers: usize) -> Result<HttpRequest, HandshakeError> {
     if buf.len() > max_headers {
         return Err(HandshakeError::HeadersTooLarge(max_headers));
     }
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut request = httparse::Request::new(&mut headers);
-    match request.parse(buf) {
-        Ok(httparse::Status::Complete(_)) => {}
+    let head_len = match request.parse(buf) {
+        Ok(httparse::Status::Complete(n)) => n,
         Ok(httparse::Status::Partial) => {
             return Err(HandshakeError::Malformed("incomplete".into()));
         }
         Err(e) => return Err(HandshakeError::Malformed(e.to_string())),
-    }
-
-    if !request
-        .method
-        .is_some_and(|m| m.eq_ignore_ascii_case("GET"))
-    {
-        return Err(HandshakeError::NotAnUpgrade);
-    }
-    let path = request.path.unwrap_or("/").to_string();
-
-    let header = |name: &str| {
-        request
-            .headers
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case(name))
-            .and_then(|h| std::str::from_utf8(h.value).ok())
-            .map(str::trim)
     };
 
-    // `Connection` is a comma-separated list and may carry other tokens, so a
-    // whole-value comparison would reject real clients.
-    let upgrading = header("Connection").is_some_and(|v| {
-        v.split(',')
-            .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
-    });
-    let websocket = header("Upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
-    if !upgrading || !websocket {
+    Ok(HttpRequest {
+        method: request.method.unwrap_or_default().to_string(),
+        path: request.path.unwrap_or("/").to_string(),
+        headers: request
+            .headers
+            .iter()
+            // A header whose value is not UTF-8 is dropped rather than fatal:
+            // nothing this server routes on could be expressed that way.
+            .filter_map(|h| {
+                std::str::from_utf8(h.value)
+                    .ok()
+                    .map(|v| (h.name.to_string(), v.trim().to_string()))
+            })
+            .collect(),
+        head_len,
+    })
+}
+
+/// Validate a parsed request as a WebSocket upgrade.
+///
+/// [`HandshakeError::NotAnUpgrade`] means "this is ordinary HTTP" and is the
+/// router's cue, not a failure. The other errors mean an upgrade was attempted
+/// and is broken, which is still worth a status.
+pub fn upgrade(request: &HttpRequest) -> Result<Request, HandshakeError> {
+    if !request.method.eq_ignore_ascii_case("GET") || !request.is_upgrade() {
         return Err(HandshakeError::NotAnUpgrade);
     }
 
-    match header("Sec-WebSocket-Version") {
+    match request.header("Sec-WebSocket-Version") {
         Some("13") => {}
         other => return Err(HandshakeError::BadVersion(other.unwrap_or("").to_string())),
     }
 
-    let key = header("Sec-WebSocket-Key").ok_or(HandshakeError::MissingKey)?;
-    let accept_key = accept(key);
+    let key = request
+        .header("Sec-WebSocket-Key")
+        .ok_or(HandshakeError::MissingKey)?;
 
     // Several offers may be listed; take the first `permessage-deflate` we can
     // parse, as RFC 7692 §5.1 directs.
-    let deflate = header("Sec-WebSocket-Extensions").and_then(parse_extensions);
+    let deflate = request
+        .header("Sec-WebSocket-Extensions")
+        .and_then(parse_extensions);
 
     Ok(Request {
-        accept_key,
+        accept_key: accept(key),
         deflate,
-        path,
+        path: request.path.clone(),
     })
+}
+
+/// Parse and validate in one step, for callers that only want an upgrade.
+pub fn parse(buf: &[u8], max_headers: usize) -> Result<Request, HandshakeError> {
+    upgrade(&parse_request(buf, max_headers)?)
 }
 
 /// `base64(sha1(key + GUID))` (RFC 6455 §4.2.2).

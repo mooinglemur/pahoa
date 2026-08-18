@@ -184,6 +184,12 @@ impl Room {
         &self.data
     }
 
+    /// The seed, shared. Immutable, so a caller off the actor can hold it and
+    /// describe the room without asking the actor anything.
+    pub fn multidata_arc(&self) -> Arc<MultiData> {
+        Arc::clone(&self.data)
+    }
+
     /// The merged name tables. Immutable and shared, so callers off the actor
     /// can hold it.
     pub fn datapackage(&self) -> &Arc<NameTables> {
@@ -1876,7 +1882,7 @@ impl Room {
             // uses". `RoomInfo` goes out before the slot name is known, so a
             // per-slot password cannot be reported per slot — and reporting
             // `false` would stop a client prompting for one it does need.
-            password: self.options.password.is_some() || !self.options.slot_passwords.is_empty(),
+            password: self.password_required(),
             permissions: BTreeMap::from([
                 ("release".to_string(), self.options.release_mode),
                 ("collect".to_string(), self.options.collect_mode),
@@ -2026,6 +2032,23 @@ impl Room {
         };
         v.sort_unstable();
         v
+    }
+
+    /// Every open connection, authenticated or not.
+    ///
+    /// Counts sockets rather than players: a player commonly runs a game
+    /// client, a text client and a tracker, and a connection that has not
+    /// finished `Connect` is still one this process is holding.
+    pub fn client_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    /// Whether a client will be asked for a password of some kind.
+    ///
+    /// Deliberately does not say *which* mode, and per-slot passwords cannot be
+    /// reported per slot anyway on a surface that has no slot in hand.
+    pub fn password_required(&self) -> bool {
+        self.options.password.is_some() || !self.options.slot_passwords.is_empty()
     }
 
     /// All authenticated connections.
