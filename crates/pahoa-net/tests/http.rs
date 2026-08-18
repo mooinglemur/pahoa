@@ -67,6 +67,33 @@ async fn start(options: RoomOptions) -> Server {
     .expect("server should bind")
 }
 
+/// A token long enough to be accepted, and recognizable in a failure message.
+const TOKEN: &str = "test-token-of-at-least-thirty-two-bytes";
+
+async fn start_with_admin() -> Server {
+    Server::start(
+        room(RoomOptions::default()),
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("server should bind")
+}
+
+async fn authed(addr: SocketAddr, method: &str, path: &str, token: &str) -> String {
+    request(
+        addr,
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n\
+             Content-Length: 0\r\n\r\n"
+        ),
+    )
+    .await
+}
+
 /// One request, one response, connection closed — which is what every response
 /// on this surface does.
 async fn request(addr: SocketAddr, raw: &str) -> String {
@@ -210,6 +237,181 @@ async fn a_query_string_does_not_defeat_the_router() {
     let server = start(RoomOptions::default()).await;
     let (status, _) = split(&get(server.local_addr, "/healthz?probe=1").await);
     assert_eq!(status, "HTTP/1.1 200 OK");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_bad_token_is_refused_and_names_the_scheme() {
+    let server = start_with_admin().await;
+
+    let response = authed(server.local_addr, "GET", "/admin/v1/status", "wrong").await;
+    assert_eq!(split(&response).0, "HTTP/1.1 401 Unauthorized");
+    assert!(response.contains("WWW-Authenticate: Bearer"), "{response}");
+
+    // No header at all is the same answer as the wrong one.
+    let (status, _) = split(&get(server.local_addr, "/admin/v1/status").await);
+    assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn guessing_the_token_is_rate_limited() {
+    let server = start_with_admin().await;
+    let mut saw_429 = false;
+    // The limit is 10 in a 60s window, so this crosses it comfortably.
+    for _ in 0..15 {
+        let response = authed(server.local_addr, "GET", "/admin/v1/status", "wrong").await;
+        if split(&response).0 == "HTTP/1.1 429 Too Many Requests" {
+            saw_429 = true;
+            break;
+        }
+    }
+    assert!(saw_429, "guessing should be cut off");
+
+    // And the cutoff is not an oracle: the right token is refused too, while
+    // the window is closed.
+    let response = authed(server.local_addr, "GET", "/admin/v1/status", TOKEN).await;
+    assert_eq!(split(&response).0, "HTTP/1.1 429 Too Many Requests");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn status_reports_the_room() {
+    let server = start_with_admin().await;
+    let response = authed(server.local_addr, "GET", "/admin/v1/status", TOKEN).await;
+    let (status, body) = split(&response);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(json["seed_name"], "56807069331869547085");
+    assert_eq!(json["api_version"], 1);
+
+    // A room started without --save-dir keeps nothing, and says so rather than
+    // reporting a save that never happens.
+    assert!(json["save"].is_null(), "{}", json["save"]);
+
+    let net = &json["net"];
+    assert_eq!(net["clients_connected"], 0);
+    assert_eq!(net["lag_disconnects"], 0);
+    assert!(net["outbound_budget_bytes"].as_u64().unwrap() > 0);
+
+    let slots = json["slots"].as_array().expect("slots");
+    assert_eq!(slots.len(), 2);
+    assert_eq!(slots[0]["connected"], false);
+    assert_eq!(slots[0]["checks"], 0);
+    assert_eq!(slots[0]["status"], "unknown");
+
+    // The token must never appear in anything the surface renders.
+    assert!(!body.contains(TOKEN), "the token was echoed: {body}");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn metrics_are_prometheus_text() {
+    let server = start_with_admin().await;
+    let response = authed(server.local_addr, "GET", "/admin/v1/metrics", TOKEN).await;
+    let (status, body) = split(&response);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(
+        response.contains("Content-Type: text/plain; version=0.0.4"),
+        "{response}"
+    );
+
+    for expected in [
+        "# TYPE pahoa_clients_connected gauge",
+        "pahoa_clients_connected 0",
+        "# TYPE pahoa_lag_disconnects_total counter",
+        "pahoa_slots 2",
+        "pahoa_slots_connected 0",
+    ] {
+        assert!(body.contains(expected), "missing {expected:?} in:\n{body}");
+    }
+
+    // Every line is either a comment or `name value`.
+    for line in body
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+    {
+        let parts: Vec<&str> = line.split(' ').collect();
+        assert_eq!(parts.len(), 2, "malformed exposition line {line:?}");
+        assert!(parts[1].parse::<f64>().is_ok(), "not a number: {line:?}");
+    }
+
+    server.shutdown().await;
+}
+
+/// `POST /admin/v1/shutdown` answers before quiescing, then takes the same exit
+/// path SIGTERM does — which the owner of the process observes by awaiting
+/// `shutdown_requested`.
+#[tokio::test]
+async fn shutdown_answers_and_then_asks_the_process_to_stop() {
+    let server = Arc::new(start_with_admin().await);
+
+    // Whoever owns the exit is waiting on this, exactly as `serve.rs` does.
+    let waiting = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.shutdown_requested().await })
+    };
+
+    let response = authed(server.local_addr, "POST", "/admin/v1/shutdown", TOKEN).await;
+    let (status, body) = split(&response);
+    assert_eq!(status, "HTTP/1.1 202 Accepted");
+    assert_eq!(body, "shutting down\n");
+
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the shutdown request should have been signalled")
+        .expect("the waiter should not have panicked");
+
+    server.shutdown().await;
+}
+
+/// A shutdown that nobody is listening for must not wedge the request.
+#[tokio::test]
+async fn shutdown_answers_even_with_no_one_waiting() {
+    let server = start_with_admin().await;
+    let response = authed(server.local_addr, "POST", "/admin/v1/shutdown", TOKEN).await;
+    assert_eq!(split(&response).0, "HTTP/1.1 202 Accepted");
+    server.shutdown().await;
+}
+
+/// Shutting down stops taking new connections before the final save runs, so a
+/// client cannot arrive during the flush and be told about a room that is
+/// already going away.
+///
+/// The listener going away entirely is why the router's `503` path is only for
+/// the narrower race where the actor stops while the listener is still up — a
+/// closed port is the better answer, and this is what proves it happens.
+#[tokio::test]
+async fn the_port_stops_accepting_once_the_room_has_stopped() {
+    let server = start_with_admin().await;
+    let addr = server.local_addr;
+    assert!(
+        TcpStream::connect(addr).await.is_ok(),
+        "should be accepting while running"
+    );
+
+    server.shutdown().await;
+
+    assert!(
+        TcpStream::connect(addr).await.is_err(),
+        "should have stopped accepting"
+    );
+}
+
+#[tokio::test]
+async fn the_admin_surface_rejects_the_wrong_method() {
+    let server = start_with_admin().await;
+    let response = authed(server.local_addr, "POST", "/admin/v1/status", TOKEN).await;
+    assert_eq!(split(&response).0, "HTTP/1.1 405 Method Not Allowed");
+
+    // And an unknown admin path is still a 404, once authenticated.
+    let response = authed(server.local_addr, "GET", "/admin/v1/nope", TOKEN).await;
+    assert_eq!(split(&response).0, "HTTP/1.1 404 Not Found");
+
     server.shutdown().await;
 }
 

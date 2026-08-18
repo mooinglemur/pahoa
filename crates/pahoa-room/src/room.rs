@@ -2051,6 +2051,15 @@ impl Room {
         self.options.password.is_some() || !self.options.slot_passwords.is_empty()
     }
 
+    /// How many authenticated connections a slot has open.
+    ///
+    /// A player commonly has several — a game client, a text client, a tracker —
+    /// so this is a count rather than a flag, and zero is what "not connected"
+    /// means.
+    pub fn connections_for(&self, key: SlotKey) -> usize {
+        self.by_slot.get(&key).map_or(0, |conns| conns.len())
+    }
+
     /// All authenticated connections.
     pub fn all_conns(&self) -> Vec<ConnId> {
         self.resolve(&Recipients::All)
@@ -2173,6 +2182,14 @@ impl Room {
     }
 
     pub fn shutdown(&mut self, out: &mut dyn EffectSink) {
+        // Said before the closes, so a client learns why its socket went away
+        // rather than inferring it from a disconnect. Whether it arrives depends
+        // on the transport draining afterwards, which is the caller's job.
+        self.broadcast_result(
+            "The room is closing. Your progress is saved; reconnect in a moment.".to_string(),
+            out,
+        );
+
         for conn in self.clients.keys().copied().collect::<Vec<_>>() {
             out.close(conn, CloseReason::ServerShutdown);
         }

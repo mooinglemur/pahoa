@@ -17,6 +17,15 @@ use std::collections::BTreeMap;
 const PASSWORD: &str = "PAHOA_PASSWORD";
 const SERVER_PASSWORD: &str = "PAHOA_SERVER_PASSWORD";
 const SLOT_PASSWORDS: &str = "PAHOA_SLOT_PASSWORDS";
+const ADMIN_TOKEN: &str = "PAHOA_ADMIN_TOKEN";
+
+/// Below this, a token is not worth calling one.
+///
+/// The admin surface is mutating and internet-reachable, and the token is the
+/// only control on it, so a short one is a misconfiguration rather than a
+/// preference. Refused at startup instead of served, because the failure it
+/// prevents is silent.
+const MIN_ADMIN_TOKEN_BYTES: usize = 32;
 
 /// The resolved set, with whatever should be said about how it was resolved.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -34,6 +43,10 @@ pub struct Secrets {
     /// environment, then seed, then argv.
     pub password_from_env: bool,
     pub server_password_from_env: bool,
+    /// Bearer token for `/admin/v1/**`. Environment only — there is no flag,
+    /// because there is no case for one that outweighs putting it in `ps`.
+    /// `None` makes the admin surface answer `404`.
+    pub admin_token: Option<String>,
     /// Held rather than logged, because resolution happens before the
     /// subscriber is installed. The caller emits these once it is.
     pub warnings: Vec<String>,
@@ -89,12 +102,29 @@ fn merge(argv: FromArgv<'_>, env: impl Fn(&str) -> Option<String>) -> Result<Sec
         ));
     }
 
+    let admin_token = match env(ADMIN_TOKEN) {
+        None => None,
+        Some(token) if token.len() < MIN_ADMIN_TOKEN_BYTES => {
+            // The length is not a secret and naming it is what makes this
+            // actionable; the token itself is never echoed.
+            return Err(format!(
+                "{ADMIN_TOKEN} is {} bytes, and the admin API needs at least \
+                 {MIN_ADMIN_TOKEN_BYTES}. It is the only control on a mutating, \
+                 internet-reachable surface, so generate one rather than \
+                 choosing one.",
+                token.len()
+            ));
+        }
+        Some(token) => Some(token),
+    };
+
     Ok(Secrets {
         password,
         server_password,
         slot_passwords,
         password_from_env,
         server_password_from_env,
+        admin_token,
         warnings,
     })
 }

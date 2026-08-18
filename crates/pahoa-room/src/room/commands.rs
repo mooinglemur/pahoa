@@ -267,7 +267,7 @@ impl Room {
     }
 
     /// A room-wide `CommandResult`, for the commands that answer everybody.
-    fn broadcast_result(&self, text: String, out: &mut dyn EffectSink) {
+    pub(crate) fn broadcast_result(&self, text: String, out: &mut dyn EffectSink) {
         out.broadcast(
             Recipients::AllText,
             &[ServerPacket::PrintJSON(PrintJson {

@@ -27,6 +27,11 @@ pub struct Server {
     /// Fires when the actor loop has returned, final save included. Taken by
     /// the first `shutdown` caller; a second call has nothing left to wait for.
     stopped: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Fired by `POST /admin/v1/shutdown`.
+    shutdown_requested: Arc<tokio::sync::Notify>,
+    /// The accept loop, so shutting down can stop taking new connections rather
+    /// than racing them against a room that is going away.
+    accepting: tokio::task::JoinHandle<()>,
 }
 
 impl Server {
@@ -76,7 +81,13 @@ impl Server {
         // Taken before the room moves into the actor. The seed is immutable and
         // already an `Arc`, so the HTTP surface can describe the room without
         // asking the actor for anything that does not change.
-        let router = crate::http::Router::new(room.multidata_arc(), actor_tx.clone());
+        let shutdown_requested = Arc::new(tokio::sync::Notify::new());
+        let router = crate::http::Router::new(
+            room.multidata_arc(),
+            actor_tx.clone(),
+            &config,
+            Arc::clone(&shutdown_requested),
+        );
 
         let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -86,7 +97,7 @@ impl Server {
 
         let accept_tx = actor_tx.clone();
         let cfg = config.clone();
-        tokio::spawn(async move {
+        let accepting = tokio::spawn(async move {
             let next_id = AtomicU64::new(1);
             loop {
                 match listener.accept().await {
@@ -120,7 +131,18 @@ impl Server {
             local_addr,
             actor_tx,
             stopped: tokio::sync::Mutex::new(Some(stopped_rx)),
+            shutdown_requested,
+            accepting,
         })
+    }
+
+    /// Resolves when something inside the room asks the process to stop.
+    ///
+    /// Today that is only `POST /admin/v1/shutdown`. The caller selects on this
+    /// alongside SIGINT and SIGTERM, so every route out of a running room takes
+    /// the same exit path and the same final save.
+    pub async fn shutdown_requested(&self) {
+        self.shutdown_requested.notified().await;
     }
 
     /// Stop the room and wait for it to finish, including its final save.
@@ -130,12 +152,32 @@ impl Server {
     /// exists to keep. The flush has its own timeout, so this cannot hang
     /// indefinitely on a stuck filesystem.
     pub async fn shutdown(&self) {
+        // Stop taking new connections first. A client that arrives during the
+        // final save would be told about a room that is already going away, and
+        // its `Connect` would race the actor's last message.
+        self.accepting.abort();
+
         let _ = self.actor_tx.send(ActorMsg::Shutdown).await;
         if let Some(stopped) = self.stopped.lock().await.take() {
             let _ = stopped.await;
         }
+
+        // Only now that the save is on disk: give the close frames the room
+        // just broadcast a moment to reach the wire. Dropping the runtime aborts
+        // the writer tasks, so without this a client's last word from the room
+        // is a TCP reset rather than "the room is closing".
+        //
+        // Deliberately after the flush and deliberately bounded — this must
+        // never be able to eat into the save's budget.
+        tokio::time::sleep(CLOSE_LINGER).await;
     }
 }
+
+/// How long to let a closing room's last frames drain.
+///
+/// Long enough for a loopback or same-cluster write to land, short enough to be
+/// invisible against a pod's termination grace period.
+const CLOSE_LINGER: Duration = Duration::from_millis(250);
 
 /// Decide the scheme, then hand off to [`run_session`].
 ///

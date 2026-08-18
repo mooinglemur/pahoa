@@ -78,6 +78,13 @@ pub struct NetConfig {
     /// runs either way, so a plaintext client gets an immediate `426` rather
     /// than a hang.
     pub allow_plaintext: bool,
+
+    /// Bearer token for `/admin/v1/**`.
+    ///
+    /// `None` makes the admin surface answer `404` — absent rather than merely
+    /// locked, so a misconfiguration fails closed and is indistinguishable from
+    /// a build that never had one.
+    pub admin_token: Option<String>,
 }
 
 impl Default for NetConfig {
@@ -98,6 +105,7 @@ impl Default for NetConfig {
             max_body_bytes: 64 * 1024,
             tls: None,
             allow_plaintext: false,
+            admin_token: None,
         }
     }
 }

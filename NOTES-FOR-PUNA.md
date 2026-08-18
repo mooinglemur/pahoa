@@ -125,10 +125,8 @@ Nothing here is blocked on puna. Until it ships, keep reserving the pair and kee
 password modes are set. Slots absent from the object have no password. `PAHOA_SERVER_PASSWORD` is
 orthogonal and coexists with either mode.
 
-**`PAHOA_ADMIN_TOKEN` is not read yet.** It arrives with the admin surface, not before — there is
-nothing for it to protect until then, and a variable that is silently ignored is worse than one
-that plainly does not exist. Do not set it expecting it to do anything; there is no admin API to
-reach yet, so nothing is exposed in the meantime.
+**`PAHOA_ADMIN_TOKEN` is implemented now** — see the admin API section below for what it unlocks
+and what it demands.
 
 **One addition worth knowing about: precedence is environment, then seed, then argv.** The middle
 term is new. `--use-embedded-options` applies a seed's own `server_options` over the command line,
@@ -148,3 +146,53 @@ including that a room restarted *without* a password does not have one restored 
 The save format did **not** get a version bump for this, on the grounds that no live saves exist. A
 `room.save` written before this change will fail to decode. If any pre-existing save directories are
 lying around from experiments, delete them.
+
+---
+
+## The HTTP surface is live: probes, the room page, and the admin API
+
+All on the room port, all over the same TLS. Five routes so far, matching `HANDOFF.md`'s contract:
+
+| route | auth | notes for puna |
+|---|---|---|
+| `GET /healthz` | none | The readiness probe. `200` means *this room is really serving* |
+| `GET /api/v1/room` | none | The room page's data. Verified to carry no secrets |
+| `GET /admin/v1/status` | bearer | The document from `HANDOFF.md:116-127` |
+| `GET /admin/v1/metrics` | bearer | Prometheus text exposition |
+| `POST /admin/v1/shutdown` | bearer | `202`, then quiesce, save, exit 0 |
+
+`POST /admin/v1/command`, `POST /admin/v1/slots/<n>/password` and `/tracker/…` are still `404` —
+they are the next milestone.
+
+**Use `GET /healthz` as the readiness probe, not a TCP check.** The listener binds only after the
+save is restored, so either works today, but the HTTP probe stays correct if that ever changes.
+
+Four things that constrain puna's manifests:
+
+- **`PAHOA_ADMIN_TOKEN` must be at least 32 bytes, and pahoa refuses to start below that.** The
+  error names the length it got, never the token. Generate it — the surface is mutating and
+  internet-reachable, and the token is the only control on it.
+- **With no token set the admin routes return `404`, not `401`.** Absent rather than locked, so a
+  Secret that failed to render fails closed and looks like an old image rather than a locked door.
+  If puna probes `/admin/v1/status` and sees `404`, the token did not arrive.
+- **Authentication failures are rate-limited to 10 per minute per room, and the cutoff applies to
+  the correct token too** for the rest of that window — otherwise the limit would be an oracle. A
+  reconciler that retries a failing call in a tight loop can therefore lock *itself* out for a
+  minute. Back off on `429`; it carries `Retry-After`.
+- **`clients_connected` counts sockets, not players.** A player commonly holds three — game client,
+  text client, tracker. The per-slot `connections` field in `/admin/v1/status` is the same count
+  scoped to one slot, and `connected` is just `connections > 0`. An idle reaper should read
+  `activity.idle_seconds`, not the client count.
+
+Two shapes worth knowing before coding against the JSON:
+
+- **`save` is `null`** for a room started without `--save-dir`, rather than a block full of zeros.
+  A room that keeps nothing is a real state and should not look like a room that has never saved.
+- **`activity.last_client_message_at` and `idle_seconds` are `null`** until a client has said
+  something. Null means "no data", never "idle for zero seconds".
+
+**Shutdown ordering, since puna will drive it:** the `202` is written *before* the room quiesces,
+because quiescing closes every connection including the one asking. After answering, the room takes
+exactly the SIGTERM path — stop accepting, tell clients the room is closing, flush the final save,
+then a brief linger so those close frames reach the wire before the runtime drops. The drain-time
+budget from the first section of this document applies unchanged.

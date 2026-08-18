@@ -142,6 +142,39 @@ one the operator configured.
 on every start, which is what makes rotating one survive a restart rather than
 reverting to whatever was on disk.
 
+### The HTTP surface
+
+The room port serves HTTP as well as the game, decided per connection by the
+same first-byte sniff that separates TLS from plaintext. With `--tls-cert` set
+these are `https://`; without it, `http://`.
+
+| route | auth | |
+|---|---|---|
+| `GET /healthz` | none | `200` once the room is serving |
+| `GET /api/v1/room` | none | What a room page shows. No secrets |
+| `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress |
+| `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
+| `POST /admin/v1/shutdown` | bearer | Quiesce, save, exit 0 |
+
+`/healthz` needs no state to answer: the listener binds only after the save has
+been restored, so reaching it at all is the readiness signal.
+
+**The admin surface is authenticated by `PAHOA_ADMIN_TOKEN` and nothing else.**
+It is mutating and reachable from the internet by design — driving it with
+`curl` is a capability worth keeping — so three things follow. The token needs
+at least 32 bytes and pahoa refuses to start with a shorter one; comparison is
+constant-time; and failures are rate-limited, after which the surface stops
+answering for the rest of the window even to the correct token, so the limit
+cannot be used to test guesses.
+
+**With no token configured the admin routes return `404`, not `401`.** The
+surface is *absent* rather than locked, so a misconfiguration fails closed and
+is indistinguishable from a build that never had one.
+
+```sh
+curl -s -H "Authorization: Bearer $PAHOA_ADMIN_TOKEN" https://host:38281/admin/v1/status | jq
+```
+
 ### Room options
 
 | option | default | |

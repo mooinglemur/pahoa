@@ -14,9 +14,13 @@
 //! `serde_json` for the protocol, and the whole surface is a handful of routes
 //! answering small JSON documents.
 
+mod admin;
 mod response;
+mod status;
 
+pub use admin::Admin;
 pub use response::Response;
+pub use status::{SlotStatus, Status};
 
 use crate::actor::ActorMsg;
 use std::sync::Arc;
@@ -31,14 +35,30 @@ struct Inner {
     seed: Arc<pahoa_multidata::MultiData>,
     actor: mpsc::Sender<ActorMsg>,
     started_at: SystemTime,
+    /// `None` when no token is configured, which makes the admin surface 404.
+    admin: Option<Admin>,
+    /// Reported so an operator can compare what the room is holding against
+    /// what it is allowed to hold.
+    outbound_budget_bytes: usize,
+    /// Fired by `POST /admin/v1/shutdown`, and awaited by whatever owns the
+    /// process's exit.
+    shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl Router {
-    pub fn new(seed: Arc<pahoa_multidata::MultiData>, actor: mpsc::Sender<ActorMsg>) -> Self {
+    pub fn new(
+        seed: Arc<pahoa_multidata::MultiData>,
+        actor: mpsc::Sender<ActorMsg>,
+        config: &crate::NetConfig,
+        shutdown: Arc<tokio::sync::Notify>,
+    ) -> Self {
         Self(Arc::new(Inner {
             seed,
             actor,
             started_at: SystemTime::now(),
+            admin: Admin::new(config.admin_token.clone()),
+            outbound_budget_bytes: config.outbound_budget_bytes,
+            shutdown,
         }))
     }
 
@@ -56,21 +76,84 @@ impl Router {
         // own.
         let path = request.path.split(['?', '#']).next().unwrap_or("/");
 
+        // The admin surface is *absent* rather than locked when no token is
+        // configured, so a misconfiguration fails closed and is
+        // indistinguishable from an old build that never had one.
+        if path.starts_with("/admin/v1/") {
+            let Some(admin) = &self.0.admin else {
+                return Response::not_found();
+            };
+            if let admin::Auth::Refused(response) = admin.check(request.header("Authorization")) {
+                return response;
+            }
+            return self.admin_route(method, path).await;
+        }
+
         match (method, path) {
             ("GET", "/healthz") => Response::text(200, "ok\n"),
             ("GET", "/api/v1/room") => self.room().await,
-
-            // The admin surface is *absent* rather than locked when no token is
-            // configured, so a misconfiguration fails closed and looks the same
-            // as an old build. Until it exists, that is every request.
-            (_, p) if p.starts_with("/admin/v1/") => Response::not_found(),
-
-            ("GET", _) => Response::not_found(),
             // A path that exists but not for this verb is worth distinguishing
             // from one that does not exist at all.
             (_, "/healthz" | "/api/v1/room") => Response::status(405, "Method Not Allowed"),
             _ => Response::not_found(),
         }
+    }
+
+    /// Authenticated already, by the time anything here runs.
+    async fn admin_route(&self, method: &str, path: &str) -> Response {
+        match (method, path) {
+            ("GET", "/admin/v1/status") => self.status().await,
+            ("GET", "/admin/v1/metrics") => self.metrics().await,
+            ("POST", "/admin/v1/shutdown") => self.shutdown(),
+            (_, "/admin/v1/status" | "/admin/v1/metrics" | "/admin/v1/shutdown") => {
+                Response::status(405, "Method Not Allowed")
+            }
+            _ => Response::not_found(),
+        }
+    }
+
+    async fn status(&self) -> Response {
+        let Some(live) = self.query().await else {
+            return stopping();
+        };
+        Response::json(
+            200,
+            &status::document(
+                &self.0.seed,
+                &live,
+                self.0.started_at,
+                self.0.outbound_budget_bytes,
+            ),
+        )
+    }
+
+    async fn metrics(&self) -> Response {
+        let Some(live) = self.query().await else {
+            return stopping();
+        };
+        Response::prometheus(status::prometheus(&live, self.0.outbound_budget_bytes))
+    }
+
+    /// Ask the process to stop, the same way SIGTERM does.
+    ///
+    /// Answers before quiescing rather than after: the room then closes every
+    /// connection, including this one, so a response written afterwards would
+    /// race the socket it was going to be written to.
+    fn shutdown(&self) -> Response {
+        tracing::info!("shutdown requested through the admin API");
+        self.0.shutdown.notify_waiters();
+        Response::text(202, "shutting down\n")
+    }
+
+    /// The full walk, for the admin surface.
+    async fn query(&self) -> Option<Status> {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .actor
+            .send(ActorMsg::Status { reply: tx })
+            .await
+            .ok()?;
+        rx.await.ok()
     }
 
     /// What a room page shows. Public, and therefore carries no secrets and no
@@ -122,6 +205,14 @@ impl Router {
 pub struct Live {
     pub clients_connected: usize,
     pub password_required: bool,
+}
+
+/// The room has stopped answering, which during a shutdown is ordinary.
+///
+/// `503` rather than an empty document, because a monitor that read zeros here
+/// would record a healthy idle room at exactly the moment one was going away.
+fn stopping() -> Response {
+    Response::text(503, "the room is stopping\n")
 }
 
 /// `2026-08-17T12:00:00Z`, hand-rolled.

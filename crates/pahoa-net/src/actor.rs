@@ -54,6 +54,13 @@ pub enum ActorMsg {
     Live {
         reply: tokio::sync::oneshot::Sender<crate::http::Live>,
     },
+    /// Everything `/admin/v1/status` reports that only the actor can see.
+    ///
+    /// Separate from [`ActorMsg::Live`] because this walks every slot, and the
+    /// public route is reached by a readiness probe on a schedule.
+    Status {
+        reply: tokio::sync::oneshot::Sender<crate::http::Status>,
+    },
     Shutdown,
 }
 
@@ -346,6 +353,7 @@ pub async fn run_with_saves(
                 push_membership(room, conn, &mut sink);
             }
             ActorMsg::Packets { conn, packets } => {
+                crate::metrics::record_client_message();
                 for packet in packets {
                     room.handle(conn, packet, &mut sink);
                 }
@@ -373,6 +381,32 @@ pub async fn run_with_saves(
                 let _ = reply.send(crate::http::Live {
                     clients_connected: room.client_count(),
                     password_required: room.password_required(),
+                });
+            }
+            ActorMsg::Status { reply } => {
+                let _ = reply.send(crate::http::Status {
+                    clients_connected: room.client_count(),
+                    // Only the actor holds this: it is the saver's own notion of
+                    // whether anything has changed since the last save started.
+                    save_dirty: saver.dirty,
+                    save_interval: saver.config.interval,
+                    saving: saver.config.store.is_some(),
+                    slots: room
+                        .multidata()
+                        .player_slots()
+                        .map(|(number, info)| {
+                            let key = (0, *number);
+                            crate::http::SlotStatus {
+                                slot: *number,
+                                name: info.name.clone(),
+                                game: info.game.clone(),
+                                connections: room.connections_for(key),
+                                checks: room.checked_count(key),
+                                total_checks: room.multidata().locations.count_for(*number),
+                                status: room.status(key).as_text(),
+                            }
+                        })
+                        .collect(),
                 });
             }
             ActorMsg::Shutdown => {

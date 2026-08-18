@@ -144,12 +144,17 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         }
     }
 
+    if args.secrets.admin_token.is_some() {
+        tracing::info!("the admin API is enabled on /admin/v1/");
+    }
+
     let config = NetConfig {
         bind: args.bind,
         port: args.port,
         outbound_budget_bytes: budget,
         tls: args.tls,
         allow_plaintext: args.allow_plaintext,
+        admin_token: args.secrets.admin_token.clone(),
         ..Default::default()
     };
     let runtime = build_runtime(&config).map_err(|e| format!("runtime: {e}"))?;
@@ -172,8 +177,13 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             env!("CARGO_PKG_VERSION"),
         );
 
-        let signal = shutdown_signal().await;
-        tracing::info!(signal, "shutting down");
+        // Every way out of a running room converges here, so they all get the
+        // same quiesce and the same final save.
+        let reason = tokio::select! {
+            signal = shutdown_signal() => signal,
+            () = server.shutdown_requested() => "admin request",
+        };
+        tracing::info!(reason, "shutting down");
         server.shutdown().await;
         Ok(())
     })

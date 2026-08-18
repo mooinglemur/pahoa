@@ -49,6 +49,20 @@ pub enum ClientStatus {
 }
 
 impl ClientStatus {
+    /// The lowercase spelling, for the admin API's JSON.
+    ///
+    /// The wire carries the numeric value; this is for a human reading a status
+    /// document, where `20` says nothing and `"playing"` says everything.
+    pub fn as_text(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Connected => "connected",
+            Self::Ready => "ready",
+            Self::Playing => "playing",
+            Self::Goal => "goal",
+        }
+    }
+
     /// The one table. Callers that have a path to blame use [`Self::from_i64`].
     pub fn from_wire(v: i64) -> Option<Self> {
         Some(match v {

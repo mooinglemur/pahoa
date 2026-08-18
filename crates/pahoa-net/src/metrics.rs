@@ -27,6 +27,11 @@ static MAILBOX_PEAK: AtomicUsize = AtomicUsize::new(0);
 static LAG_DISCONNECTS: AtomicU64 = AtomicU64::new(0);
 static SAVE_MICROS: AtomicU64 = AtomicU64::new(0);
 static SAVE_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Unix seconds of the last completed save. Zero means "none yet", which is
+/// distinguishable from a real timestamp for any room started after 1970.
+static SAVE_AT: AtomicU64 = AtomicU64::new(0);
+/// Unix seconds of the last message from any client.
+static LAST_CLIENT_MESSAGE_AT: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_mailbox_depth(depth: usize) {
     MAILBOX_DEPTH.store(depth, Ordering::Relaxed);
@@ -54,6 +59,7 @@ pub fn lag_disconnects() -> u64 {
 pub fn record_save(duration: std::time::Duration, bytes: usize) {
     SAVE_MICROS.store(duration.as_micros() as u64, Ordering::Relaxed);
     SAVE_BYTES.store(bytes as u64, Ordering::Relaxed);
+    SAVE_AT.store(unix_now(), Ordering::Relaxed);
 }
 
 /// Wall time and size of the most recent save.
@@ -62,6 +68,42 @@ pub fn last_save() -> (std::time::Duration, u64) {
         std::time::Duration::from_micros(SAVE_MICROS.load(Ordering::Relaxed)),
         SAVE_BYTES.load(Ordering::Relaxed),
     )
+}
+
+/// When the last save completed, or `None` if none has.
+///
+/// A wall clock rather than a duration because it is reported to an operator,
+/// who wants "at 12:04" and not "1841 seconds ago" — and because a room that
+/// has never saved has to be distinguishable from one that saved at startup.
+pub fn last_save_at() -> Option<std::time::SystemTime> {
+    match SAVE_AT.load(Ordering::Relaxed) {
+        0 => None,
+        secs => Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
+    }
+}
+
+/// Note that a client said something. Called on the actor, once per batch.
+///
+/// A coarse timestamp on purpose: this exists to answer "is anyone still
+/// playing", which an idle reaper acts on in minutes. A second's resolution and
+/// a relaxed store cost nothing on the actor's hot path.
+pub fn record_client_message() {
+    LAST_CLIENT_MESSAGE_AT.store(unix_now(), Ordering::Relaxed);
+}
+
+/// When a client last said anything, or `None` if none has since startup.
+pub fn last_client_message_at() -> Option<std::time::SystemTime> {
+    match LAST_CLIENT_MESSAGE_AT.load(Ordering::Relaxed) {
+        0 => None,
+        secs => Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Resident set size, in bytes.
