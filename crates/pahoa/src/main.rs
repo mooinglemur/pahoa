@@ -44,6 +44,14 @@ SERVE OPTIONS
     --log-level <level>      trace, debug, info, warn, error (default info).
                              Logs go to stderr; stdout carries only the one
                              startup line.
+    --tls-cert <file.pem>    Certificate chain. Terminates TLS on the room port,
+                             which then serves wss:// and https://. Reloaded in
+                             place when the file changes, so a renewal needs no
+                             restart.
+    --tls-key <file.pem>     Private key for --tls-cert. Both or neither.
+    --allow-plaintext        Keep answering ws:// after a certificate is
+                             configured. Off by default: it puts the admin
+                             token's traffic in the clear.
 
 ROOM OPTIONS
     --password <pw>              Required from every client on connect
@@ -85,6 +93,9 @@ const SERVE_OPTS: &[Opt] = &[
     value("--save-interval", &[]),
     value("--outbound-budget", &[]),
     value("--log-level", &["--loglevel"]),
+    value("--tls-cert", &["--tls_cert"]),
+    value("--tls-key", &["--tls_key"]),
+    flag("--allow-plaintext", &["--allow_plaintext"]),
     value("--password", &[]),
     value("--server-password", &["--server_password"]),
     value("--hint-cost", &["--hint_cost"]),
@@ -221,11 +232,34 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         None => LevelFilter::INFO,
     };
 
+    // The parser has no notion of options that require each other, so the pair
+    // is checked by hand. Half a pair is always a mistake, and the failure it
+    // would otherwise produce is a room that quietly serves plaintext.
+    let tls = match (args.get("--tls-cert"), args.get("--tls-key")) {
+        (Some(cert), Some(key)) => Some(pahoa_net::TlsPaths {
+            cert: Path::new(cert).to_path_buf(),
+            key: Path::new(key).to_path_buf(),
+        }),
+        (None, None) => None,
+        (Some(_), None) => return Err("--tls-cert needs --tls-key".to_string()),
+        (None, Some(_)) => return Err("--tls-key needs --tls-cert".to_string()),
+    };
+    let allow_plaintext = args.is_set("--allow-plaintext");
+    if allow_plaintext && tls.is_none() {
+        return Err(
+            "--allow-plaintext only means something with --tls-cert; without one \
+             this room already serves plaintext and nothing else"
+                .to_string(),
+        );
+    }
+
     serve::run(serve::ServeArgs {
         multidata: Path::new(multidata),
         snapshot: args.get("--snapshot").map(Path::new),
         outbound_budget_bytes,
         log_level,
+        tls,
+        allow_plaintext,
         port: args.number("--port")?.unwrap_or(38281),
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
         save_dir: args.get("--save-dir").map(Path::new),

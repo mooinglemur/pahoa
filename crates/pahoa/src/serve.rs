@@ -27,6 +27,9 @@ pub struct ServeArgs<'a> {
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
     pub log_level: LevelFilter,
+    /// `None` serves plaintext only.
+    pub tls: Option<pahoa_net::TlsPaths>,
+    pub allow_plaintext: bool,
 }
 
 pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
@@ -111,10 +114,28 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     let budget = args
         .outbound_budget_bytes
         .unwrap_or_else(|| pahoa_net::outbound_budget_for(data.slot_info.len()));
+    // Reported on their own lines rather than folded into the startup line,
+    // which puna parses and which keeps its shape.
+    if let Some(paths) = &args.tls {
+        tracing::info!(
+            cert = %paths.cert.display(),
+            key = %paths.key.display(),
+            "terminating TLS on the room port"
+        );
+        if args.allow_plaintext {
+            tracing::warn!(
+                "--allow-plaintext: this room also answers ws://, so anything sent \
+                 over it — passwords, the admin token — is in the clear"
+            );
+        }
+    }
+
     let config = NetConfig {
         bind: args.bind,
         port: args.port,
         outbound_budget_bytes: budget,
+        tls: args.tls,
+        allow_plaintext: args.allow_plaintext,
         ..Default::default()
     };
     let runtime = build_runtime(&config).map_err(|e| format!("runtime: {e}"))?;

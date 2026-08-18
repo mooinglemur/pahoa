@@ -1,10 +1,10 @@
 # Fully static musl build, shipped in a scratch image.
 #
-# Nothing links against the host: TLS will be rustls, zlib is zlib-rs (pure
+# Nothing links against the host: TLS is rustls over ring, zlib is zlib-rs (pure
 # Rust, and also the only flate2 backend exposing the window-bits control
 # permessage-deflate needs), and there is no libpq or OpenSSL anywhere in the
-# tree. The C that remains is vendored inside crates (mimalloc), which is why
-# musl-dev is installed.
+# tree. The C that remains is vendored inside crates (mimalloc and ring), which
+# is why musl-dev is installed.
 
 FROM rust:1.95-alpine AS builder
 

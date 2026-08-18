@@ -38,10 +38,43 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--save-interval <secs>` | `60` | Save cadence |
 | `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
 | `--log-level <level>` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+| `--tls-cert <file.pem>` | — | Certificate chain; terminates TLS on the room port |
+| `--tls-key <file.pem>` | — | Its private key. Both or neither |
+| `--allow-plaintext` | off | Keep answering `ws://` after a certificate is set |
 
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+### TLS
+
+`--tls-cert` and `--tls-key` terminate TLS on the room port itself, so one port
+serves `wss://` and `https://` with no proxy in front. The accept path sniffs
+the first byte of each connection, which is what lets both schemes share it:
+a TLS ClientHello starts `0x16`, and no HTTP method can, since every one of
+those is uppercase ASCII.
+
+Once a certificate is configured, plaintext is **refused** with `426 Upgrade
+Required` unless `--allow-plaintext` is given. That default is deliberate: the
+admin API is mutating and internet-reachable, and serving its bearer token in
+the clear on the same port would undo the point of having it. With no
+certificate configured nothing changes — plaintext is served, and a TLS client
+gets an immediate `handshake_failure` alert so a client probing `wss://` before
+`ws://` falls back at once rather than hanging.
+
+**The certificate is reloaded in place.** Both files are checked every 30
+seconds and re-read when either changes, so a renewal needs no restart — which
+matters when the alternative is bouncing every running room on one cert-manager
+cycle. Polling rather than watching, because the usual publisher of a renewed
+certificate is a Kubernetes Secret mount, and the kubelet swaps a symlink
+instead of rewriting in place. A pair that does not load — half-written, or a
+new chain next to the old key — leaves the previous certificate serving and logs
+why, rather than taking the room down over a file it already has a working copy
+of. Established connections keep the session they negotiated; only new
+handshakes see the new chain.
+
+`rustls` over `ring`, so nothing links against the host and the static musl
+build in the `scratch` image is unaffected.
 
 **Logs go to stderr and stdout carries exactly one line** — the startup line
 naming slots, locations, seed, address and build. That split is what makes
@@ -119,12 +152,9 @@ Phase 1 — the protocol-complete headless server — is done: real clients play
 real seed to completion, and a 6000-connection load run sustains a mass release.
 Deliberately absent so far, and reachable from no flag:
 
-- **TLS and the PROXY protocol.** Terminate at an ingress for now. A TLS client
-  reaching a pahoa port is refused immediately with a `handshake_failure` alert
-  rather than left to time out, so a client that probes `wss://` before `ws://`
-  falls back at once. When TLS does land, one port will serve both schemes —
-  the accept path already sniffs the first byte — with plaintext fallback opt-in
-  and never the default once a certificate is configured.
+- **The PROXY protocol.** With TLS terminated here there is less call for it,
+  but a room behind a load balancer still sees the balancer's address rather
+  than the client's.
 - **The `/` console command set**, and therefore what `!admin` dispatches into.
   It overlaps the admin REST API heavily and is worth writing once, with it.
 - **Per-slot passwords**, the lobby integration, the tracker APIs and the admin

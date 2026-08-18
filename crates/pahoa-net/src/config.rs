@@ -56,6 +56,21 @@ pub struct NetConfig {
 
     /// Header bytes accepted before the request is refused.
     pub max_header_bytes: usize,
+
+    /// Certificate and key to terminate TLS with. `None` serves plaintext only,
+    /// answering a ClientHello with a `handshake_failure` alert so a client that
+    /// probes `wss://` first falls back at once.
+    pub tls: Option<crate::tls::TlsPaths>,
+
+    /// Keep serving `ws://` on the same port after a certificate is configured.
+    ///
+    /// Off by default and deliberately opt-in. The admin API is mutating,
+    /// internet-reachable, and guarded by nothing but a bearer token; serving
+    /// that token's traffic in cleartext alongside the TLS it was meant to
+    /// travel under would undo the point of having it. The byte sniff still
+    /// runs either way, so a plaintext client gets an immediate `426` rather
+    /// than a hang.
+    pub allow_plaintext: bool,
 }
 
 impl Default for NetConfig {
@@ -73,6 +88,8 @@ impl Default for NetConfig {
             compression_level: 6,
             max_message_bytes: 4 * 1024 * 1024,
             max_header_bytes: 16 * 1024,
+            tls: None,
+            allow_plaintext: false,
         }
     }
 }

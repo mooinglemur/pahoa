@@ -15,6 +15,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -45,6 +46,18 @@ impl Server {
         config: NetConfig,
         saves: SaveConfig,
     ) -> io::Result<Self> {
+        // Before the listener, on the same reasoning as the save lock: a room
+        // configured with an unusable certificate should refuse to start rather
+        // than bind and then fail every handshake.
+        let tls = match &config.tls {
+            None => None,
+            Some(paths) => {
+                let resolver = crate::tls::CertResolver::load(paths.clone())?;
+                crate::tls::spawn_reloader(Arc::clone(&resolver), crate::tls::RELOAD_INTERVAL);
+                Some(crate::tls::acceptor(resolver))
+            }
+        };
+
         let listener = TcpListener::bind((config.bind.as_str(), config.port)).await?;
         let local_addr = listener.local_addr()?;
 
@@ -76,8 +89,11 @@ impl Server {
                         let conn = ConnId(next_id.fetch_add(1, Ordering::Relaxed));
                         let tx = accept_tx.clone();
                         let cfg = cfg.clone();
+                        // Cheap: a `TlsAcceptor` is an `Arc<ServerConfig>`.
+                        let tls = tls.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = serve_connection(stream, peer, conn, tx, cfg).await {
+                            if let Err(e) = serve_connection(stream, peer, conn, tx, cfg, tls).await
+                            {
                                 tracing::debug!(%conn, error = %e, "connection ended");
                             }
                         });
@@ -113,29 +129,124 @@ impl Server {
     }
 }
 
+/// Decide the scheme, then hand off to [`run_session`].
+///
+/// One port serves both, which is why the first byte is peeked rather than
+/// read: `peek` leaves it in the kernel's buffer, so whichever branch wins gets
+/// an untouched stream and neither needs a prefix or chain wrapper.
 async fn serve_connection(
     mut stream: TcpStream,
     peer: SocketAddr,
     conn: ConnId,
     actor: mpsc::Sender<ActorMsg>,
     config: NetConfig,
+    tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Latency matters more than packing for a chat-and-checks protocol.
+    // Latency matters more than packing for a chat-and-checks protocol. Set on
+    // the socket before anything wraps it.
     stream.set_nodelay(true).ok();
 
-    let upgraded = match ws::accept::accept(&mut stream, &config.accept_config()).await {
-        Ok(u) => u,
+    // 0x16 is the TLS handshake content type, and no HTTP method can begin with
+    // it — every one of those is uppercase ASCII. One byte is therefore enough
+    // to route, and asking for two would spin when only the first has arrived.
+    let first = peek_first_byte(&stream, config.handshake_timeout).await?;
+    let client_hello = first == Some(0x16);
+
+    match (client_hello, &tls) {
+        (true, Some(acceptor)) => {
+            let mut stream = acceptor.accept(stream).await?;
+            let upgraded = handshake(&mut stream, &config).await?;
+            // `TlsStream` has no `into_split`, so this pays for a `BiLock`. Only
+            // TLS connections do; the plaintext path below keeps the cheaper
+            // owned halves.
+            let (read_half, write_half) = tokio::io::split(stream);
+            run_session(read_half, write_half, upgraded, peer, conn, actor, config).await
+        }
+        // No certificate configured. Unchanged from before TLS existed: the
+        // handshake_failure alert is what turns a `wss://`-first client's probe
+        // into an immediate fallback rather than a 30-second hang.
+        (true, None) => {
+            let e = ws::accept::AcceptError::Tls;
+            ws::accept::reject(&mut stream, &e).await;
+            Err(e.into())
+        }
+        // Plaintext, with a certificate configured and no opt-in. RFC 2817's
+        // status for exactly this, so the refusal is legible to a person with
+        // curl rather than a bare disconnect.
+        (false, Some(_)) if !config.allow_plaintext => {
+            let _ = stream.write_all(UPGRADE_TO_TLS).await;
+            let _ = stream.flush().await;
+            tracing::debug!(%conn, %peer, "refused a plaintext connection; TLS is configured");
+            Err("plaintext refused: TLS is configured".into())
+        }
+        (false, _) => {
+            let upgraded = handshake(&mut stream, &config).await?;
+            let (read_half, write_half) = stream.into_split();
+            run_session(read_half, write_half, upgraded, peer, conn, actor, config).await
+        }
+    }
+}
+
+/// What a plaintext client is told when the room is serving TLS.
+const UPGRADE_TO_TLS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\n\
+    Upgrade: TLS/1.3, HTTP/1.1\r\n\
+    Connection: close\r\n\
+    Content-Length: 0\r\n\r\n";
+
+/// Look at the first byte without consuming it.
+///
+/// `None` means the peer closed without sending anything.
+async fn peek_first_byte(stream: &TcpStream, timeout: Duration) -> io::Result<Option<u8>> {
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(timeout, stream.peek(&mut buf))
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "no first byte within the handshake timeout",
+            )
+        })??;
+    Ok((read > 0).then_some(buf[0]))
+}
+
+/// Run the WebSocket handshake, answering a request that is not an upgrade.
+async fn handshake<S>(
+    stream: &mut S,
+    config: &NetConfig,
+) -> Result<ws::accept::Upgraded, ws::accept::AcceptError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match ws::accept::accept(stream, &config.accept_config()).await {
+        Ok(upgraded) => Ok(upgraded),
         Err(e) => {
             // A health check or a stray browser gets an HTTP status rather than
             // a silently dropped socket.
-            ws::accept::reject(&mut stream, &e).await;
-            return Err(e.into());
+            ws::accept::reject(stream, &e).await;
+            Err(e)
         }
-    };
+    }
+}
+
+/// Everything after the scheme is settled, over whichever stream won.
+///
+/// Generic so the plaintext path can keep `TcpStream`'s owned halves and the
+/// TLS path can use `tokio::io::split`; nothing below here is socket-typed.
+async fn run_session<R, W>(
+    mut read_half: R,
+    mut write_half: W,
+    upgraded: ws::accept::Upgraded,
+    peer: SocketAddr,
+    conn: ConnId,
+    actor: mpsc::Sender<ActorMsg>,
+    config: NetConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let deflate = upgraded.deflate;
     tracing::debug!(%conn, %peer, deflate, "upgraded");
-
-    let (mut read_half, mut write_half) = stream.into_split();
 
     // The real bound is the byte budget the shard checks before queuing. This
     // depth exists only so the channel is never the *tighter* limit: sized at

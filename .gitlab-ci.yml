@@ -81,11 +81,12 @@ test:
     #
     # Measured on 8 CPUs, from cold with no cache: clippy 64 s, test 13 s
     # (dependencies are built during clippy and reused), peaking at 2.27 GiB
-    # while test binaries link. 4 GiB leaves ~1.8x headroom; raise it if the
-    # tree grows enough to close that gap.
+    # while test binaries link. The request sits near that measured peak so
+    # scheduling is honest about what the job really takes; the limit leaves room
+    # to burst as the tree grows rather than OOM-killing mid-link.
     #
-    # request == limit on both, so the pod lands in Guaranteed QoS and cannot be
-    # evicted partway through.
+    # CPU request == limit, which is what makes the build's parallelism
+    # deterministic — see the note above about the quota setting cargo's -j.
     #
     # These do nothing unless the runner permits the overwrite — its config.toml
     # needs the matching cpu/memory `*_overwrite_max_allowed` entries under
@@ -93,7 +94,7 @@ test:
     KUBERNETES_CPU_REQUEST: "8"
     KUBERNETES_CPU_LIMIT: "8"
     KUBERNETES_MEMORY_REQUEST: "4Gi"
-    KUBERNETES_MEMORY_LIMIT: "4Gi"
+    KUBERNETES_MEMORY_LIMIT: "6Gi"
   rules:
     - if: '$CI_COMMIT_BRANCH'
       changes: *pahoa-changes

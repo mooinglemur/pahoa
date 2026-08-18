@@ -34,6 +34,23 @@ httparse = "1"
 # The load driver reads packets back to verify a resync actually happened.
 serde_json = "1"
 
+# TLS. `default-features = false` is load-bearing: rustls 0.23 defaults to the
+# `aws_lc_rs` provider, which wants cmake and a much larger C surface. `ring` is
+# the house precedent (Archipelago-lobby pins it the same way) and builds
+# static-musl with the `musl-dev` the Dockerfile already installs.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+rustls-pemfile = "2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 serde_json = "1"
@@ -43,3 +60,7 @@ pahoa-multidata = { path = "../pahoa-multidata" }
 # trips against itself" into "our framing interoperates".
 tokio-tungstenite = "0.28"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Certificates for the TLS tests, generated per run. A committed key pair would
+# be the alternative, and shipping one in a repository is a habit worth not
+# starting even when it is only ever trusted by a test.
+rcgen = "0.14"

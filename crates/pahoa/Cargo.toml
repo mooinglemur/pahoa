@@ -32,4 +32,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "ansi",
+    # rustls reports through the `log` crate, not `tracing`. Without this bridge
+    # every one of its diagnostics is discarded — including the ones that say
+    # why a handshake failed, which is the first thing anyone wants when TLS is
+    # misbehaving.
+    "tracing-log",
 ] }
