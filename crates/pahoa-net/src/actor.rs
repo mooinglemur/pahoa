@@ -61,6 +61,21 @@ pub enum ActorMsg {
     Status {
         reply: tokio::sync::oneshot::Sender<crate::http::Status>,
     },
+    /// An administrative command, with its target already resolved.
+    Admin {
+        command: pahoa_room::AdminCommand,
+        reply: tokio::sync::oneshot::Sender<pahoa_room::AdminOutcome>,
+    },
+    /// Rotate one slot's password on a live room.
+    ///
+    /// Not persisted, because nothing about a password is: the environment is
+    /// authoritative on every start, which is exactly what lets a rotation
+    /// survive a restart rather than reverting to what was on disk.
+    SetSlotPassword {
+        slot: u32,
+        password: Option<String>,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     Shutdown,
 }
 
@@ -132,6 +147,7 @@ impl EffectSink for Dispatcher<'_> {
             CloseReason::ProtocolError(_) => "protocol error",
             CloseReason::TooSlow => "client too slow",
             CloseReason::ServerShutdown => "server shutting down",
+            CloseReason::Kicked => "disconnected by an administrator",
         };
         self.shards
             .tell(conn, ShardMsg::Close { conn, reason: text });
@@ -408,6 +424,28 @@ pub async fn run_with_saves(
                         })
                         .collect(),
                 });
+            }
+            ActorMsg::Admin { command, reply } => {
+                let outcome = room.admin(command, &mut sink);
+                let _ = reply.send(outcome);
+            }
+            ActorMsg::SetSlotPassword {
+                slot,
+                password,
+                reply,
+            } => {
+                let known = room.multidata().slot_info.contains_key(&slot);
+                if known {
+                    match password {
+                        Some(password) => room.options.slot_passwords.insert(slot, password),
+                        None => room.options.slot_passwords.remove(&slot),
+                    };
+                    // Deliberately no `mark_dirty`: this changes configuration,
+                    // not game state, and configuration is not what a save
+                    // carries.
+                    tracing::info!(slot, "slot password rotated through the admin API");
+                }
+                let _ = reply.send(known);
             }
             ActorMsg::Shutdown => {
                 room.shutdown(&mut sink);

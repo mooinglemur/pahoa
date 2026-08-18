@@ -161,8 +161,8 @@ All on the room port, all over the same TLS. Five routes so far, matching `HANDO
 | `GET /admin/v1/metrics` | bearer | Prometheus text exposition |
 | `POST /admin/v1/shutdown` | bearer | `202`, then quiesce, save, exit 0 |
 
-`POST /admin/v1/command`, `POST /admin/v1/slots/<n>/password` and `/tracker/…` are still `404` —
-they are the next milestone.
+`POST /admin/v1/command` and `POST /admin/v1/slots/<n>/password` are implemented too — see below.
+`/tracker/…` is still `404`.
 
 **Use `GET /healthz` as the readiness probe, not a TCP check.** The listener binds only after the
 save is restored, so either works today, but the HTTP probe stays correct if that ever changes.
@@ -196,3 +196,42 @@ because quiescing closes every connection including the one asking. After answer
 exactly the SIGTERM path — stop accepting, tell clients the room is closing, flush the final save,
 then a brief linger so those close frames reach the wire before the runtime drops. The drain-time
 budget from the first section of this document applies unchanged.
+
+---
+
+## Commands and password rotation
+
+`POST /admin/v1/command` takes the tagged set from `HANDOFF.md` verbatim — `status`, `say`,
+`countdown`, `release`, `collect`, `send_item`, `hint`, `kick` — and answers
+`{"ok", "output", "affected_slots"}` in every case. `output` is pahoa's own phrasing, meant to be
+rendered verbatim in a console pane.
+
+**The status-code split matters for puna's error handling.** A *malformed* request is a `400`: an
+unknown command, a missing field, a field of the wrong type. A command the *room* refused — slot
+does not exist, nobody connected to kick, a countdown out of range — is a **`200` carrying
+`ok: false`**, because it was understood and answered. Do not treat `ok: false` as a transport
+failure to retry; it is an answer, and `output` says why.
+
+Three behaviors worth knowing:
+
+- **An administrator is not bound by the modes that gate players.** `--release-mode disabled` stops
+  `!release` and does not stop `{"command":"release"}` — acting for someone who cannot is the point
+  of the API. `send_item` likewise works with `--no-item-cheat` set.
+- **`hint` has two modes.** `force: true` grants it outright and spends nothing; the default
+  (`force` absent or false) charges the slot's own points exactly as `!hint` would, and may grant
+  fewer hints than asked or none. `granted` in the output line is the truth, not the request.
+- **`kick` is a disconnect, not a ban.** Every connection the slot holds is closed with a clean
+  WebSocket 1001 after the operator's reason is delivered as chat, and nothing prevents an immediate
+  reconnect. The response says so.
+
+**`POST /admin/v1/slots/<n>/password`** takes `{"password":"…"}` to set one and `{"password":null}`
+(or an empty body) to clear it. `404` for a slot the seed does not have. Verified live: a slot
+goes from open, to refusing an empty and a wrong password, to accepting the new one, and back to
+open when cleared — all without a restart, and without affecting any other slot.
+
+**It survives a restart only because puna's environment stays authoritative.** The rotation changes
+the running room, and nothing about a password is persisted. So a rotation done through this route
+and *not* mirrored into `PAHOA_SLOT_PASSWORDS` will revert to the environment's value the next time
+the pod restarts. That is deliberate — it is what stops a stale on-disk password shadowing the
+configured one — but it means **puna must treat its own Secret as the source of truth and use this
+route to avoid the bounce, not instead of updating the Secret.**

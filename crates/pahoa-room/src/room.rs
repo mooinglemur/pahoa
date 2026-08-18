@@ -4,7 +4,10 @@
 //! packets through an [`EffectSink`]. No sockets, no clock beyond what callers
 //! pass in, no async.
 
+mod admin;
 mod commands;
+
+pub use admin::{AdminCommand, AdminOutcome};
 
 use crate::conn::{Client, ConnId, non_game_verb, python_list_repr};
 use crate::datapackage::DataPackageCache;

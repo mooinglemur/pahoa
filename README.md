@@ -154,6 +154,8 @@ these are `https://`; without it, `http://`.
 | `GET /api/v1/room` | none | What a room page shows. No secrets |
 | `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress |
 | `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
+| `POST /admin/v1/command` | bearer | The typed command set below |
+| `POST /admin/v1/slots/<n>/password` | bearer | Rotate one slot's password, live |
 | `POST /admin/v1/shutdown` | bearer | Quiesce, save, exit 0 |
 
 `/healthz` needs no state to answer: the listener binds only after the save has
@@ -174,6 +176,40 @@ is indistinguishable from a build that never had one.
 ```sh
 curl -s -H "Authorization: Bearer $PAHOA_ADMIN_TOKEN" https://host:38281/admin/v1/status | jq
 ```
+
+#### Commands
+
+`POST /admin/v1/command` takes a tagged object, not a command line — so an
+unknown command is a `400` rather than a confusing text reply, and a caller can
+validate before sending.
+
+| command | body |
+|---|---|
+| `status` | `{"command":"status"}` |
+| `say` | `{"command":"say","text":"…"}` |
+| `countdown` | `{"command":"countdown","seconds":10}` |
+| `release` | `{"command":"release","slot":3}` |
+| `collect` | `{"command":"collect","slot":3}` |
+| `send_item` | `{"command":"send_item","slot":3,"item":"Lamp"}` |
+| `hint` | `{"command":"hint","slot":3,"item":"Progressive Sword","force":false}` |
+| `kick` | `{"command":"kick","slot":3,"reason":"…"}` |
+
+Every one answers the same shape, and `output` is pahoa's own phrasing so an
+organizer reads what a player would:
+
+```json
+{"ok": true, "output": ["Released 130 locations for Troy."], "affected_slots": [3]}
+```
+
+**A command the room refuses is a `200` carrying `ok: false`**, not a `4xx` — it
+was understood and answered. Only a malformed request is the caller's fault.
+
+An administrator is not bound by the modes that gate players: `--release-mode
+disabled` stops `!release` and does not stop this, because being able to act for
+someone who cannot is the point. `hint` is the exception with two behaviors —
+`force: true` grants the hint outright, while the default charges the slot's own
+points exactly as `!hint` would. `kick` disconnects every connection a slot has
+and is not a ban; nothing stops an immediate reconnect.
 
 ### Room options
 
@@ -231,7 +267,7 @@ Deliberately absent so far, and reachable from no flag:
   firehose. Designed in [docs/scoped-feed.md](docs/scoped-feed.md).
 - **The `/` console command set**, and therefore what `!admin` dispatches into.
   It overlaps the admin REST API heavily and is worth writing once, with it.
-- The lobby integration, the tracker APIs and the admin REST API.
+- The lobby integration and the tracker APIs.
 - `--auto_shutdown` and `--disable_save`, which the reference has. Both are
   covered by omitting `--save-dir`. Its `--loglevel` is spelled `--log-level`
   here and aliased, and `--logtime` has no equivalent because every line is

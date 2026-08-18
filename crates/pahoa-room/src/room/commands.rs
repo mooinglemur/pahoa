@@ -719,11 +719,32 @@ impl Room {
         let Some(client) = self.clients.get(&conn) else {
             return;
         };
-        let (team, slot) = (client.team, client.slot);
+        let key = (client.team, client.slot);
+
+        match self.grant_item(key, item_name, out) {
+            Ok(_) => out.mark_dirty(),
+            // A fuzzy match that found nothing at all says nothing, matching the
+            // reference; one that found something too different explains itself.
+            Err(message) if message.is_empty() => {}
+            Err(message) => self.notify(conn, message, out),
+        }
+    }
+
+    /// Put an item into a slot's queue, as the cheat console does.
+    ///
+    /// Shared with the admin API, which aims it at a slot rather than at the
+    /// caller. Returns the item's resolved name, or the message explaining why
+    /// nothing happened — empty when the reference server would say nothing.
+    pub(super) fn grant_item(
+        &mut self,
+        key: SlotKey,
+        item_name: &str,
+        out: &mut dyn EffectSink,
+    ) -> Result<String, String> {
+        let (team, slot) = key;
         let game = self.slot_game(slot);
         let Some(names) = self.datapackage.get(&game) else {
-            self.notify(conn, "Cheating is disabled.".to_string(), out);
-            return;
+            return Err(format!("No item names are known for {game}."));
         };
 
         let candidates: Vec<&str> = names
@@ -733,14 +754,11 @@ impl Room {
             .map(String::as_str)
             .collect();
         let Some(matched) = fuzzy::intended(item_name, &candidates) else {
-            return;
+            return Err(String::new());
         };
         let name = match &matched {
             fuzzy::Match::Accepted { name, .. } => name.clone(),
-            fuzzy::Match::Rejected { message, .. } => {
-                self.notify(conn, message.clone(), out);
-                return;
-            }
+            fuzzy::Match::Rejected { message, .. } => return Err(message.clone()),
         };
         let id = names.item_id(&name).expect("matched an existing name");
 
@@ -774,7 +792,7 @@ impl Room {
         );
 
         self.send_new_items(&HashSet::from([slot]), out);
-        out.mark_dirty();
+        Ok(name)
     }
 
     // --- admin -----------------------------------------------------------
@@ -938,20 +956,23 @@ impl Room {
             return;
         }
 
-        self.pay_for_hints(conn, key, candidates, points_available, cost, out);
+        self.pay_for_hints(Some(conn), key, candidates, points_available, cost, out);
     }
 
     /// Split candidates into already-known and new, charge for the new ones,
     /// and announce whatever the player ended up with.
-    fn pay_for_hints(
+    /// `conn` is `None` for an administrator's hint: the economy applies exactly
+    /// as it would to the player, but there is no caller to explain it to. The
+    /// count of hints actually granted comes back for the admin API's response.
+    pub(super) fn pay_for_hints(
         &mut self,
-        conn: ConnId,
+        conn: Option<ConnId>,
         key: SlotKey,
         candidates: Vec<Hint>,
         points_available: i64,
         cost: i64,
         out: &mut dyn EffectSink,
-    ) {
+    ) -> usize {
         let team = key.0;
         let (known, fresh): (Vec<Hint>, Vec<Hint>) = candidates
             .into_iter()
@@ -960,13 +981,15 @@ impl Room {
         if fresh.is_empty() {
             if !known.is_empty() {
                 self.notify_hints(team, known, false, false, None, out);
-                self.notify(
-                    conn,
-                    "Hint was previously used, no points deducted.".to_string(),
-                    out,
-                );
+                if let Some(conn) = conn {
+                    self.notify(
+                        conn,
+                        "Hint was previously used, no points deducted.".to_string(),
+                        out,
+                    );
+                }
             }
-            return;
+            return 0;
         }
 
         let (found, unfound): (Vec<Hint>, Vec<Hint>) = fresh.into_iter().partition(|h| h.found);
@@ -980,6 +1003,7 @@ impl Room {
             crate::hints::choose(rng, unfound, &spheres, budget)
         };
 
+        let granted_count = granted.len();
         *self.hints_used.entry(key).or_insert(0) += granted.len() as i64;
 
         // Already-found hints are free, so they ride along with whatever was
@@ -1011,9 +1035,12 @@ impl Room {
                      {cost}."
                 )
             };
-            self.notify(conn, text, out);
+            if let Some(conn) = conn {
+                self.notify(conn, text, out);
+            }
         }
         out.mark_dirty();
+        granted_count
     }
 
     fn collect_hints_by_id(&self, key: SlotKey, id: i64, for_location: bool) -> Vec<Hint> {
@@ -1026,7 +1053,12 @@ impl Room {
 
     /// Resolve an accepted name, which may be a single item/location or a
     /// group standing for many (`MultiServer.py:1736-1751`).
-    fn collect_hints_by_name(&self, key: SlotKey, name: &str, for_location: bool) -> Vec<Hint> {
+    pub(super) fn collect_hints_by_name(
+        &self,
+        key: SlotKey,
+        name: &str,
+        for_location: bool,
+    ) -> Vec<Hint> {
         let game = self.slot_game(key.1);
         let Some(names) = self.datapackage.get(&game) else {
             return Vec::new();
@@ -1102,7 +1134,7 @@ fn sphere_of(data: &MultiData, player: u32, location: i64) -> usize {
 /// categories; matching that needs a Unicode-category table, and the gap only
 /// covers things like zero-width joiners that no client sends today. Worth
 /// revisiting alongside the other anti-griefing work.
-fn is_printable(s: &str) -> bool {
+pub(super) fn is_printable(s: &str) -> bool {
     s.chars()
         .all(|c| !c.is_control() && (c == ' ' || !c.is_whitespace()))
 }

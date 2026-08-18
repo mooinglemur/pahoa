@@ -415,6 +415,154 @@ async fn the_admin_surface_rejects_the_wrong_method() {
     server.shutdown().await;
 }
 
+async fn post(addr: SocketAddr, path: &str, body: &str) -> String {
+    request(
+        addr,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await
+}
+
+async fn command(addr: SocketAddr, body: &str) -> serde_json::Value {
+    let response = post(addr, "/admin/v1/command", body).await;
+    serde_json::from_str(&split(&response).1).expect("valid JSON")
+}
+
+#[tokio::test]
+async fn a_typed_command_runs_against_the_room() {
+    let server = start_with_admin().await;
+
+    let json = command(server.local_addr, r#"{"command":"status"}"#).await;
+    assert_eq!(json["ok"], true);
+    // A summary line plus one per slot.
+    assert_eq!(json["output"].as_array().unwrap().len(), 3);
+
+    let json = command(server.local_addr, r#"{"command":"release","slot":1}"#).await;
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(json["affected_slots"], serde_json::json!([1]));
+
+    server.shutdown().await;
+}
+
+/// A malformed request is the caller's fault and gets a `400`. A command the
+/// *room* refuses was understood and answered, so it is a `200` carrying
+/// `ok: false` — the caller renders `output` either way.
+#[tokio::test]
+async fn a_malformed_command_and_a_refused_one_are_different_answers() {
+    let server = start_with_admin().await;
+
+    for bad in [
+        r#"{"command":"explode"}"#,
+        r#"{"command":"release"}"#,
+        r#"{"command":"say"}"#,
+        "not json",
+        "{}",
+    ] {
+        let response = post(server.local_addr, "/admin/v1/command", bad).await;
+        assert_eq!(split(&response).0, "HTTP/1.1 400 Bad Request", "{bad}");
+    }
+
+    // Understood, but refused by the room: slot 9999 does not exist.
+    let response = post(
+        server.local_addr,
+        "/admin/v1/command",
+        r#"{"command":"release","slot":9999}"#,
+    )
+    .await;
+    assert_eq!(split(&response).0, "HTTP/1.1 200 OK");
+    let json: serde_json::Value = serde_json::from_str(&split(&response).1).unwrap();
+    assert_eq!(json["ok"], false);
+    assert!(json["output"][0].as_str().unwrap().contains("9999"));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_command_needs_the_token_like_everything_else() {
+    let server = start_with_admin().await;
+    let response = request(
+        server.local_addr,
+        "POST /admin/v1/command HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\n\
+         {\"command\":\"status\"}",
+    )
+    .await;
+    assert_eq!(split(&response).0, "HTTP/1.1 401 Unauthorized");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_slot_password_rotates_without_a_restart() {
+    let server = start_with_admin().await;
+
+    // Before: no password of any kind.
+    let before = get(server.local_addr, "/api/v1/room").await;
+    let before: serde_json::Value = serde_json::from_str(&split(&before).1).unwrap();
+    assert_eq!(before["password"], false);
+
+    let response = post(
+        server.local_addr,
+        "/admin/v1/slots/1/password",
+        r#"{"password":"quiet-harbor-ledger"}"#,
+    )
+    .await;
+    let (status, body) = split(&response);
+    assert_eq!(status, "HTTP/1.1 200 OK", "{response}");
+    assert!(!body.contains("quiet-harbor-ledger"), "echoed: {body}");
+
+    // After: the room now asks for one, which is the observable effect.
+    let after = get(server.local_addr, "/api/v1/room").await;
+    let after: serde_json::Value = serde_json::from_str(&split(&after).1).unwrap();
+    assert_eq!(after["password"], true);
+
+    // And clearing it puts the room back.
+    let response = post(
+        server.local_addr,
+        "/admin/v1/slots/1/password",
+        r#"{"password":null}"#,
+    )
+    .await;
+    assert_eq!(split(&response).0, "HTTP/1.1 200 OK");
+    let cleared = get(server.local_addr, "/api/v1/room").await;
+    let cleared: serde_json::Value = serde_json::from_str(&split(&cleared).1).unwrap();
+    assert_eq!(cleared["password"], false);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn rotating_an_unknown_slot_is_a_404() {
+    let server = start_with_admin().await;
+    let response = post(
+        server.local_addr,
+        "/admin/v1/slots/9999/password",
+        r#"{"password":"x"}"#,
+    )
+    .await;
+    assert_eq!(split(&response).0, "HTTP/1.1 404 Not Found");
+    server.shutdown().await;
+}
+
+/// The one route with a variable in its path, so its matcher is worth pinning.
+#[tokio::test]
+async fn a_malformed_slot_password_path_is_not_found() {
+    let server = start_with_admin().await;
+    for path in [
+        "/admin/v1/slots//password",
+        "/admin/v1/slots/-1/password",
+        "/admin/v1/slots/1/2/password",
+        "/admin/v1/slots/1",
+        "/admin/v1/slots/abc/password",
+    ] {
+        let response = post(server.local_addr, path, "{}").await;
+        assert_eq!(split(&response).0, "HTTP/1.1 404 Not Found", "{path}");
+    }
+    server.shutdown().await;
+}
+
 /// The whole point of the surface: it shares the port with the game.
 #[tokio::test]
 async fn the_websocket_still_upgrades_on_the_same_port() {

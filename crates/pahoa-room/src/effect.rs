@@ -51,6 +51,13 @@ pub enum CloseReason {
     /// buffers without limit instead, which is unbounded memory growth.
     TooSlow,
     ServerShutdown,
+    /// An administrator disconnected this slot.
+    ///
+    /// Carries no reason: the shard's close message holds a `&'static str`, and
+    /// an operator's sentence reaches the client as a `PrintJSON` sent just
+    /// before this — which keeps an allocation off the broadcast path for the
+    /// sake of one rare command.
+    Kicked,
 }
 
 pub trait EffectSink {

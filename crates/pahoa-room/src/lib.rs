@@ -21,5 +21,5 @@ mod slot_data;
 pub use conn::{Client, ConnId};
 pub use effect::{CloseReason, Counter, EffectSink, Event, Recipients, Recorder};
 pub use options::RoomOptions;
-pub use room::{Room, SERVER_VERSION, SlotKey};
+pub use room::{AdminCommand, AdminOutcome, Room, SERVER_VERSION, SlotKey};
 pub use save::{SaveError, Snapshot};

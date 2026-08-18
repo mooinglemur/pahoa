@@ -15,6 +15,7 @@
 //! answering small JSON documents.
 
 mod admin;
+mod command;
 mod response;
 mod status;
 
@@ -86,7 +87,7 @@ impl Router {
             if let admin::Auth::Refused(response) = admin.check(request.header("Authorization")) {
                 return response;
             }
-            return self.admin_route(method, path).await;
+            return self.admin_route(method, path, &exchange.body).await;
         }
 
         match (method, path) {
@@ -100,15 +101,104 @@ impl Router {
     }
 
     /// Authenticated already, by the time anything here runs.
-    async fn admin_route(&self, method: &str, path: &str) -> Response {
+    async fn admin_route(&self, method: &str, path: &str, body: &[u8]) -> Response {
+        // Before the exact matches, because this route carries a slot number in
+        // the path rather than in the body.
+        if let Some(slot) = slot_password_path(path) {
+            return match method {
+                "POST" => self.set_slot_password(slot, body).await,
+                _ => Response::status(405, "Method Not Allowed"),
+            };
+        }
+
         match (method, path) {
             ("GET", "/admin/v1/status") => self.status().await,
             ("GET", "/admin/v1/metrics") => self.metrics().await,
+            ("POST", "/admin/v1/command") => self.command(body).await,
             ("POST", "/admin/v1/shutdown") => self.shutdown(),
-            (_, "/admin/v1/status" | "/admin/v1/metrics" | "/admin/v1/shutdown") => {
-                Response::status(405, "Method Not Allowed")
-            }
+            (
+                _,
+                "/admin/v1/status" | "/admin/v1/metrics" | "/admin/v1/command"
+                | "/admin/v1/shutdown",
+            ) => Response::status(405, "Method Not Allowed"),
             _ => Response::not_found(),
+        }
+    }
+
+    /// Run one typed command against the room.
+    async fn command(&self, body: &[u8]) -> Response {
+        let command = match command::parse(body) {
+            Ok(command) => command,
+            // A command that cannot be understood is the caller's mistake, and
+            // naming the part that is wrong is what makes it fixable.
+            Err(detail) => {
+                return Response::json(
+                    400,
+                    &serde_json::json!({
+                        "ok": false,
+                        "output": [detail],
+                        "affected_slots": [],
+                    }),
+                );
+            }
+        };
+
+        let (tx, rx) = oneshot::channel();
+        if self
+            .0
+            .actor
+            .send(ActorMsg::Admin { command, reply: tx })
+            .await
+            .is_err()
+        {
+            return stopping();
+        }
+        let Ok(outcome) = rx.await else {
+            return stopping();
+        };
+
+        // A command the *room* refused is still a request that was understood
+        // and answered, so it is a 200 carrying `ok: false` rather than a 4xx.
+        // The caller renders `output` either way, and only a malformed request
+        // is its own fault.
+        Response::json(
+            200,
+            &serde_json::json!({
+                "ok": outcome.ok,
+                "output": outcome.output,
+                "affected_slots": outcome.affected_slots,
+            }),
+        )
+    }
+
+    /// Rotate one slot's password on a live room.
+    async fn set_slot_password(&self, slot: u32, body: &[u8]) -> Response {
+        let password = match command::slot_password(body) {
+            Ok(password) => password,
+            Err(detail) => return Response::json(400, &serde_json::json!({"error": detail})),
+        };
+
+        let (tx, rx) = oneshot::channel();
+        if self
+            .0
+            .actor
+            .send(ActorMsg::SetSlotPassword {
+                slot,
+                password,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return stopping();
+        }
+        match rx.await {
+            Ok(true) => Response::json(200, &serde_json::json!({"ok": true, "slot": slot})),
+            Ok(false) => Response::json(
+                404,
+                &serde_json::json!({"error": format!("there is no slot {slot} in this seed")}),
+            ),
+            Err(_) => stopping(),
         }
     }
 
@@ -205,6 +295,19 @@ impl Router {
 pub struct Live {
     pub clients_connected: usize,
     pub password_required: bool,
+}
+
+/// Match `/admin/v1/slots/<n>/password`, returning the slot number.
+///
+/// Hand-matched rather than pattern-routed: this is the only route in the whole
+/// surface with a variable in its path, and a router generic enough to express
+/// it would be more machinery than the one case is worth.
+fn slot_password_path(path: &str) -> Option<u32> {
+    let rest = path.strip_prefix("/admin/v1/slots/")?;
+    let slot = rest.strip_suffix("/password")?;
+    // Rejects `12/34`, `-1`, and an empty segment, all of which `parse` would
+    // otherwise have to be trusted to catch.
+    slot.parse().ok()
 }
 
 /// The room has stopped answering, which during a shutdown is ordinary.
