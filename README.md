@@ -39,6 +39,7 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--save-interval <secs>` | `60` | Save cadence |
 | `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
 | `--log-level <level>` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+| `--log-format <fmt>` | `text` | `text` for a terminal, `json` for a log aggregator |
 | `--tls-cert <file.pem>` | — | Certificate chain; terminates TLS on the room port |
 | `--tls-key <file.pem>` | — | Its private key. Both or neither |
 | `--allow-plaintext` | off | Keep answering `ws://` after a certificate is set |
@@ -46,6 +47,47 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+### Logging
+
+**Logs go to stderr.** Under `--log-format text`, stdout carries exactly one
+line — the startup line, in a fixed shape, so that `pahoa serve … 2>/dev/null`
+is a way to read the one thing a machine is meant to parse out of a stream of
+prose. Under `json` there is no stdout line: the announcement is a `serving`
+event with the same facts as fields, plus `version` and `build_rev`. A container
+merges both streams into one log, and a structured log needs no separate channel
+to be parseable — so the dedicated stream would cost an unparseable line per room
+and buy nothing.
+
+The first event is a banner naming the build, the invocation and the machine:
+
+```
+Pahoa-0.1.0-8073194+ starting argv=… os=linux arch=x86_64 pid=1 host=room-abc
+  worker_threads=4 cpu_quota=4 host_cpus=64 memory_limit_bytes=2147483648
+```
+
+`8073194+` is the source revision, with `+` meaning the tree had uncommitted
+changes — `0.1.0` is every build for months and cannot tell two rooms apart. It
+comes from git when building from a working tree and from `PAHOA_BUILD_REV`
+otherwise, because the container build has no `.git`. **`argv` has every password
+value replaced with `***`**, matched on the flag name rather than a fixed list.
+`pod`, `namespace` and `node` appear when the downward API supplies them, and
+fields that have no value are omitted rather than reported empty — so
+`cpu_quota` missing means no cgroup cap, not zero.
+
+Verbosity tracks the reference server. At `info` a room reports its lifecycle
+(start, restore, TLS, shutdown), chat and single-line command replies, refused
+connections, option changes made through `!admin`, and save failures at `error`.
+Multi-line command output is *not* logged — `!missing` can answer with hundreds
+of lines, and the reference omits it for the same reason. Per-connection and
+per-message tracing is `debug`, matching what the reference puts behind
+`--log_network`.
+
+Two things are deliberately never logged: the values `/options` prints, which
+include the real `server_password`, and any pre-masked `!admin` line. The
+administrative action is still on the record — the masked command is logged as
+chat, and an option change gets its own event with the option and new value as
+fields.
 
 ### The scoped feed
 
@@ -101,6 +143,8 @@ build in the `scratch` image is unaffected.
 **Logs go to stderr and stdout carries exactly one line** — the startup line
 naming slots, locations, seed, address and build. That split is what makes
 `pahoa serve … 2>/dev/null` a way to read the line a machine is meant to parse.
+With `--log-format json` the split is unnecessary and stdout stays silent; see
+[Logging](#logging).
 A room stops cleanly on SIGINT or SIGTERM alike, so a container teardown gets
 the same final save that Ctrl-C does.
 

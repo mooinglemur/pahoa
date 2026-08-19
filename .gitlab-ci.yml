@@ -184,5 +184,8 @@ image-pahoa:
     # The project's own registry path rather than a sub-image: pahoa produces
     # exactly one image, so `$CI_REGISTRY_IMAGE` already reads as `.../pahoa`.
     - IMAGE="$CI_REGISTRY_IMAGE"
-    - buildah build -t "$IMAGE:sha-$CI_COMMIT_SHORT_SHA" .
+    # The revision reaches the binary as a build arg, not from git: the build
+    # context has no `.git`. Without it every image reports `unknown` in its
+    # startup banner.
+    - buildah build --build-arg "PAHOA_BUILD_REV=$CI_COMMIT_SHORT_SHA" -t "$IMAGE:sha-$CI_COMMIT_SHORT_SHA" .
     - push_image "$IMAGE"

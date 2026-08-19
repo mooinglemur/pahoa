@@ -393,6 +393,79 @@ shell in the first place.
 **This covers `server_password` too**, by the same argument — it is the third non-persisted secret,
 so `/option server_password` would revert on restart identically.
 
+## Logging: JSON, a startup banner, and reference-level verbosity
+
+**Set `--log-format json` on every puna room.** Default is `text`, for the standalone case where a
+person runs a room from a terminal and reads it themselves. JSON emits one object per line on stderr
+with every field as a key, so `slot`, `team`, `option` and the rest are queryable rather than
+something to regex out of a message.
+
+### ⚠ Constraint 7 changes under `--log-format json` — puna must act on this
+
+**Under `--log-format json` there is no stdout startup line at all.** stdout is silent; the
+announcement is a `serving` event on stderr with the same facts as fields:
+
+```json
+{"level":"INFO","message":"serving","slots":96,"locations":23404,
+ "seed_name":"14318265276849580066","addr":"0.0.0.0:38281",
+ "outbound_budget_bytes":67108864,"version":"0.1.0","build_rev":"8073194+"}
+```
+
+**Anything matching the text startup line must switch to matching `message == "serving"` when it sets
+that flag.** Under `--log-format text` nothing changes: the stdout line is exactly as it was, so a
+hand-run room and any existing tooling are unaffected.
+
+The reasoning, since this reverses a constraint rather than merely extending it. A container merges
+stdout and stderr into one pod log, so a plain-text line inside a JSON stream is one unparseable
+entry per room, forever. The dedicated stdout channel existed *because* logs were prose — it was the
+only way to make "the room came up" parseable when everything around it was not. Once the log is
+structured that reason is gone, and keeping the line would mean carrying its cost with none of its
+benefit. Emitting both was the first answer here and was worse: two records of one event, which
+anything counting room starts has to know to de-duplicate.
+
+The `serving` event is deliberately self-contained — `version` and `build_rev` repeat what the banner
+already said — so matching that one event answers "which build came up, serving what, where" without
+correlating two records.
+
+One consequence worth having: a shipper can now be configured to **reject** non-JSON lines, which is
+a useful thing to be strict about. Verified end to end — a full room lifecycle, stdout and stderr
+merged as the kubelet would merge them, parses as 19 objects with nothing left over.
+
+**The first event is a banner**, which is what makes a room traceable after it is gone:
+
+```json
+{"level":"INFO","message":"Pahoa-0.1.0-8073194+ starting","argv":"…","os":"linux","arch":"x86_64",
+ "pid":1,"host":"room-abc","pod":"room-abc","namespace":"pahoa","node":"node7",
+ "worker_threads":4,"cpu_quota":4,"host_cpus":64,"memory_limit_bytes":2147483648}
+```
+
+Three things puna should act on here:
+
+- **Pass the downward API in.** `pod`, `namespace` and `node` come from `POD_NAME`, `POD_NAMESPACE`
+  and `NODE_NAME`, which Kubernetes does not set on its own. Without them the banner still works and
+  those keys are simply absent — fields with no value are omitted rather than reported empty, so
+  `cpu_quota` missing means *no cgroup cap*, not zero.
+- **`worker_threads`, `cpu_quota`, `host_cpus` and `memory_limit_bytes` are on one line on purpose.**
+  They are the evidence for constraints 5 and 6. A room reporting `cpu_quota` absent on a 64-core
+  node is one whose `limits.cpu` did not apply, and that is now visible at startup instead of after
+  a memory incident.
+- **`argv` has every password replaced with `***`**, matched on the flag name rather than a fixed
+  list, so this holds for a password option pahoa adds later. Nothing in the log carries a secret —
+  including `/options` output, which prints the real `server_password` to the administrator who asked
+  and is deliberately not logged.
+
+**Verbosity now matches the reference.** At `info`: lifecycle, chat, single-line command replies,
+refused connections with their reasons, `!admin` option changes, and save failures at `error`.
+Multi-line command output is not logged — `!missing` answers with hundreds of lines and the reference
+omits it too. Per-connection and per-message detail is `debug`, which is where the reference puts its
+`--log_network` output. Item sends do not log at any level, so a mass release does not flood anything.
+
+**The image needs a build arg.** `.dockerignore` excludes `.git`, so `build.rs` cannot read the
+revision in a container build and takes `PAHOA_BUILD_REV` instead. The CI image job now passes
+`--build-arg PAHOA_BUILD_REV=$CI_COMMIT_SHORT_SHA`. **If puna ever builds a pahoa image itself, it
+must pass the same thing** — omitting it is not a build failure, it just stamps `unknown` and quietly
+costs the ability to tie a running room to a commit.
+
 ## Round three: `!admin` is implemented, and the rule that shaped it
 
 The exclusion above is narrower than "no live setters", and the rule behind it is worth puna having

@@ -438,6 +438,19 @@ impl Room {
             // Python accumulates into a set, so its order is arbitrary; ours is
             // deterministic, and duplicates are removed to match set semantics.
             errors.dedup();
+            // The reference logs this at info (`MultiServer.py:1902`) and it
+            // earns the level: a refusal is the one failure a player cannot
+            // diagnose from their own side, and "wrong game" reads very
+            // differently from "wrong password" to whoever is being asked why
+            // they cannot get in. The password itself is not among the fields.
+            tracing::info!(
+                %conn,
+                name = %args.name,
+                game = args.game.as_deref().unwrap_or("-"),
+                version = %args.version,
+                reasons = ?errors,
+                "connection refused"
+            );
             out.send(
                 conn,
                 &[ServerPacket::ConnectionRefused(ConnectionRefused {

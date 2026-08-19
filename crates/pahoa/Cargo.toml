@@ -34,6 +34,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "ansi",
+    # --log-format json. Pulls `tracing-serde` and leans on the `serde_json`
+    # already in the tree, which is why this is cheap where `env-filter` (and
+    # its `regex` automata) was not.
+    "json",
     # rustls reports through the `log` crate, not `tracing`. Without this bridge
     # every one of its diagnostics is discarded — including the ones that say
     # why a handshake failed, which is the first thing anyone wants when TLS is

@@ -22,6 +22,10 @@ strsim = "0.11"
 pahoa-pyrandom = { path = "../pahoa-pyrandom" }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 thiserror.workspace = true
+# The room narrates what it tells players, matching where the reference logs it
+# (`notify_client`, `broadcast_text_all`). A no-op without a subscriber, so the
+# synchronous tests keep running with no runtime and no setup.
+tracing = "0.1"
 # The save codec only — pure CPU on a background thread, no I/O, so this does
 # not compromise the crate's transport-independence.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

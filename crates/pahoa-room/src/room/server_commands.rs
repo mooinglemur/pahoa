@@ -272,6 +272,16 @@ impl Room {
         };
 
         out.mark_dirty();
+        // An explicit audit record, with the option and its new value as
+        // fields. The chat echo already shows that *someone ran a command*;
+        // this is the one that survives as data — and it is safe to log in a
+        // way `/options` is not, because the only options reachable here are
+        // the ones with no secret in them.
+        tracing::info!(
+            option = %name,
+            value = %self.option_as_text(&name),
+            "room option changed through !admin"
+        );
         self.admin_out(
             conn,
             format!("Set option {name} to {}", self.option_as_text(&name)),

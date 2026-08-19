@@ -19,6 +19,14 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 
 WORKDIR /src
 
+# The source revision for the startup banner. `.dockerignore` excludes `.git`
+# — deliberately, since it is large and changes every commit — so `build.rs`
+# cannot ask git here and takes this instead. Left unset it stamps `unknown`,
+# which builds fine and makes a room harder to trace back to a commit; CI passes
+# `--build-arg PAHOA_BUILD_REV=$CI_COMMIT_SHORT_SHA`.
+ARG PAHOA_BUILD_REV
+ENV PAHOA_BUILD_REV=${PAHOA_BUILD_REV}
+
 # A clean build of the whole workspace takes seconds, so there is no separate
 # dependency-caching stage. The usual trick — stub out the sources, build deps,
 # then copy the real code — needs a hand-maintained list of crates that breaks

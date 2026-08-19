@@ -47,8 +47,13 @@ SERVE OPTIONS
                              Defaults to 288 KiB per slot, floored at 64 MiB —
                              a 2000-slot room gets 562 MiB, a small one 64.
     --log-level <level>      trace, debug, info, warn, error (default info).
-                             Logs go to stderr; stdout carries only the one
-                             startup line.
+                             Logs go to stderr.
+    --log-format <fmt>       text or json (default text). Text is for a person
+                             at a terminal, and puts the startup line on stdout
+                             so it can be read apart from the prose. json emits
+                             one object per line with every field as a key, for
+                             a log aggregator; stdout stays silent and the
+                             startup line becomes a serving event.
     --tls-cert <file.pem>    Certificate chain. Terminates TLS on the room port,
                              which then serves wss:// and https://. Reloaded in
                              place when the file changes, so a renewal needs no
@@ -102,6 +107,7 @@ const SERVE_OPTS: &[Opt] = &[
     value("--save-interval", &[]),
     value("--outbound-budget", &[]),
     value("--log-level", &["--loglevel"]),
+    value("--log-format", &["--log_format"]),
     value("--filtered-port", &["--filtered_port"]),
     value("--tls-cert", &["--tls_cert"]),
     value("--tls-key", &["--tls_key"]),
@@ -138,6 +144,46 @@ const REMAINING_MODES: &[Permission] =
     &[Permission::Enabled, Permission::Disabled, Permission::Goal];
 const COUNTDOWN_MODES: &[Permission] =
     &[Permission::Enabled, Permission::Disabled, Permission::Auto];
+
+/// The command line as a single string, with every secret value replaced.
+///
+/// The banner reports this so that "what was this room started with" is
+/// answerable from the log alone. That makes redaction load-bearing rather than
+/// tidy: a room started with `--password` already warns that argv is readable
+/// through `ps` and `kubectl get pod -o yaml`, and printing it into a log that
+/// gets shipped and indexed would be strictly worse than either.
+///
+/// Matched on the *name* rather than a list of exact flags, so a password
+/// option added later is redacted by default instead of leaking until someone
+/// notices. Both spellings are handled: `--password x` and `--password=x`.
+fn redacted_argv(argv: &[String]) -> String {
+    fn is_secret(name: &str) -> bool {
+        name.starts_with("--") && name.contains("password")
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(argv.len() + 1);
+    let mut redact_next = false;
+    for arg in argv {
+        if redact_next {
+            out.push("***".to_string());
+            redact_next = false;
+            continue;
+        }
+        match arg.split_once('=') {
+            Some((name, _)) if is_secret(name) => out.push(format!("{name}=***")),
+            _ => {
+                redact_next = is_secret(arg);
+                out.push(arg.clone());
+            }
+        }
+    }
+    // A trailing bare `--password` consumed nothing, but saying so beats
+    // silently ending the line on a flag that looks like it took a value.
+    if redact_next {
+        out.push("<missing>".to_string());
+    }
+    out.join(" ")
+}
 
 /// What `--log-level` advertises, and what its error message lists.
 const LOG_LEVELS: &[(&str, LevelFilter)] = &[
@@ -270,6 +316,15 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         None => LevelFilter::INFO,
     };
 
+    let log_format = match args.get("--log-format") {
+        None => serve::LogFormat::Text,
+        Some("text") => serve::LogFormat::Text,
+        Some("json") => serve::LogFormat::Json,
+        Some(other) => {
+            return Err(format!("--log-format: expected text or json, got {other}"));
+        }
+    };
+
     // The parser has no notion of options that require each other, so the pair
     // is checked by hand. Half a pair is always a mistake, and the failure it
     // would otherwise produce is a room that quietly serves plaintext.
@@ -301,6 +356,8 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         snapshot: args.get("--snapshot").map(Path::new),
         outbound_budget_bytes,
         log_level,
+        log_format,
+        argv: redacted_argv(argv),
         secrets,
         tls,
         allow_plaintext,
@@ -443,4 +500,61 @@ fn selftest() -> Result<(), String> {
 
     println!("selftest: ok (pickle, allowlist, bignum, pyrandom)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The banner reports the command line, so this is what stops a password
+    /// reaching a log that gets shipped and indexed.
+    #[test]
+    fn every_password_flag_is_redacted_in_both_spellings() {
+        let line = redacted_argv(&argv(&[
+            "seed.archipelago",
+            "--password",
+            "room-secret",
+            "--server-password=admin-secret",
+            "--port",
+            "38281",
+        ]));
+
+        assert!(!line.contains("room-secret"), "{line}");
+        assert!(!line.contains("admin-secret"), "{line}");
+        // Everything that is not a secret survives, or the field is useless.
+        assert!(line.contains("seed.archipelago"), "{line}");
+        assert!(line.contains("--port 38281"), "{line}");
+        assert_eq!(
+            line,
+            "seed.archipelago --password *** --server-password=*** --port 38281"
+        );
+    }
+
+    /// Matched on the name rather than an allowlist, so a password option added
+    /// later is redacted before anyone remembers to add it here.
+    #[test]
+    fn an_unknown_password_flag_is_redacted_too() {
+        let line = redacted_argv(&argv(&["--some-future-password", "hunter2"]));
+        assert_eq!(line, "--some-future-password ***");
+    }
+
+    /// A flag with nothing after it must not silently end the line looking like
+    /// it took a value.
+    #[test]
+    fn a_trailing_password_flag_says_the_value_is_missing() {
+        let line = redacted_argv(&argv(&["seed.archipelago", "--password"]));
+        assert_eq!(line, "seed.archipelago --password <missing>");
+    }
+
+    #[test]
+    fn a_value_that_merely_looks_like_a_flag_is_untouched() {
+        // `--port` is not a secret, so its value is kept even though the
+        // argument after it would be consumed by the redactor if it were.
+        let line = redacted_argv(&argv(&["--port", "38281", "--log-format", "json"]));
+        assert_eq!(line, "--port 38281 --log-format json");
+    }
 }

@@ -5,13 +5,12 @@ Changes pahoa needs so that **puna** — the Kubernetes room orchestrator and we
 tree by file and line; now that nothing is outstanding, the behavioral detail lives in pahoa's own
 `docs/` and in `NOTES-FOR-PUNA.md`, and this document points at them rather than restating them.
 
-Last updated 2026-08-18 against `05be9f5`, during puna's M4 (artifact ingest).
+Last updated 2026-08-18 against `481ddb8`, at the end of puna's M4 (artifact ingest and the gates).
 
-**Nothing is blocking.** P1–P17 are all implemented; the only open item is **P18 below, a design note
-about a feature that does not exist yet** and which puna does not need. Otherwise this document is
-the record of what was asked and the standing list of what puna depends on — not a queue.
-`NOTES-FOR-PUNA.md` is the reply in the other direction and is the authority on what shipped and how;
-nothing in it is disputed here.
+**Nothing is outstanding.** P1–P18 are all resolved — P18 by being declined, which was the right
+answer and the first of the three options this document ranked. This is now the record of what was
+asked and the standing list of what puna depends on, not a queue. `NOTES-FOR-PUNA.md` is the reply in
+the other direction and is the authority on what shipped and how; nothing in it is disputed here.
 
 ---
 
@@ -102,6 +101,14 @@ Breaking one of these produces a failure that will not look like it came from pa
 11. **`terminationGracePeriodSeconds: 45`**, per `NOTES-FOR-PUNA.md`'s drain-time analysis. If that
     turns out to be wrong in the cluster the fix is a pahoa flag for `shutdown_timeout`, not a puna
     manifest change — tell us rather than working around it.
+12. **The gameplay-option divergence WARN keeps naming the flag, both values and which won.** Puna
+    surfaces that line in its room log view rather than filtering it: it is the only signal that a
+    pod spec and a running room have parted company, and it is the answer to "I changed the setting
+    and nothing happened". A quieter version of it would restore exactly the silence that hid the
+    password-persistence bug.
+13. **`/admin/v1/status` keeps its `options` block, and keeps the passwords out of it.** Puna renders
+    a room's effective gameplay configuration from there, because its own flags describe how a room
+    started rather than how it is.
 
 ---
 
@@ -117,56 +124,27 @@ Puna never emits `{}` regardless. That stays a constraint on puna's side, where 
 
 ---
 
-## P18 — a live password setter, if the `/` command set ever gets one
+## P18 — declined, and the rule that came out of it
 
-**Nothing is wrong today.** `!admin` is a stub that masks the echo and refuses, and `cmd_admin`'s own
-comment says the `/` command set it would dispatch into "is a later milestone". There is no `/option`
-setter anywhere in the tree. This is a note *before* the feature, which is the cheap time to have it.
+**Answered: pahoa will not implement a live password setter, and needs nothing from puna.** That was
+option 1 of the three ranked here, and the reasoning improved on the question. This document framed
+it around the orchestrated/hand-run distinction and the `password_from_env` dead end; the deciding
+fact is simpler and larger. **A live password change is wrong in every deployment.** Pahoa persists
+no password, so a setter reverts at the next restart whoever ran it — under puna it also disagrees
+with the console in the meantime, but those are two severities of one defect rather than two cases.
+So there was never a signal to look for, which is why the dead end could not be worked around.
 
-**The problem it would create.** Pahoa persists no password at all — that was round one's fix, and it
-is what makes rotation trustworthy. So a live password change is temporary-until-restart in **every**
-deployment, hand-run included. Under puna it is worse than temporary: puna's Secret is the source of
-truth, so the change also silently disagrees with what the room console shows, right up until a
-restart quietly reverts it. The reference offers `/option password` on its server console, so this is
-a real divergence — but the divergence is the right way round, and it follows from not persisting.
+`/option password` and `/option server_password` are refused **by name**, saying they would revert
+and where to set them instead, rather than reported as unknown options — recognized and declined are
+different facts.
 
-**One thing that will look like a clean trigger and is not.** `Secrets::password_from_env` seems like
-the natural condition — refuse when the environment supplied the password. It does not work: `pick`
-returns `(None, false)` when neither the environment nor argv supplies one, so an **open room reports
-`password_from_env: false`**. That is the most common puna room, and it is exactly the `none → room`
-transition an organizer would reach for this to perform. There is no capability-shaped fact that
-separates "open room, orchestrated" from "open room, run by hand", which is the whole difficulty.
+**The rule worth keeping, because it predicts the next case: a setter is honest exactly where the
+save is authoritative.** Gameplay options persist through `save::encode_options` and `Room::restore`,
+so they now have one. Passwords deliberately do not, so they do not. Two conclusions from one rule
+rather than a special case.
 
-Three coherent positions, ranked:
-
-1. **Do not implement a password setter.** Free, matches today's behavior, and arguably the reference's
-   version misleads there too.
-2. **Implement it, always labeled as until-restart.** Accurate for every deployment, no coupling to
-   anything. The weakness is the audience: the person who reaches for this is an organizer, who
-   cannot reach an environment variable and will not know what one is.
-3. **Refuse when the room is orchestrated, and say where to go instead.** The best message, and the
-   only option that needs anything from puna.
-
-**If option 3, the signal wants three constraints**, all learned from things already settled here:
-
-- **`PAHOA_MANAGED_BY` as free text** (`"Puna"`), not a boolean `PAHOA_UNDER_PUNA`. Same reasoning
-  that made `--open-tracker` deployment-shaped rather than puna-shaped: pahoa stays a general tool
-  and does not carry one orchestrator's name in its interface.
-- **Message-only, never behavior beyond this refusal.** Pahoa varies behavior on *capability* facts
-  today — a token is configured, so gate the tracker. An identity fact is a different kind of thing,
-  and identity flags accrete conditionals until there are two implementations behind one switch.
-- **Assume the value gets said out loud.** `cmd_admin` broadcasts the command echo to the room, and
-  error text migrates. So it carries a display name, **never puna's room URL** — that URL is a bearer
-  capability, the unguessable path *is* the authorization, which is why `tracker_id` is a separate id
-  in the first place.
-
-**Explicitly not in scope: `POST /admin/v1/slots/<n>/password` must stay live.** Not bouncing the room
-is its entire purpose. The line is the room-wide password and the mode on one side, per-slot values on
-the other.
-
-**Puna needs none of this to work.** Every `slot_auth` transition is a room restart on puna's side
-already, for the same non-persistence reason, and puna does not set `server_password`, so `!admin` is
-refused outright in a puna room today. This is about what an organizer sees if they try.
+Puna's side is unchanged: every `slot_auth` transition was already a restart, and puna sets no
+`server_password`, so `!admin` is refused outright in a puna room regardless.
 
 ---
 

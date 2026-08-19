@@ -34,6 +34,9 @@ pub struct ServeArgs<'a> {
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
     pub log_level: LevelFilter,
+    pub log_format: LogFormat,
+    /// The command line, with secret values replaced. Reported in the banner.
+    pub argv: String,
     /// Passwords, and where each came from. Applied over `options` and, for
     /// anything the environment supplied, protected from the seed.
     pub secrets: crate::secrets::Secrets,
@@ -47,7 +50,8 @@ pub struct ServeArgs<'a> {
 }
 
 pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
-    init_logging(args.log_level);
+    init_logging(args.log_level, args.log_format);
+    banner(&args);
 
     // Resolved before the subscriber existed, so they are said now.
     for warning in &args.secrets.warnings {
@@ -184,16 +188,44 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         // The one line on stdout, and the only machine-readable evidence a room
         // came up. The build version is appended rather than inserted so every
         // field that was already here keeps its position.
-        println!(
-            "pahoa serving {} slots, {} locations, seed {} on {} \
-             (outbound budget {} MiB, version {})",
-            data.slot_info.len(),
-            data.locations.len(),
-            data.seed_name,
-            server.local_addr,
-            budget / (1024 * 1024),
-            env!("CARGO_PKG_VERSION"),
-        );
+        // One announcement, in whichever shape this room's reader can parse.
+        //
+        // Under `text` it is the historical stdout line, unchanged: logs are
+        // prose there, so a dedicated stream carrying exactly one machine-
+        // readable line is the only way to make "the room came up" parseable.
+        //
+        // Under `json` that reasoning inverts. A container merges stdout and
+        // stderr into one pod log, so the plain line would be a single
+        // unparseable entry in a stream of objects — every room, forever — and
+        // the log is now structured, so the dedicated stream buys nothing that
+        // the event stream does not already give. Emitting both was the earlier
+        // answer and was worse: two records of one fact, which anything
+        // counting room starts has to know to de-duplicate.
+        match args.log_format {
+            LogFormat::Text => println!(
+                "pahoa serving {} slots, {} locations, seed {} on {} \
+                 (outbound budget {} MiB, version {})",
+                data.slot_info.len(),
+                data.locations.len(),
+                data.seed_name,
+                server.local_addr,
+                budget / (1024 * 1024),
+                env!("CARGO_PKG_VERSION"),
+            ),
+            // Self-contained on purpose: `version` and `build_rev` repeat what
+            // the banner said, so that matching this one event is enough to
+            // answer "which build came up serving what, where".
+            LogFormat::Json => tracing::info!(
+                slots = data.slot_info.len(),
+                locations = data.locations.len(),
+                seed_name = %data.seed_name,
+                addr = %server.local_addr,
+                outbound_budget_bytes = budget,
+                version = env!("CARGO_PKG_VERSION"),
+                build_rev = env!("PAHOA_BUILD_REV"),
+                "serving"
+            ),
+        }
 
         // Every way out of a running room converges here, so they all get the
         // same quiesce and the same final save.
@@ -217,18 +249,120 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 /// whose saves are failing — `actor.rs` logs that at `error!` — could run
 /// completely silently.
 ///
-/// Logs go to **stderr**, which leaves stdout carrying only the startup line.
-/// That is what makes `pahoa serve … 2>/dev/null` a way to read the one line a
-/// machine is meant to parse.
-fn init_logging(level: LevelFilter) {
+/// Logs go to **stderr**, which under `--log-format text` leaves stdout
+/// carrying only the startup line — what makes `pahoa serve … 2>/dev/null` a
+/// way to read the one line a machine is meant to parse. Under `json` there is
+/// no stdout line at all and the whole stream is on stderr, because a
+/// structured log needs no separate channel to be parseable.
+/// The build, the invocation and the machine, as the first event logged.
+///
+/// Everything here answers a question asked *after* something has gone wrong,
+/// when the room in question is gone and all that survives is its log. The
+/// revision matters most: `0.1.0` will be every build for months, so a version
+/// alone cannot tell two rooms apart, and `+` marks a binary built from a tree
+/// that did not match any commit.
+///
+/// The structured fields are the reason `--log-format json` is worth having —
+/// under it every one of these becomes a queryable key rather than something to
+/// pull back out of a message with a regex.
+fn banner(args: &ServeArgs<'_>) {
+    // Every optional field is an `Option`, which `tracing` omits entirely when
+    // it is `None` rather than recording an empty string. That is what keeps a
+    // hand-run room's banner free of `pod=""` and, under `--log-format json`,
+    // keeps a limit a *number* instead of the string "none" for whatever ends
+    // up querying it.
+    let host = hostname();
+    // Kubernetes supplies none of these on its own; they are downward-API
+    // values an orchestrator chooses to pass, so their presence is itself the
+    // signal that this room is orchestrated.
+    let (pod, namespace, node) = (
+        env_field("POD_NAME"),
+        env_field("POD_NAMESPACE"),
+        env_field("NODE_NAME"),
+    );
+
+    tracing::info!(
+        argv = %args.argv,
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        pid = std::process::id(),
+        host = host.as_deref(),
+        pod = pod.as_deref(),
+        namespace = namespace.as_deref(),
+        node = node.as_deref(),
+        // The sizing inputs together, because the failure they explain is a
+        // room given fewer CPUs than the node advertises. An absent quota means
+        // no cgroup cap, which is why it is missing rather than zero.
+        worker_threads = pahoa_net::detect_worker_threads(),
+        cpu_quota = pahoa_net::cgroup_cpu_quota(),
+        host_cpus = std::thread::available_parallelism().map(|n| n.get()).ok(),
+        memory_limit_bytes = pahoa_net::cgroup_memory_limit(),
+        "Pahoa-{}-{} starting",
+        env!("CARGO_PKG_VERSION"),
+        env!("PAHOA_BUILD_REV"),
+    );
+}
+
+/// This machine's name, which under Kubernetes is the pod's name.
+///
+/// From `/proc` rather than `libc::gethostname`, so this stays dependency-free
+/// and static. `$HOSTNAME` is not equivalent: it is a shell convention, and a
+/// container started without one has it unset.
+fn hostname() -> Option<String> {
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// An environment variable, absent when unset *or* set to nothing.
+///
+/// The empty case matters: a manifest that declares a downward-API variable
+/// whose source does not resolve supplies an empty string rather than omitting
+/// it, and `pod=""` is worse than no field at all.
+fn env_field(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// How log lines are rendered.
+///
+/// Deliberately **not** inferred from `stderr().is_terminal()`, though the
+/// colouring right below it is. Colour is cosmetic and getting it wrong costs
+/// nothing; the format is structural, and inferring it would mean
+/// `pahoa serve … 2>debug.log` or piping through `less` silently produced a
+/// different shape than the same command produced on the screen. An operator
+/// choosing to redirect is not thereby asking for JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    /// One human-readable line per event. The default: a standalone room is run
+    /// from a terminal and read by the person who started it.
+    Text,
+    /// One JSON object per line, fields as keys. For anything that ships logs
+    /// somewhere queryable, where re-parsing `games=54` out of a message with a
+    /// regex is the failure this avoids.
+    Json,
+}
+
+fn init_logging(level: LevelFilter, format: LogFormat) {
     use std::io::IsTerminal;
 
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_max_level(level)
-        .with_writer(std::io::stderr)
-        // Color when a person is watching, plain text when the kubelet is.
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
+        .with_writer(std::io::stderr);
+
+    match format {
+        // Colour when a person is watching, plain text when the kubelet is.
+        LogFormat::Text => builder.with_ansi(std::io::stderr().is_terminal()).init(),
+        // `flatten_event` lifts the event's own fields to the top level rather
+        // than nesting them under "fields", so a query is `.slot` and not
+        // `.fields.slot`. `current_span`/`span_list` are off because pahoa
+        // opens no spans; they would be two empty keys on every line.
+        LogFormat::Json => builder
+            .json()
+            .flatten_event(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .init(),
+    }
 }
 
 /// Resolve on the first signal asking this process to stop, naming it.

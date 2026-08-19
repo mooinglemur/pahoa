@@ -203,8 +203,28 @@ pub fn detect_worker_threads() -> usize {
     quota.unwrap_or(host).clamp(2, 32)
 }
 
+/// Bytes this cgroup may use, if it is capped.
+///
+/// Reported in the startup banner rather than used for anything. It is the
+/// number `outbound_budget_for` is implicitly betting against, so having both
+/// on one line is what makes an OOM kill diagnosable after the fact.
+pub fn cgroup_memory_limit() -> Option<u64> {
+    // cgroup v2 spells "no limit" as the literal `max`.
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        return s.trim().parse().ok();
+    }
+    // cgroup v1 spells it as a number near u64::MAX, which is not a limit
+    // anybody set. Anything past a petabyte is that sentinel, not a cap.
+    let v: u64 = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    (v < (1 << 50)).then_some(v)
+}
+
 /// Whole CPUs available to this cgroup, rounded up.
-fn cgroup_cpu_quota() -> Option<usize> {
+pub fn cgroup_cpu_quota() -> Option<usize> {
     // cgroup v2: "<quota> <period>", or "max <period>" when unlimited.
     if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
         let mut parts = s.split_whitespace();

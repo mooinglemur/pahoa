@@ -224,7 +224,25 @@ impl Room {
     // --- output ----------------------------------------------------------
 
     /// `notify_client`: one line, to the caller only, skipped for `NoText`.
+    ///
+    /// Logged, and [`Room::notify_multiple`] deliberately is not — which is the
+    /// reference's split too (`MultiServer.py:460` against `:463-468`, where
+    /// `notify_client_multiple` has no logging line). It reads as an oversight
+    /// and is not one: `!missing` on a fresh slot answers with hundreds of
+    /// lines, and an operator watching a room does not want each of them.
     pub(super) fn notify(&self, conn: ConnId, text: String, out: &mut dyn EffectSink) {
+        if let Some(client) = self.clients.get(&conn)
+            && client.auth
+            && !client.no_text
+        {
+            tracing::info!(
+                slot = client.slot,
+                team = client.team,
+                player = %self.slot_alias((client.team, client.slot)),
+                %text,
+                "notice"
+            );
+        }
         self.notify_multiple(conn, vec![text], out);
     }
 
@@ -247,6 +265,15 @@ impl Room {
     /// them differently, so the distinction is visible rather than cosmetic —
     /// and `!admin`'s *own* replies, the login and usage lines, stay
     /// `CommandResult`: they come from the client-side processor.
+    ///
+    /// **Not logged, and this is the one place pahoa is quieter than the
+    /// reference on purpose.** `ServerCommandProcessor.output` goes through
+    /// `notify_client`, so the reference logs every `/` reply. One of those
+    /// replies is `/options`, which prints the real `server_password` — safe to
+    /// show the administrator who just typed it, and not safe to write into a
+    /// log that gets shipped and indexed. The administrative *action* is
+    /// already on the record either way: `cmd_admin` masks and broadcasts the
+    /// command before running it, and that broadcast is logged as chat.
     pub(super) fn notify_admin(&self, conn: ConnId, texts: Vec<String>, out: &mut dyn EffectSink) {
         self.notify_typed(conn, texts, PrintJsonType::AdminCommandResult, out);
     }
@@ -280,6 +307,12 @@ impl Room {
     /// The chat line every `Say` produces, whether or not it is a command.
     fn broadcast_chat(&self, key: SlotKey, display: &str, message: &str, out: &mut dyn EffectSink) {
         let text = format!("{}: {display}", self.slot_alias(key));
+        // Logged from `text`, which is built from `display`. That matters for
+        // `!admin`: its caller masks the password *before* calling here and
+        // passes the masked form, so what reaches the log is what reached the
+        // room. Anything that later logged the pre-masked line would undo the
+        // masking, in a place nobody would think to look for it.
+        tracing::info!(slot = key.1, team = key.0, %text, "chat");
         out.broadcast(
             Recipients::AllText,
             &[ServerPacket::PrintJSON(PrintJson {
@@ -295,6 +328,7 @@ impl Room {
 
     /// A room-wide `CommandResult`, for the commands that answer everybody.
     pub(crate) fn broadcast_result(&self, text: String, out: &mut dyn EffectSink) {
+        tracing::info!(%text, "notice");
         out.broadcast(
             Recipients::AllText,
             &[ServerPacket::PrintJSON(PrintJson {

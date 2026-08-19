@@ -17,7 +17,9 @@ pub mod shard;
 pub mod tls;
 pub mod ws;
 
-pub use config::{NetConfig, outbound_budget_for};
+pub use config::{
+    NetConfig, cgroup_cpu_quota, cgroup_memory_limit, detect_worker_threads, outbound_budget_for,
+};
 pub use save::{SaveSink, SaveStore};
 pub use server::{Server, build_runtime, serve};
 pub use tls::TlsPaths;
