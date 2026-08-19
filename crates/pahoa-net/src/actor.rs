@@ -182,6 +182,12 @@ impl EffectSink for Dispatcher<'_> {
             journal.record(record);
         }
     }
+
+    fn journal_event(&mut self, event: pahoa_room::JournalEvent) {
+        if let Some(journal) = self.journal {
+            journal.event(event);
+        }
+    }
 }
 
 /// Unix time as a float, the scale `RoomInfo.time` and the room's clock use.
@@ -502,10 +508,19 @@ pub async fn run_with_saves(
                     // opening it — the useful answer during live abuse.
                     match room.options.slot_passwords.as_mut() {
                         Some(passwords) => {
+                            let set = password.is_some();
                             match password {
                                 Some(password) => passwords.insert(slot, password),
                                 None => passwords.remove(&slot),
                             };
+                            // The fact, never the value. Clearing *locks* the
+                            // slot, so this is the record that answers "why can
+                            // nobody join slot 4" months later.
+                            sink.journal_event(pahoa_room::JournalEvent::slot_password_changed(
+                                now(),
+                                slot,
+                                set,
+                            ));
                         }
                         // No per-slot mode to rotate within.
                         None => known = false,

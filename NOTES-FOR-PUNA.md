@@ -395,16 +395,31 @@ so `/option server_password` would revert on restart identically.
 
 ## The room journal: `--journal`, and puna will want it on every room
 
-**New flag, off by default, needs `--save-dir`.** It appends one JSON line per location checked to
-`history.jsonl` in the save directory, continuing across restarts. This is the organizer-facing
-history — "when did each check happen" — and puna serving it is a file read from a directory it
-already owns exclusively, with no query language and no cross-room surface.
+**New flag, off by default, needs `--save-dir`.** It appends the room's history to `history.jsonl` in
+the save directory, one JSON line per event, continuing across restarts. This is the organizer-facing
+record, and puna serving it is a file read from a directory it already owns exclusively — no query
+language, no cross-room surface.
 
-```json
-{"type":"check","at":1787157141.420,"finder":1,"finder_name":"amperketBalala",
- "receiver":1,"receiver_name":"amperketBalala","item":5606235,"item_name":"Archipelago Tarot",
- "location":5606192,"location_name":"Green Deck Ante 1 White Stake","flags":1}
-```
+Every line has a `type`, and **a reader must dispatch on it and ignore what it does not recognize**,
+because more types will be added:
+
+| `type` | when |
+|---|---|
+| `check` | a location became checked, including via release and collect |
+| `cheat` | `!getitem` conjured an item — the one item movement no `check` accounts for |
+| `hints` | hints granted, with `cost`, `points_before` and `points_after` |
+| `chat` | anything said in the room, `!admin` lines already masked |
+| `deathlink` | a `Bounce` tagged DeathLink, with `cause` and `source` |
+| `options` | at room start and after any change: every option plus `password_mode` |
+| `option_changed` | one `!admin /option` |
+| `slot_password_changed` | the admin API set or cleared one — `slot` and `set`, never a value |
+| `gap` | the writer had to drop records |
+
+**No password is ever written**, and that is enforced on both paths rather than by convention: `chat`
+is built from the text the room *broadcast*, which `cmd_admin` has already masked, and the option
+records carry modes and booleans (`password_mode`, `server_password_set`, `set`) rather than values.
+Verified against a live room — `!admin login hunter2` and `!admin /option server_password topsecret`
+both appear masked, and neither secret occurs anywhere in the file.
 
 **Deliberately not in the log stream.** Checks do not reach stderr at any level, so this changes
 nothing about what puna ships to Loki. The reasoning is access rather than durability: Loki has no

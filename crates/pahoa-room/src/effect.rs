@@ -131,6 +131,195 @@ pub trait EffectSink {
     /// record is `Copy`, and whatever consumes it resolves names on its own
     /// time. See `docs/journal.md`.
     fn journal_check(&mut self, _record: CheckRecord) {}
+
+    /// Anything else the room's history records.
+    ///
+    /// Separate from [`EffectSink::journal_check`] because the two live in
+    /// different volume regimes and want different trades. A check is emitted
+    /// 341,851 times by a single release, so it is `Copy` and resolves nothing;
+    /// these are emitted when a person does something, so they can afford to
+    /// own their data and be shaped on the spot.
+    fn journal_event(&mut self, _event: JournalEvent) {}
+}
+
+/// A low-volume journal record, already shaped as the line that will be written.
+///
+/// Holding the rendered object rather than a typed enum is deliberate: the
+/// journal's contract *is* its JSON shape, so building the object is building
+/// the output, and a reader that understands `type` can be extended without the
+/// writer growing an arm per event. The constructors below are where the shape
+/// is decided, and are the only way to make one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournalEvent(serde_json::Value);
+
+impl JournalEvent {
+    pub fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
+
+    /// What this event is, for a reader dispatching on `type`.
+    pub fn kind(&self) -> &str {
+        self.0["type"].as_str().unwrap_or("")
+    }
+
+    fn new(kind: &str, mut fields: serde_json::Map<String, serde_json::Value>) -> Self {
+        fields.insert("type".to_string(), kind.into());
+        Self(serde_json::Value::Object(fields))
+    }
+
+    /// The room's effective options, written at start and after any change.
+    ///
+    /// **Carries password *modes*, never password values.** Whether a room
+    /// wants a password is what an organizer needs to reconstruct why somebody
+    /// could or could not get in; the secret itself has no business in a file
+    /// that outlives the room and is handed to a person.
+    pub fn options(at: f64, options: &crate::RoomOptions) -> Self {
+        Self::new(
+            "options",
+            serde_json::json!({
+                "at": at,
+                "hint_cost": options.hint_cost,
+                "location_check_points": options.location_check_points,
+                "release_mode": options.release_mode.as_text(),
+                "collect_mode": options.collect_mode.as_text(),
+                "remaining_mode": options.remaining_mode.as_text(),
+                "countdown_mode": options.countdown_mode.as_text(),
+                "item_cheat": options.item_cheat,
+                "compatibility": options.compatibility,
+                "password_mode": match (&options.password, &options.slot_passwords) {
+                    (_, Some(_)) => "per-slot",
+                    (Some(_), None) => "room",
+                    (None, None) => "none",
+                },
+                "server_password_set": options.server_password.is_some(),
+            })
+            .as_object()
+            .expect("json! built an object")
+            .clone(),
+        )
+    }
+
+    /// One option changed on a live room, through `!admin /option`.
+    pub fn option_changed(at: f64, option: &str, value: &str) -> Self {
+        Self::new(
+            "option_changed",
+            serde_json::json!({ "at": at, "option": option, "value": value })
+                .as_object()
+                .expect("json! built an object")
+                .clone(),
+        )
+    }
+
+    /// A slot's password was set or cleared, with the value withheld.
+    ///
+    /// Clearing **locks** the slot rather than opening it, so `set: false` is
+    /// the more consequential of the two and the reason this is recorded at
+    /// all — "why can nobody join slot 4" is answerable from here.
+    pub fn slot_password_changed(at: f64, slot: u32, set: bool) -> Self {
+        Self::new(
+            "slot_password_changed",
+            serde_json::json!({ "at": at, "slot": slot, "set": set })
+                .as_object()
+                .expect("json! built an object")
+                .clone(),
+        )
+    }
+
+    /// Hints granted, with the point balance either side of the transaction.
+    ///
+    /// Both balances rather than the cost alone: hint price is a percentage of
+    /// a slot's own location count and can be changed mid-room, so a cost in
+    /// isolation cannot be checked against anything later. Before and after can.
+    pub fn hints(
+        at: f64,
+        key: crate::SlotKey,
+        player: &str,
+        granted: Vec<String>,
+        cost: i64,
+        points_before: i64,
+        points_after: i64,
+    ) -> Self {
+        Self::new(
+            "hints",
+            serde_json::json!({
+                "at": at,
+                "team": key.0,
+                "slot": key.1,
+                "player": player,
+                "granted": granted,
+                "cost": cost,
+                "points_before": points_before,
+                "points_after": points_after,
+            })
+            .as_object()
+            .expect("json! built an object")
+            .clone(),
+        )
+    }
+
+    /// An item conjured through the cheat console.
+    ///
+    /// The one item movement with no location behind it, and therefore the one
+    /// the `check` records cannot account for. Without this the history reads
+    /// as complete and quietly is not.
+    pub fn cheat(at: f64, key: crate::SlotKey, player: &str, item: i64, item_name: &str) -> Self {
+        Self::new(
+            "cheat",
+            serde_json::json!({
+                "at": at,
+                "team": key.0,
+                "slot": key.1,
+                "player": player,
+                "item": item,
+                "item_name": item_name,
+            })
+            .as_object()
+            .expect("json! built an object")
+            .clone(),
+        )
+    }
+
+    /// A `Bounce` carrying DeathLink.
+    pub fn death_link(
+        at: f64,
+        key: crate::SlotKey,
+        player: &str,
+        cause: Option<&str>,
+        source: Option<&str>,
+        recipients: usize,
+    ) -> Self {
+        Self::new(
+            "deathlink",
+            serde_json::json!({
+                "at": at,
+                "team": key.0,
+                "slot": key.1,
+                "player": player,
+                "cause": cause,
+                "source": source,
+                "recipients": recipients,
+            })
+            .as_object()
+            .expect("json! built an object")
+            .clone(),
+        )
+    }
+
+    /// One chat line, **as the room broadcast it**.
+    ///
+    /// Built from the same text that went to players, which for `!admin` is the
+    /// masked form. Journalling anything earlier in that path would undo the
+    /// masking into a file that outlives the room — the worst possible place
+    /// for a password to reappear.
+    pub fn chat(at: f64, key: crate::SlotKey, text: &str) -> Self {
+        Self::new(
+            "chat",
+            serde_json::json!({ "at": at, "team": key.0, "slot": key.1, "text": text })
+                .as_object()
+                .expect("json! built an object")
+                .clone(),
+        )
+    }
 }
 
 /// One location becoming checked, as the journal records it.
@@ -159,6 +348,8 @@ pub struct Recorder {
     pub dirty: bool,
     /// Checks the room offered to the journal, in the order it offered them.
     pub journal: Vec<CheckRecord>,
+    /// Everything else the room offered the journal.
+    pub journal_events: Vec<JournalEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,9 +394,21 @@ impl EffectSink for Recorder {
     fn journal_check(&mut self, record: CheckRecord) {
         self.journal.push(record);
     }
+
+    fn journal_event(&mut self, event: JournalEvent) {
+        self.journal_events.push(event);
+    }
 }
 
 impl Recorder {
+    /// The journal events of one kind, for tests that care about a single sort.
+    pub fn journal_events_of(&self, kind: &str) -> Vec<&JournalEvent> {
+        self.journal_events
+            .iter()
+            .filter(|e| e.kind() == kind)
+            .collect()
+    }
+
     /// Every packet sent to `conn`, whether directly or by broadcast.
     ///
     /// Needs the room because [`Recipients`] describes an audience rather than
@@ -244,6 +447,7 @@ impl Recorder {
     pub fn clear(&mut self) {
         self.events.clear();
         self.journal.clear();
+        self.journal_events.clear();
         self.dirty = false;
     }
 }

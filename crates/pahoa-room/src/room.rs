@@ -868,7 +868,7 @@ impl Room {
         let Some(sender) = self.clients.get(&conn) else {
             return;
         };
-        let team = sender.team;
+        let (team, sender_slot) = (sender.team, sender.slot);
 
         let games = args.games.unwrap_or_default();
         let slots = args.slots.unwrap_or_default();
@@ -891,6 +891,30 @@ impl Room {
         }
         let mut targets = targets;
         targets.sort_unstable();
+
+        // DeathLink specifically, not every bounce. A `Bounce` is a general
+        // relay — trackers and forks use it for their own traffic — and its
+        // volume is unbounded in a way checks are not, so journalling all of it
+        // would let one chatty client dominate the room's history. DeathLink is
+        // the one an organizer is asked about.
+        if tags.iter().any(|t| t.eq_ignore_ascii_case("DeathLink")) {
+            let data = args.data.as_object();
+            let field = |name: &str| {
+                data.and_then(|d| d.get(name))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
+            let key = (team, sender_slot);
+            out.journal_event(crate::effect::JournalEvent::death_link(
+                self.clock,
+                key,
+                &self.slot_alias(key),
+                field("cause").as_deref(),
+                field("source").as_deref(),
+                targets.len(),
+            ));
+        }
+
         out.broadcast(
             Recipients::These(targets),
             &[ServerPacket::echo(raw, "Bounced", &[])],

@@ -282,6 +282,17 @@ impl Room {
             value = %self.option_as_text(&name),
             "room option changed through !admin"
         );
+        out.journal_event(crate::effect::JournalEvent::option_changed(
+            self.clock,
+            &name,
+            &self.option_as_text(&name),
+        ));
+        // The whole option set again, so a reader never has to replay every
+        // change from the start to know what the room's rules were at a moment.
+        out.journal_event(crate::effect::JournalEvent::options(
+            self.clock,
+            &self.options,
+        ));
         self.admin_out(
             conn,
             format!("Set option {name} to {}", self.option_as_text(&name)),

@@ -163,6 +163,12 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             )
             .map_err(|e| format!("journal in {}: {e}", dir.display()))?;
             tracing::info!(path = %writer.path().display(), "appending a per-check history");
+            // The rules this room is starting under, before anything happens in
+            // it. Written on every start rather than only the first, because a
+            // restart is exactly when they can have changed — and a reader
+            // scanning back from any point finds the options in force without
+            // replaying every change from the beginning.
+            journal.event(pahoa_room::JournalEvent::options(start_time, &room.options));
             (Some(journal), Some(writer))
         }
     };

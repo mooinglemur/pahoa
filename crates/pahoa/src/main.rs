@@ -43,11 +43,11 @@ SERVE OPTIONS
     --snapshot <file.json>   Data package snapshot, from export-datapackage.py
     --save-dir <dir>         Where the room persists itself
     --save-interval <secs>   Save cadence (default 60)
-    --journal                Append a per-check history to history.jsonl in the
-                             save directory: one JSON line per location checked,
-                             continuing across restarts. Needs --save-dir. This
-                             is the organizer's record of a room, and it is not
-                             in the log stream.
+    --journal                Append the room's history to history.jsonl in the
+                             save directory: one JSON line per event — checks,
+                             cheats, hints, chat, DeathLinks, option changes —
+                             continuing across restarts. Needs --save-dir, and
+                             is not in the log stream.
     --outbound-budget <MiB>  Cap on queued outbound data across all clients.
                              Defaults to 288 KiB per slot, floored at 64 MiB —
                              a 2000-slot room gets 562 MiB, a small one 64.

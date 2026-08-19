@@ -1,16 +1,62 @@
 # The room journal
 
-`--journal` appends one JSON line per location checked to `history.jsonl` in the save directory, for
-as long as the room exists and across every restart of it.
+`--journal` appends the room's history to `history.jsonl` in the save directory, one JSON line per
+event, for as long as the room exists and across every restart of it. It is off by default and needs
+`--save-dir`, since the history is kept beside the save so that it survives a restart the way the
+save does.
+
+Every line has a `type`, and a reader is expected to dispatch on it and ignore what it does not know.
+
+| `type` | when | notable fields |
+|---|---|---|
+| `check` | a location became checked, including via release and collect | `finder`, `receiver`, `item_name`, `location_name`, `flags` |
+| `cheat` | `!getitem` conjured an item | `slot`, `item_name` |
+| `hints` | hints were granted | `granted`, `cost`, `points_before`, `points_after` |
+| `chat` | anything said in the room | `slot`, `text` |
+| `deathlink` | a `Bounce` tagged DeathLink | `slot`, `cause`, `source`, `recipients` |
+| `options` | room start, and after any option change | every option, plus `password_mode` |
+| `option_changed` | `!admin /option` | `option`, `value` |
+| `slot_password_changed` | the admin API set or cleared one | `slot`, `set` |
+| `gap` | the writer had to drop records | `dropped` |
 
 ```json
 {"type":"check","at":1787157141.420,"finder":1,"finder_name":"amperketBalala",
  "receiver":1,"receiver_name":"amperketBalala","item":5606235,"item_name":"Archipelago Tarot",
  "location":5606192,"location_name":"Green Deck Ante 1 White Stake","flags":1}
+{"type":"cheat","at":1787159857.903,"team":0,"slot":1,"player":"amperketBalala",
+ "item":5606235,"item_name":"Archipelago Tarot"}
+{"type":"hints","at":1787159961.659,"team":0,"slot":1,"player":"amperketBalala",
+ "granted":["amperketBalala's Archipelago Tarot at Green Deck Ante 1 White Stake (amperketBalala)"],
+ "cost":6,"points_before":200,"points_after":194}
+{"type":"deathlink","at":1787159859.507,"team":0,"slot":1,"player":"amperketBalala",
+ "cause":"fell in a pit","source":"amperketBalala","recipients":1}
 ```
 
-It is off by default and needs `--save-dir`, since the history is kept beside the save so that it
-survives a restart the way the save does.
+## What it deliberately does not contain
+
+**No password, ever.** Two paths could have put one here and both are closed:
+
+- `chat` is built from the text the room *broadcast*, which for `!admin` is already masked by
+  `cmd_admin` before anything else sees it. So `!admin login hunter2` is journalled as
+  `!admin login ****************`. Recording anything earlier in that path would undo the masking
+  into a file that outlives the room, which is the worst place for a password to reappear.
+- `options` and `slot_password_changed` carry password **modes and facts**, never values:
+  `password_mode` is `none` / `room` / `per-slot`, `server_password_set` is a boolean, and a slot
+  password change records only whether one was set. Clearing a slot password *locks* that slot rather
+  than opening it, so `set: false` is the more consequential of the two and is the record that
+  answers "why can nobody join slot 4" months later.
+
+**Only DeathLink among bounces.** `Bounce` is a general relay that forks and trackers use for their
+own traffic, and unlike checks its volume is unbounded — checks are capped by the seed's location
+count, deaths are not. Journalling all of it would let one chatty client dominate a room's history.
+
+## Why the option set is written twice
+
+`option_changed` says what moved; the `options` line that follows says what the rules now are. The
+redundancy is the point: without it, reconstructing the room's configuration at any moment means
+replaying every change from the beginning and hoping none were dropped. `options` is also written at
+every start — not only the first — because a restart is exactly when the configuration can have
+changed underneath the room.
 
 ## Who it is for
 
@@ -89,7 +135,18 @@ not competing with anyone else's retention.
 
 ## What it does not yet record
 
-Only checks. A cheat-console grant, a collect, a goal and an admin action are all things an organizer
-might reasonably want in the same file, and the `type` field exists so they can be added without
-changing what a reader does with the lines it already understands. Checks came first because they are
-what a release produces in bulk, and therefore the case that had to be proven cheap.
+Goal completions, joins and parts, countdowns, and admin actions other than option and slot-password
+changes. The `type` field exists so these can be added without changing what a reader does with the
+lines it already understands.
+
+Two of the events above are worth a note on why they are shaped as they are:
+
+- **`hints` carries both balances, not just the cost.** Hint price is a percentage of a slot's own
+  location count and can be changed mid-room with `!admin /option hint_cost`, so a cost recorded in
+  isolation cannot be checked against anything afterwards. `points_before` and `points_after` can. A
+  hint for an item at an already-checked location is free, and shows up as the two being equal —
+  which is the distinction an organizer is usually being asked to adjudicate.
+- **`cheat` exists because no `check` can account for it.** `!getitem` moves an item with no location
+  behind it, so without this line the history reads as a complete account of where every item came
+  from and quietly is not. `item_cheat` defaults to *on*, so this is reachable in any room that has
+  not turned it off.

@@ -39,7 +39,7 @@
 //! history says so in the history.
 
 use pahoa_multidata::{DataPackage as NameTables, MultiData};
-use pahoa_room::CheckRecord;
+use pahoa_room::{CheckRecord, JournalEvent};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,6 +71,9 @@ pub struct Journal {
 
 enum Message {
     Check(CheckRecord),
+    /// Everything that is not a check. Already shaped as the object to write,
+    /// because these are rare enough to afford being built where they happen.
+    Event(Box<JournalEvent>),
     Flush,
 }
 
@@ -120,6 +123,13 @@ impl Journal {
             // path that fires hundreds of thousands of times when it fires at
             // all, and a `warn!` per record would replace a stalled journal
             // with a stalled log.
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Queue one non-check event. Never blocks.
+    pub fn event(&self, event: JournalEvent) {
+        if self.tx.try_send(Message::Event(Box::new(event))).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -181,6 +191,19 @@ fn run(
             Message::Flush => {
                 let _ = out.flush();
                 since_flush = 0;
+            }
+            Message::Event(event) => {
+                // Already an object; serializing it is the whole render.
+                let mut line = event.as_value().to_string();
+                line.push('\n');
+                if out.write_all(line.as_bytes()).is_err() {
+                    continue;
+                }
+                since_flush += 1;
+                if since_flush >= FLUSH_EVERY {
+                    let _ = out.flush();
+                    since_flush = 0;
+                }
             }
             Message::Check(record) => {
                 let line = render(&record, &data, &names);

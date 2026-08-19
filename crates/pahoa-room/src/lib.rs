@@ -20,7 +20,9 @@ mod slot_data;
 pub mod tracker;
 
 pub use conn::{Client, ConnId, FeedPolicy};
-pub use effect::{CheckRecord, CloseReason, Counter, EffectSink, Event, Recipients, Recorder};
+pub use effect::{
+    CheckRecord, CloseReason, Counter, EffectSink, Event, JournalEvent, Recipients, Recorder,
+};
 pub use options::RoomOptions;
 pub use room::{AdminCommand, AdminOutcome, Room, SERVER_VERSION, SlotKey};
 pub use save::{SaveError, Snapshot};

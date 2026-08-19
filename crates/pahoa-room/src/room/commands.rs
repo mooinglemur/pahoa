@@ -307,12 +307,15 @@ impl Room {
     /// The chat line every `Say` produces, whether or not it is a command.
     fn broadcast_chat(&self, key: SlotKey, display: &str, message: &str, out: &mut dyn EffectSink) {
         let text = format!("{}: {display}", self.slot_alias(key));
-        // Logged from `text`, which is built from `display`. That matters for
-        // `!admin`: its caller masks the password *before* calling here and
-        // passes the masked form, so what reaches the log is what reached the
-        // room. Anything that later logged the pre-masked line would undo the
-        // masking, in a place nobody would think to look for it.
+        // Logged and journalled from `text`, which is built from `display`.
+        // That matters for `!admin`: its caller masks the password *before*
+        // calling here and passes the masked form, so what reaches the log and
+        // the history is what reached the room. Anything that recorded the
+        // pre-masked line would undo the masking — into a file that outlives
+        // the room, in the journal's case, which is the worst place for a
+        // password to reappear.
         tracing::info!(slot = key.1, team = key.0, %text, "chat");
+        out.journal_event(crate::effect::JournalEvent::chat(self.clock, key, &text));
         out.broadcast(
             Recipients::AllText,
             &[ServerPacket::PrintJSON(PrintJson {
@@ -837,6 +840,17 @@ impl Room {
             Arc::make_mut(self.received_items.entry((team, slot, remote)).or_default()).push(item);
         }
 
+        // The only item movement with no location behind it, so the `check`
+        // records cannot account for it. Without this line the history reads as
+        // a complete account of where every item came from and quietly is not.
+        out.journal_event(crate::effect::JournalEvent::cheat(
+            self.clock,
+            key,
+            &self.slot_alias(key),
+            id,
+            &name,
+        ));
+
         out.broadcast(
             // Attributable to the receiving slot, so a scoped feed hears about
             // items granted to it and not about everyone else's.
@@ -1140,7 +1154,51 @@ impl Room {
         };
 
         let granted_count = granted.len();
+        // Everything the slot *newly* learns: the paid ones and the free ones
+        // alike. A hint for an item at an already-checked location costs
+        // nothing and takes the `found` path, but the player still walks away
+        // knowing something they did not — recording only what was paid for
+        // would leave the history disagreeing with the player about what they
+        // were told. `known` is excluded because they had it already.
+        //
+        // Described before `hints_used` moves, since that is what `slot_points`
+        // reads and the "after" balance has to be taken on the far side of it.
+        let described: Vec<String> = found
+            .iter()
+            .chain(granted.iter())
+            .map(|hint| {
+                // Item names belong to the receiver's game and location names to
+                // the finder's; crossing them over is the classic way to render
+                // a multiworld wrong.
+                let item = self
+                    .datapackage
+                    .get(&self.slot_game(hint.receiving_player))
+                    .map(|n| n.item_name(hint.item))
+                    .unwrap_or_else(|| format!("Unknown item (ID:{})", hint.item));
+                let location = self
+                    .datapackage
+                    .get(&self.slot_game(hint.finding_player))
+                    .map(|n| n.location_name(hint.location))
+                    .unwrap_or_else(|| format!("Unknown location (ID:{})", hint.location));
+                format!(
+                    "{}'s {item} at {location} ({})",
+                    self.slot_name((team, hint.receiving_player)),
+                    self.slot_name((team, hint.finding_player)),
+                )
+            })
+            .collect();
         *self.hints_used.entry(key).or_insert(0) += granted.len() as i64;
+        if !described.is_empty() {
+            out.journal_event(crate::effect::JournalEvent::hints(
+                self.clock,
+                key,
+                &self.slot_alias(key),
+                described,
+                cost,
+                points_available,
+                self.slot_points(key),
+            ));
+        }
 
         // Already-found hints are free, so they ride along with whatever was
         // paid for, and the ones the player already had are re-announced.
