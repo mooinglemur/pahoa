@@ -265,12 +265,12 @@ impl MultiData {
         games
     }
 
-    /// Merge the embedded package with an offline snapshot.
-    pub fn resolve_datapackage(
-        &self,
-        snapshot: &BTreeMap<String, GamePackage>,
-    ) -> (DataPackage, MergeReport) {
-        DataPackage::merge(snapshot, &self.embedded_datapackage, &self.games())
+    /// Name tables for the games this seed uses.
+    ///
+    /// Everything comes from the seed's own embedded package except the hint
+    /// blacklist, which is serialized nowhere and is compiled into the binary.
+    pub fn resolve_datapackage(&self) -> (DataPackage, MergeReport) {
+        DataPackage::merge(&self.embedded_datapackage, &self.games())
     }
 
     /// Slots that have **progress to report** — checks, a goal, a completion

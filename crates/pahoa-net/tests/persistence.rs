@@ -14,12 +14,11 @@
 //!    out-of-memory path that only appears on a bad day.
 
 use futures_util::{SinkExt, StreamExt};
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::actor::SaveConfig;
 use pahoa_net::{NetConfig, SaveStore, Server};
 use pahoa_room::{Room, RoomOptions, Snapshot};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -43,8 +42,7 @@ fn load() -> Option<Arc<MultiData>> {
 }
 
 fn build_room(data: Arc<MultiData>) -> Room {
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     Room::new(
         data,
         Arc::new(names),

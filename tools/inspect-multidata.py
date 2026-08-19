@@ -11,7 +11,7 @@ reimplements the pieces of the merge policy it needs, so a bug copied from
 Archipelago's source would not be copied into both sides at once.
 
 Usage:
-    inspect-multidata.py <file.archipelago> [--snapshot datapackage.json]
+    inspect-multidata.py <file.archipelago>
 """
 
 import argparse
@@ -35,6 +35,16 @@ LEGACY_GENERATOR_CUTOFF = (0, 6, 2)
 LEGACY_MIN_CLIENT_VERSION = (0, 1, 6)
 
 SLOT_KIND = {0: "spectator", 1: "player", 2: "group"}
+
+# Mirrors crates/pahoa-multidata/src/hint_blacklist.rs, which mirrors
+# World.hint_blacklist across the Archipelago tree. Duplicated deliberately:
+# this file exists to be an *independent* check on the Rust loader, so importing
+# the same table would make the differential agree with itself for free.
+# export-datapackage.py regenerates both from a checkout.
+HINT_BLACKLIST = {
+    "A Link to the Past": ["Triforce"],
+    "Castlevania - Circle of the Moon": ["Battle Arena: End reward"],
+}
 
 
 class Instance:
@@ -81,15 +91,10 @@ def is_stub(pkg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("multidata")
-    ap.add_argument("--snapshot")
     args = ap.parse_args()
 
     md = load(args.multidata)
 
-    snapshot = {}
-    if args.snapshot:
-        with open(args.snapshot, encoding="utf-8") as f:
-            snapshot = json.load(f).get("games", {})
 
     slot_info = md["slot_info"]
     generator_version = tuple(md["version"])
@@ -140,28 +145,25 @@ def main():
     needed = {info.args[1] for info in slot_info.values()} | {"Archipelago"}
 
     merged = {}
-    from_multidata = from_snapshot = unresolved = 0
+    from_multidata = unresolved = 0
     for game in needed:
         emb = embedded.get(game)
         if emb is not None and is_stub(emb):
             emb = None
-        snap = snapshot.get(game)
         if emb is not None:
             pkg = dict(emb)
-            pkg["hint_blacklist"] = (snap or {}).get("hint_blacklist", [])
             from_multidata += 1
-        elif snap is not None:
-            pkg = dict(snap)
-            from_snapshot += 1
         else:
             pkg = {}
             unresolved += 1
+        # Compiled into pahoa rather than serialized anywhere; mirrored here so
+        # the two implementations still produce identical text.
+        pkg["hint_blacklist"] = HINT_BLACKLIST.get(game, [])
         merged[game] = pkg
 
     print("games: %d" % len(merged))
     print("datapackage_embedded: %d" % len(embedded))
     print("datapackage_from_multidata: %d" % from_multidata)
-    print("datapackage_from_snapshot: %d" % from_snapshot)
     print("datapackage_unresolved: %d" % unresolved)
 
     for game in sorted(merged):

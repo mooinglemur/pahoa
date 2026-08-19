@@ -12,10 +12,9 @@
 //! the *shard* count; the failure mode is bounded by the *connection* count,
 //! and the two are far enough apart to be unambiguous.
 
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::{NetConfig, Server};
 use pahoa_room::{Room, RoomOptions};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -152,8 +151,7 @@ fn connect_packet(name: &str, game: &str) -> String {
 }
 
 async fn start(data: Arc<MultiData>) -> Server {
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     let room = Room::new(data, Arc::new(names), RoomOptions::default(), 0.0);
     Server::start(
         room,

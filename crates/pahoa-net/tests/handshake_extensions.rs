@@ -9,10 +9,9 @@
 //! The offers exercised here are literally what Python's `websockets` sends,
 //! since that is the library Archipelago's client uses.
 
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::{NetConfig, Server};
 use pahoa_room::{Room, RoomOptions};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,8 +39,7 @@ async fn start(data: Arc<MultiData>) -> Server {
 }
 
 async fn start_with(data: Arc<MultiData>, config: NetConfig) -> Server {
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     let room = Room::new(data, Arc::new(names), RoomOptions::default(), 0.0);
     Server::start(room, NetConfig { port: 0, ..config })
         .await

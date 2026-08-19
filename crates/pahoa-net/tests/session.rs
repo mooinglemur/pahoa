@@ -5,11 +5,10 @@
 //! Archipelago client does.
 
 use futures_util::{SinkExt, StreamExt};
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::{NetConfig, Server};
 use pahoa_room::{Room, RoomOptions};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,8 +34,7 @@ fn load(name: &str) -> Option<Arc<MultiData>> {
 }
 
 async fn start(data: Arc<MultiData>, options: RoomOptions) -> Server {
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     let room = Room::new(data, Arc::new(names), options, 1_700_000_000.0);
     Server::start(
         room,

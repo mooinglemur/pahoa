@@ -4,7 +4,7 @@
 //! the transport and not the game, and building the seed in-process is what
 //! lets them run in CI, where the `.archipelago` fixtures are absent by design.
 
-use pahoa_multidata::{GamePackage, LocationStore, MultiData, Version};
+use pahoa_multidata::{LocationStore, MultiData, Version};
 use pahoa_net::{NetConfig, Server, TlsPaths};
 use pahoa_room::{Room, RoomOptions};
 use rustls::pki_types::CertificateDer;
@@ -44,8 +44,7 @@ fn empty_room() -> Room {
         server_options: None,
         embedded_datapackage: BTreeMap::new(),
     });
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     Room::new(
         data,
         Arc::new(names),

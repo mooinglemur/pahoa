@@ -3,7 +3,7 @@
 //! Synthetic multidata rather than a fixture, so these run in CI — see
 //! `tests/tls.rs` for the same reasoning.
 
-use pahoa_multidata::{GamePackage, LocationStore, MultiData, NetworkSlot, SlotType, Version};
+use pahoa_multidata::{LocationStore, MultiData, NetworkSlot, SlotType, Version};
 use pahoa_net::{NetConfig, Server};
 use pahoa_room::{Room, RoomOptions};
 use std::collections::{BTreeMap, HashMap};
@@ -50,8 +50,7 @@ fn room(options: RoomOptions) -> Room {
         embedded_datapackage: BTreeMap::new(),
     });
 
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     Room::new(data, Arc::new(names), options, 1_700_000_000.0)
 }
 

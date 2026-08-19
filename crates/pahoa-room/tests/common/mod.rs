@@ -4,11 +4,10 @@
 //! them needs reads as dead code in all the others.
 #![allow(dead_code)]
 
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_proto::types::Version;
 use pahoa_proto::{ClientPacket, client as cmd};
 use pahoa_room::{ConnId, Room, RoomOptions};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,8 +35,7 @@ pub fn load(name: &str) -> Option<Arc<MultiData>> {
 /// Build a room over a fixture, resolving names from the embedded package only
 /// (no snapshot — these tests do not exercise hint blacklists).
 pub fn room_for(data: Arc<MultiData>, options: RoomOptions) -> Room {
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     Room::new(data, Arc::new(names), options, 1_700_000_000.0)
 }
 

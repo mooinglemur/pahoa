@@ -2,15 +2,19 @@
 
 Changes pahoa needs so that **puna** — the Kubernetes room orchestrator and web app at
 `/home/troy/src/puna` — can provision, observe and manage pahoa rooms. Earlier revisions cited this
-tree by file and line; now that nothing is outstanding, the behavioral detail lives in pahoa's own
-`docs/` and in `NOTES-FOR-PUNA.md`, and this document points at them rather than restating them.
+tree by file and line; the behavioral detail now lives in pahoa's own `docs/` and in
+`NOTES-FOR-PUNA.md`, and this document points at them rather than restating them.
 
-Last updated 2026-08-18 against `481ddb8`, at the end of puna's M4 (artifact ingest and the gates).
+Last updated 2026-08-19 against `45a5cff`, during puna's M10 — **the first deployment to a real
+cluster**, which is where both open items came from. Neither was findable by review: one needed a
+room to actually start, the other needed one to actually fail.
 
-**Nothing is outstanding.** P1–P18 are all resolved — P18 by being declined, which was the right
-answer and the first of the three options this document ranked. This is now the record of what was
-asked and the standing list of what puna depends on, not a queue. `NOTES-FOR-PUNA.md` is the reply in
-the other direction and is the authority on what shipped and how; nothing in it is disputed here.
+**P1–P18 are all resolved**, P18 by being declined, which was the right answer and the first of the
+three options this document ranked. `NOTES-FOR-PUNA.md` is the reply in the other direction and is
+the authority on what shipped and how; nothing in it is disputed here.
+
+**Two items are open, both small.** P19 is a heads-up request following a decision already taken;
+P20 is a defect in the JSON log stream. Neither blocks puna.
 
 ---
 
@@ -152,6 +156,113 @@ rather than a special case.
 
 Puna's side is unchanged: every `slot_auth` transition was already a restart, and puna sets no
 `server_password`, so `!admin` is refused outright in a puna room regardless.
+
+---
+
+## P19 — the data package snapshot, and the one thing puna needs when it goes
+
+**Settled: pahoa will bake `hint_blacklist` into the binary and drop the external
+`datapackage.json`.** Recorded here because the investigation behind it is worth not repeating, and
+because the removal has one consequence for puna.
+
+### How it surfaced, and whose fault it was
+
+Puna's fault, stated first so the rest reads correctly. Puna passed
+`--snapshot=/shared/datapackage.json` on **every** room while **nothing in puna had ever written
+that file** — the path existed in three places in puna's tree with no producer anywhere. Every room
+in the environment crashlooped. Fixed puna-side: the flag is now emitted only when the file is
+actually present, checked per start.
+
+The pahoa-side observation is only this, and it is not a complaint: **`--snapshot` is optional to
+*pass* but not optional to *resolve*.** `snapshot: Option<&Path>` reads as "this may be omitted",
+which is true, and a caller can slide from there to "this may be absent", which is not. Refusing to
+start on a named-but-missing file is correct — silently ignoring it would be worse. Nothing to
+change; noted because it is the exact shape of the misreading.
+
+### What the investigation established
+
+Puna asked whether the snapshot was a real reference concept or a pahoa invention. It is real, and
+pahoa's own exporter header already said so more precisely than puna's plan did:
+
+- `World.hint_blacklist: ClassVar[FrozenSet[str]]` — `worlds/AutoWorld.py:312`, *"any names that
+  should not be hintable"*.
+- The reference server loads it from **installed worlds** at `MultiServer.py:344`
+  (`self.non_hintable_names[world_name] = world.hint_blacklist`) and enforces it in `!hint` at
+  `MultiServer.py:1715` and `:1734` — *`Sorry, "{hint_name}" is marked as non-hintable.`*
+- **It is never serialized into multidata by anything.** It is Python class data. The reference
+  server can read it only because it *is* an Archipelago install (`import worlds`).
+- In the whole reference tree exactly **two** worlds set one: `alttp` → `{"Triforce"}`, and `cvcotm`
+  → the Battle Arena reward. Both long-stable.
+
+So the concept must be kept in some form; a standalone Rust server that discarded it would let a
+player `!hint Triforce` in an ALttP room, which the reference refuses.
+
+### Why baking it in is the better of the two forms
+
+The external file has three states — present, absent, stale — and pahoa can only distinguish the
+first from the other two. Baked-in values cannot be missing, cannot be stale relative to the binary
+reading them, and cannot be forgotten by an operator. That last one is not hypothetical: it is how
+this was found.
+
+The trade, stated once: the blacklist now tracks the **pahoa build** rather than the apworld version
+that generated the seed, so a world *newly* adding a `hint_blacklist` needs a pahoa release to be
+honored. Against two stable worlds and an export step nobody performed, that is the cheaper failure.
+
+### The ask — one line, and it is about `SERVE_OPTS`
+
+**When `--snapshot` leaves `SERVE_OPTS`, say so in `NOTES-FOR-PUNA.md`.** Puna transcribes that table
+by hand into `PAHOA_SERVE_OPTS` (it cannot import it — the repositories deploy independently), and
+an option puna sends that pahoa no longer accepts is a hard `exit 1` on every room at once.
+
+The timing is comfortable and needs no coordination: puna's conditional means it emits no
+`--snapshot` today, so a pahoa build without the flag works against the **current** puna image
+unchanged. Ship whenever.
+
+The one trap worth both sides knowing: after the flag is gone, a stray `datapackage.json` placed on
+puna's shared volume would make puna emit `--snapshot` again — into a parser that now rejects it.
+That is this same failure in mirror image, and it looks like adding the right file. Puna will delete
+its snapshot machinery and the `/shared` mount in the same commit that re-transcribes `SERVE_OPTS`,
+which closes it.
+
+---
+
+## P20 — a fatal error escapes the JSON log stream
+
+**Open, small, and the one thing here that is pahoa's to fix.**
+
+Under `--log-format=json`, `report()` in `crates/pahoa/src/main.rs` prints with
+`eprintln!("pahoa: {e}")` (line 449) regardless of the configured format. So a room that dies after the
+subscriber is up emits a well-formed JSON banner and then a bare prose line:
+
+```
+{"timestamp":"...","level":"INFO","message":"Pahoa-0.1.0-45a5cffa starting","argv":"...",...}
+pahoa: /shared/datapackage.json: No such file or directory (os error 2)
+```
+
+Both lines are from the same process, after logging is fully initialized. The second is the only one
+that says why the room died.
+
+**Why this matters more than a formatting nit**, and all three are things puna is actively building
+on:
+
+1. **It breaks the property `--log-format=json` exists to provide.** Pahoa's own reasoning for the
+   flag is that a container merges stdout and stderr, so a prose line inside a JSON stream is one
+   unparseable entry per room forever. This is that line — and it is the fatal one.
+2. **A shipper configured to reject non-JSON drops exactly the diagnosis.** Puna's cluster checklist
+   asserts *every* stderr line parses as JSON, precisely so Loki can be configured that way. Under
+   that configuration the room's cause of death is the one thing not retained.
+3. **Puna's room log view renders fields, not prose.** A line with no `level`, no `message` and no
+   `timestamp` either disappears from the view or shows as an unattributed fragment, in the case
+   where an organizer most needs an answer.
+
+**Suggested shape, not a specification:** once the subscriber is live, route fatal errors through it
+— `tracing::error!` with the message as a field — and keep `eprintln!` only for failures that happen
+*before* logging is configured, where it is the sole option. A bad `--log-format` value legitimately
+cannot be reported as JSON; a file that failed to open ten lines later can. If that split is awkward,
+puna would rather have `eprintln!` retained everywhere and know it than have it fixed halfway, since
+"every line is JSON" is checkable and "most lines are JSON" is not.
+
+Not urgent: it costs diagnosability, not correctness, and puna reads pod logs directly today.
 
 ---
 

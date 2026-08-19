@@ -7,22 +7,13 @@
 //! package all at once, against an independent implementation.
 
 use pahoa_multidata::{MultiData, SlotType};
-use std::collections::BTreeMap;
 use std::path::Path;
 
-pub fn run(path: &Path, snapshot: Option<&Path>) -> Result<(), String> {
+pub fn run(path: &Path) -> Result<(), String> {
     let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let md = MultiData::parse(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
 
-    let snapshot_games = match snapshot {
-        Some(p) => {
-            let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
-            pahoa_multidata::DataPackage::load_snapshot(&text)
-                .map_err(|e| format!("{}: {e}", p.display()))?
-        }
-        None => BTreeMap::new(),
-    };
-    let (dp, report) = md.resolve_datapackage(&snapshot_games);
+    let (dp, report) = md.resolve_datapackage();
 
     println!("seed_name: {}", md.seed_name);
     println!("generator_version: {}", md.generator_version);
@@ -66,7 +57,6 @@ pub fn run(path: &Path, snapshot: Option<&Path>) -> Result<(), String> {
         "datapackage_from_multidata: {}",
         report.from_multidata.len()
     );
-    println!("datapackage_from_snapshot: {}", report.from_snapshot.len());
     println!("datapackage_unresolved: {}", report.unresolved.len());
 
     // Per-game detail, sorted, so a name-table regression shows up as a diff on

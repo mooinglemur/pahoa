@@ -1,26 +1,26 @@
-//! Item and location name tables, and the two places they come from.
+//! Item and location name tables, and where they come from.
 //!
 //! The server needs four pure-data maps per game, exactly the set
 //! `WebHostLib/customserver.py:277-303` hands to a room process: item and
 //! location name↔id, the name groups, and the hint blacklist. No world code
 //! runs to produce them.
 //!
-//! There are two sources, and neither suffices alone:
+//! **Three of the four come from the seed.** A freshly generated `.archipelago`
+//! embeds a full package for every game in it (`Main.py:315-320`), including the
+//! name groups, so a custom apworld this build has never heard of still resolves
+//! its own names.
 //!
-//! - **The multidata's embedded package.** A freshly generated `.archipelago`
-//!   embeds a full package for every game in the seed (`Main.py:315-320`), so
-//!   this covers custom apworlds the server has never heard of. But WebHost
-//!   *strips* it to `{version, checksum}` on upload (`WebHostLib/upload.py:56-78`),
-//!   old seeds may lack checksums, and the hint blacklist is never serialized
-//!   anywhere.
-//! - **An offline JSON snapshot**, exported from an Archipelago checkout by
-//!   `tools/export-datapackage.py`. This is the only source of `hint_blacklist`.
+//! **The fourth, `hint_blacklist`, is serialized nowhere** — it is Python class
+//! data the reference reads out of its installed worlds — so it is compiled into
+//! this binary instead. See [`crate::hint_blacklist`] for what that trades away.
 //!
-//! So: snapshot as the base layer, multidata overlaid on top, and the multidata
-//! wins — that is what lets a seed using a custom apworld work against a
-//! snapshot that predates it.
+//! The one case the seed cannot cover is a package WebHost has *stripped* to
+//! `{version, checksum}` on upload (`WebHostLib/upload.py:56-78`). That game is
+//! reported unresolved and its names degrade to `Unknown item (ID:n)`; the room
+//! still hosts, because refusing to start over cosmetic names would be worse
+//! than the names being ugly.
 
-use crate::error::{Error, Path, Result};
+use crate::error::{Path, Result};
 use crate::extract::Extract;
 use pahoa_pickle::PyObj;
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,8 @@ pub struct GamePackage {
     pub item_name_groups: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub location_name_groups: BTreeMap<String, Vec<String>>,
-    /// Never present in multidata; only ever from the snapshot.
+    /// Never present in multidata. Filled from [`crate::hint_blacklist`] during
+    /// the merge, and anything a seed happens to carry here is discarded.
     #[serde(default)]
     pub hint_blacklist: HashSet<String>,
 }
@@ -227,20 +228,18 @@ pub struct DataPackage {
     games: BTreeMap<String, GameNames>,
 }
 
-/// What the merge did, so operators can see whether a snapshot was actually
-/// needed and whether anything is missing.
+/// What the merge found, so an operator can see whether anything is missing.
+///
+/// There is no "missing hint blacklist" any more: the table is compiled in, so
+/// every game gets one, and a game absent from it gets an empty set rather than
+/// an unknown one — the same answer the reference gives a world that sets none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergeReport {
     /// Games taken from the multidata's embedded package.
     pub from_multidata: Vec<String>,
-    /// Games that fell back to the snapshot.
-    pub from_snapshot: Vec<String>,
-    /// Games with no usable package anywhere. Item and location names will
+    /// Games whose package was absent or stripped. Item and location names
     /// render as `Unknown item (ID:n)` for these.
     pub unresolved: Vec<String>,
-    /// Games resolved from the multidata but with no hint blacklist available,
-    /// because that field exists only in the snapshot.
-    pub missing_hint_blacklist: Vec<String>,
 }
 
 impl DataPackage {
@@ -269,13 +268,13 @@ impl DataPackage {
             .collect()
     }
 
-    /// Merge a snapshot with a multidata's embedded package.
+    /// Build the name tables for the games a seed actually uses.
     ///
-    /// `needed` is the set of games actually present in the seed; anything else
-    /// in the snapshot is dropped rather than carried around, which matters at
-    /// 2000 slots where the snapshot may describe hundreds of unused games.
+    /// `needed` is the set of games present in the seed. Everything comes from
+    /// the multidata's own embedded package except the hint blacklist, which is
+    /// serialized nowhere and comes from the table compiled into this binary —
+    /// see [`crate::hint_blacklist`].
     pub fn merge(
-        snapshot: &BTreeMap<String, GamePackage>,
         embedded: &BTreeMap<String, GamePackage>,
         needed: &HashSet<String>,
     ) -> (Self, MergeReport) {
@@ -283,32 +282,26 @@ impl DataPackage {
         let mut report = MergeReport::default();
 
         for game in needed {
-            let snap = snapshot.get(game);
-            let emb = embedded.get(game).filter(|p| !p.is_stub());
-
-            let merged = match (emb, snap) {
-                // Embedded wins: it is authoritative for this seed and covers
-                // custom apworlds the snapshot has never seen. The blacklist is
-                // the one field it can never supply, so graft it from the
-                // snapshot when available.
-                (Some(e), snap) => {
+            let mut merged = match embedded.get(game).filter(|p| !p.is_stub()) {
+                Some(e) => {
                     report.from_multidata.push(game.clone());
-                    let mut p = e.clone();
-                    match snap {
-                        Some(s) => p.hint_blacklist = s.hint_blacklist.clone(),
-                        None => report.missing_hint_blacklist.push(game.clone()),
-                    }
-                    p
+                    e.clone()
                 }
-                (None, Some(s)) => {
-                    report.from_snapshot.push(game.clone());
-                    s.clone()
-                }
-                (None, None) => {
+                // A seed whose package was stripped, which WebHost does on
+                // upload. Names degrade to "Unknown item (ID:n)" rather than
+                // the room refusing to start, and the caller says so.
+                None => {
                     report.unresolved.push(game.clone());
                     GamePackage::default()
                 }
             };
+            // Grafted for every game, resolved or not: a game with no entry
+            // gets an empty set, which is what the reference gives a world that
+            // sets no `hint_blacklist`.
+            merged.hint_blacklist = crate::hint_blacklist::for_game(game)
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
             games.insert(game.clone(), GameNames::new(merged));
         }
 
@@ -331,9 +324,7 @@ impl DataPackage {
         }
 
         report.from_multidata.sort();
-        report.from_snapshot.sort();
         report.unresolved.sort();
-        report.missing_hint_blacklist.sort();
         (Self { games }, report)
     }
 
@@ -347,16 +338,6 @@ impl DataPackage {
                 Ok((game, pkg))
             })
             .collect()
-    }
-
-    /// Load a snapshot produced by `tools/export-datapackage.py`.
-    pub fn load_snapshot(json: &str) -> Result<BTreeMap<String, GamePackage>> {
-        #[derive(Deserialize)]
-        struct Snapshot {
-            games: BTreeMap<String, GamePackage>,
-        }
-        let s: Snapshot = serde_json::from_str(json).map_err(|e| Error::Snapshot(e.to_string()))?;
-        Ok(s.games)
     }
 }
 
@@ -377,66 +358,80 @@ mod tests {
     }
 
     #[test]
-    fn multidata_wins_over_the_snapshot() {
-        // A custom apworld the snapshot describes differently (or staler).
-        let snapshot = BTreeMap::from([("G".into(), pkg(&[("Old", 1)], &[]))]);
+    fn the_embedded_package_is_the_source_of_names() {
         let embedded = BTreeMap::from([("G".into(), pkg(&[("New", 2)], &[]))]);
-        let (dp, report) = DataPackage::merge(&snapshot, &embedded, &needed(&["G"]));
+        let (dp, report) = DataPackage::merge(&embedded, &needed(&["G"]));
 
         assert_eq!(dp.get("G").unwrap().item_id("New"), Some(2));
-        assert_eq!(dp.get("G").unwrap().item_id("Old"), None);
         assert_eq!(report.from_multidata, ["G"]);
-        assert!(report.from_snapshot.is_empty());
+        assert!(report.unresolved.is_empty());
     }
 
+    /// The blacklist is serialized nowhere, so it has to come from the table
+    /// compiled in — and it has to reach a game whose names came from the seed.
     #[test]
-    fn hint_blacklist_is_grafted_from_the_snapshot_onto_embedded_data() {
-        // The blacklist exists nowhere in multidata, so an embedded package
-        // must still pick it up or `!hint` silently stops refusing names.
-        let snapshot = BTreeMap::from([("G".into(), pkg(&[("Old", 1)], &["Secret"]))]);
-        let embedded = BTreeMap::from([("G".into(), pkg(&[("New", 2)], &[]))]);
-        let (dp, report) = DataPackage::merge(&snapshot, &embedded, &needed(&["G"]));
+    fn the_built_in_hint_blacklist_is_grafted_onto_embedded_data() {
+        let embedded = BTreeMap::from([(
+            "A Link to the Past".into(),
+            pkg(&[("Triforce", 1), ("Bow", 2)], &[]),
+        )]);
+        let (dp, _) = DataPackage::merge(&embedded, &needed(&["A Link to the Past"]));
 
-        let g = dp.get("G").unwrap();
-        assert!(!g.is_hintable("Secret"));
-        assert!(g.is_hintable("New"));
-        assert!(report.missing_hint_blacklist.is_empty());
-    }
-
-    #[test]
-    fn reports_when_no_hint_blacklist_is_available() {
-        // Custom apworld, no snapshot entry: usable, but the blacklist is gone
-        // and an operator should be told rather than left guessing.
-        let (dp, report) = DataPackage::merge(
-            &BTreeMap::new(),
-            &BTreeMap::from([("Custom".into(), pkg(&[("A", 1)], &[]))]),
-            &needed(&["Custom"]),
+        let g = dp.get("A Link to the Past").unwrap();
+        assert!(
+            !g.is_hintable("Triforce"),
+            "the built-in entry was not applied"
         );
-        assert_eq!(dp.get("Custom").unwrap().item_id("A"), Some(1));
-        assert_eq!(report.missing_hint_blacklist, ["Custom"]);
+        assert!(g.is_hintable("Bow"));
     }
 
+    /// A package carrying its own `hint_blacklist` must not override the built-in
+    /// one: multidata never contains this field, so anything that appears there
+    /// is noise rather than data.
     #[test]
-    fn webhost_stripped_stubs_fall_back_to_the_snapshot() {
-        // Upload replaces the package with {version, checksum}; treating that
-        // as authoritative would erase every name in the game.
+    fn an_embedded_blacklist_does_not_displace_the_built_in_one() {
+        let embedded = BTreeMap::from([(
+            "A Link to the Past".into(),
+            pkg(&[("Triforce", 1), ("Bow", 2)], &["Bow"]),
+        )]);
+        let (dp, _) = DataPackage::merge(&embedded, &needed(&["A Link to the Past"]));
+
+        let g = dp.get("A Link to the Past").unwrap();
+        assert!(!g.is_hintable("Triforce"));
+        assert!(g.is_hintable("Bow"), "a seed dictated the blacklist");
+    }
+
+    /// Absence means "hints everything", which is what the reference gives a
+    /// world that sets no `hint_blacklist` — not an error and not a warning.
+    #[test]
+    fn a_game_with_no_built_in_entry_hints_everything() {
+        let embedded = BTreeMap::from([("Balatro".into(), pkg(&[("Joker", 1)], &[]))]);
+        let (dp, report) = DataPackage::merge(&embedded, &needed(&["Balatro"]));
+
+        assert!(dp.get("Balatro").unwrap().is_hintable("Joker"));
+        assert!(report.unresolved.is_empty());
+    }
+
+    /// Upload replaces the package with {version, checksum}. With no snapshot to
+    /// fall back to, the game is unresolved and names degrade — the room still
+    /// hosts, and the caller is told.
+    #[test]
+    fn a_webhost_stripped_stub_is_reported_as_unresolved() {
         let stub = GamePackage {
             checksum: Some("abc".into()),
             ..Default::default()
         };
-        let snapshot = BTreeMap::from([("G".into(), pkg(&[("Real", 7)], &[]))]);
         let embedded = BTreeMap::from([("G".into(), stub)]);
-        let (dp, report) = DataPackage::merge(&snapshot, &embedded, &needed(&["G"]));
+        let (dp, report) = DataPackage::merge(&embedded, &needed(&["G"]));
 
-        assert_eq!(dp.get("G").unwrap().item_id("Real"), Some(7));
-        assert_eq!(report.from_snapshot, ["G"]);
+        assert_eq!(report.unresolved, ["G"]);
+        assert_eq!(dp.get("G").unwrap().item_name(42), "Unknown item (ID:42)");
     }
 
     #[test]
     fn unresolved_games_still_load_with_unknown_name_fallbacks() {
         // A missing package must degrade, not fail: the room still hosts.
-        let (dp, report) =
-            DataPackage::merge(&BTreeMap::new(), &BTreeMap::new(), &needed(&["Mystery"]));
+        let (dp, report) = DataPackage::merge(&BTreeMap::new(), &needed(&["Mystery"]));
         assert_eq!(report.unresolved, ["Mystery"]);
         assert_eq!(
             dp.get("Mystery").unwrap().item_name(42),
@@ -449,12 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn drops_snapshot_games_the_seed_does_not_use() {
-        let snapshot = BTreeMap::from([
+    fn drops_embedded_games_the_seed_does_not_use() {
+        let embedded = BTreeMap::from([
             ("Used".into(), pkg(&[("A", 1)], &[])),
             ("Unused".into(), pkg(&[("B", 2)], &[])),
         ]);
-        let (dp, _) = DataPackage::merge(&snapshot, &BTreeMap::new(), &needed(&["Used"]));
+        let (dp, _) = DataPackage::merge(&embedded, &needed(&["Used"]));
         assert_eq!(dp.len(), 1);
         assert!(dp.get("Unused").is_none());
     }
@@ -467,7 +462,7 @@ mod tests {
         };
         let without = pkg(&[("B", 2)], &[]);
         let embedded = BTreeMap::from([("W".into(), with), ("N".into(), without)]);
-        let (dp, _) = DataPackage::merge(&BTreeMap::new(), &embedded, &needed(&["W", "N"]));
+        let (dp, _) = DataPackage::merge(&embedded, &needed(&["W", "N"]));
 
         let sums = dp.checksums();
         assert_eq!(sums.get("W"), Some(&"aaa"));
@@ -475,25 +470,9 @@ mod tests {
     }
 
     #[test]
-    fn loads_a_snapshot_from_json() {
-        let json = r#"{"games":{"G":{
-            "item_name_to_id":{"Sword":1},
-            "location_name_to_id":{"Chest":10},
-            "checksum":"deadbeef",
-            "hint_blacklist":["Sword"]
-        }}}"#;
-        let snap = DataPackage::load_snapshot(json).unwrap();
-        let g = &snap["G"];
-        assert_eq!(g.item_name_to_id["Sword"], 1);
-        assert_eq!(g.checksum.as_deref(), Some("deadbeef"));
-        assert!(g.hint_blacklist.contains("Sword"));
-    }
-
-    #[test]
     fn resolves_names_in_both_directions() {
         let (dp, _) = DataPackage::merge(
             &BTreeMap::from([("G".into(), pkg(&[("Sword", 5)], &[]))]),
-            &BTreeMap::new(),
             &needed(&["G"]),
         );
         let g = dp.get("G").unwrap();

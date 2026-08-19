@@ -26,11 +26,10 @@
 //!    demanding a full resync. This is the phase that most resembles a restart
 //!    in production.
 
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::ws::client::Client;
 use pahoa_net::{NetConfig, Server};
 use pahoa_room::{Room, RoomOptions};
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -68,8 +67,7 @@ async fn main() -> Result<(), Fallible> {
         return Err("fixture has no player slots".into());
     }
 
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     // `Enabled` so every slot can release its own world on request, which is
     // how the cascade below is driven. The default `Auto` would refuse.
     let room = Room::new(

@@ -186,8 +186,10 @@ than passing silently when they are absent.
 
 ## Not yet run
 
-- **`export-datapackage.py`** has been written and reviewed but never executed —
-  it needs the full Archipelago import, which pulls in the world system. It is
-  the only source of `hint_blacklist`, which exists in no multidata, so `!hint`
-  cannot refuse non-hintable names without it. `pahoa serve` warns at startup
-  when a snapshot is missing. Worth running before hints ship.
+- **`export-datapackage.py`** regenerates pahoa's built-in `hint_blacklist`
+  table from an Archipelago checkout. It needs one whose apworlds can *all*
+  import, which a bare venv is not: 33 of them fail on missing dependencies
+  here. Since its output deletes entries, it refuses to run rather than emit a
+  silently short table. The current entries were established by reading the
+  source instead — `grep -rn hint_blacklist worlds/` finds every one, since it
+  is always a class-level assignment.

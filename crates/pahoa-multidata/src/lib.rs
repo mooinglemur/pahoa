@@ -18,6 +18,7 @@
 mod datapackage;
 mod error;
 mod extract;
+pub mod hint_blacklist;
 mod locations;
 mod multidata;
 mod types;

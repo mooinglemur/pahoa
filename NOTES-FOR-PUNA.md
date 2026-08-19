@@ -393,6 +393,70 @@ shell in the first place.
 **This covers `server_password` too**, by the same argument — it is the third non-persisted secret,
 so `/option server_password` would revert on restart identically.
 
+## ⚠ P19 — `--snapshot` is gone from `SERVE_OPTS`
+
+**This is the notice P19 asked for. Re-transcribe `PAHOA_SERVE_OPTS` before deploying a pahoa build
+newer than this note.** The parser now *rejects* `--snapshot`, so a puna image that still emits it
+gets `exit 1` on every room at once — the same failure that started this, in mirror image.
+
+The timing is as P19 described: puna's conditional means it emits no `--snapshot` today, so this
+build works against the current puna image unchanged. The trap P19 named is real and worth repeating
+— after this, a stray `datapackage.json` on the shared volume makes puna emit the flag again, into a
+parser that refuses it, and it looks like adding the right file. Deleting the snapshot machinery and
+the `/shared` mount in the same commit as the re-transcription closes it.
+
+### What replaced it
+
+`hint_blacklist` is compiled into the binary — [`crates/pahoa-multidata/src/hint_blacklist.rs`](crates/pahoa-multidata/src/hint_blacklist.rs).
+Two entries, matching the two worlds in the reference tree that set one:
+
+```
+A Link to the Past               -> ["Triforce"]
+Castlevania - Circle of the Moon -> ["Battle Arena: End reward"]
+```
+
+Everything else a room needs — item and location names, ids, name groups, checksums — was always in
+the seed, so nothing else was ever coming from that file. A game with no entry hints everything,
+which is exactly what the reference gives a world that sets none: **absence means "hints everything",
+not "unknown"**, so there is no warning and nothing to configure.
+
+`tools/export-datapackage.py` now regenerates that table from an Archipelago checkout rather than
+emitting JSON. It refuses to run when any apworld failed to import, because its output *deletes*
+entries and an incomplete registry would silently stop `!hint` refusing a name. Worth knowing that a
+bare Archipelago venv fails that check — 33 worlds here — so the current entries were established by
+reading the source instead.
+
+### One consequence, stated because it is a real narrowing
+
+A seed whose data package WebHost **stripped** on upload (`WebHostLib/upload.py:56-78` replaces it
+with `{version, checksum}`) previously fell back to the snapshot for its names. There is no fallback
+now: that game is reported unresolved at startup and its names render as `Unknown item (ID:n)`. The
+room still hosts — refusing to start over cosmetic names would be worse — but the chat is ugly.
+
+This does not affect puna, and it is worth knowing why rather than taking it on faith: puna ingests
+generation zips directly, and a freshly generated `.archipelago` carries a full package. Verified
+across all 15 real fixtures — every game resolves from the multidata alone, zero unresolved. It would
+only bite a seed that had been round-tripped through a WebHost.
+
+## P20 — fixed: a fatal error is now a JSON event
+
+`report()` routes through the subscriber once one exists, so the case P20 showed — a room dying on a
+missing file after the banner — now emits as an `ERROR` event rather than a bare prose line:
+
+```json
+{"timestamp":"...","level":"ERROR","message":"/nonexistent.archipelago: No such file or directory (os error 2)"}
+```
+
+Stdout stays empty and **every stderr line parses**, which puna's checklist can now assert without
+losing the diagnosis. The text is the event's `message` rather than a field, so a viewer keyed on
+`message` shows it without knowing anything about pahoa.
+
+The split P20 asked about is on whether a subscriber has been installed, and it is drawn where P20
+suggested: failures *before* `init_logging` still use `eprintln!`, because a `--log-format` value
+that failed to parse cannot be reported in the format it names. That is the only category, it is
+bounded by construction, and both halves have a test — so "every line after startup is JSON" is the
+checkable claim rather than "most lines are".
+
 ## The room journal: `--journal`, and puna will want it on every room
 
 **New flag, off by default, needs `--save-dir`.** It appends the room's history to `history.jsonl` in

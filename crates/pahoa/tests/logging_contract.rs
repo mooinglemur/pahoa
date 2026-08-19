@@ -214,6 +214,68 @@ fn text_keeps_the_startup_line_on_stdout_and_does_not_double_announce() {
     );
 }
 
+/// A room that dies must say why *inside* the JSON stream.
+///
+/// The fatal line is the worst one to lose: a shipper configured to reject
+/// non-JSON would drop precisely the cause of death, and a log view that renders
+/// fields would show a bare `eprintln!` as an unattributed fragment or not at
+/// all. This is the case that motivated `--log-format json` in the first place,
+/// arriving as its own exception.
+#[test]
+fn a_fatal_error_after_logging_starts_is_a_json_event() {
+    let child = Command::new(env!("CARGO_BIN_EXE_pahoa"))
+        .args(["serve", "/nonexistent.archipelago", "--log-format", "json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary should start");
+    let output = child.wait_with_output().expect("it should exit");
+
+    assert!(!output.status.success(), "a missing seed should be fatal");
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay silent under json: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let events = events(&stderr);
+    let fatal: Vec<&serde_json::Value> = events.iter().filter(|e| e["level"] == "ERROR").collect();
+    assert_eq!(fatal.len(), 1, "expected one ERROR event: {stderr}");
+    assert!(
+        fatal[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("nonexistent.archipelago")),
+        "the error does not say what failed: {}",
+        fatal[0]
+    );
+}
+
+/// The other side of that split, which has to stay `eprintln!`.
+///
+/// A `--log-format` that failed to parse cannot be reported in the format it
+/// names, so this one legitimately escapes — and being explicit about *which*
+/// failures do is what makes "every line after startup is JSON" a checkable
+/// claim rather than an approximate one.
+#[test]
+fn a_failure_before_logging_starts_still_prints_plainly() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pahoa"))
+        .args([
+            "serve",
+            "/nonexistent.archipelago",
+            "--log-format",
+            "nonsense",
+        ])
+        .output()
+        .expect("the binary should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("pahoa: --log-format"), "{stderr}");
+    // And nothing was logged, because there was no subscriber to log through.
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+}
+
 /// A password must not reach the log through the banner's `argv` field.
 #[test]
 fn the_banner_does_not_leak_a_password_from_the_command_line() {

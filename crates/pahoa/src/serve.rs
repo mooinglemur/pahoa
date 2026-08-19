@@ -1,12 +1,11 @@
 //! `pahoa serve` — host a multiworld.
 
-use pahoa_multidata::{DataPackage, GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::actor::SaveConfig;
 use pahoa_net::{NetConfig, SaveStore, Server, build_runtime};
 use pahoa_pickle::PyObj;
 use pahoa_proto::Permission;
 use pahoa_room::{Room, RoomOptions, Snapshot};
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +13,6 @@ use tracing::level_filters::LevelFilter;
 
 pub struct ServeArgs<'a> {
     pub multidata: &'a Path,
-    pub snapshot: Option<&'a Path>,
     pub port: u16,
     pub bind: String,
     /// Where the room persists itself. `None` runs without saving at all, which
@@ -65,15 +63,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     let data =
         Arc::new(MultiData::parse(&raw).map_err(|e| format!("{}: {e}", args.multidata.display()))?);
 
-    let snapshot: BTreeMap<String, GamePackage> = match args.snapshot {
-        Some(p) => {
-            let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
-            DataPackage::load_snapshot(&text).map_err(|e| format!("{}: {e}", p.display()))?
-        }
-        None => BTreeMap::new(),
-    };
-
-    let (names, report) = data.resolve_datapackage(&snapshot);
+    let (names, report) = data.resolve_datapackage();
     if !report.unresolved.is_empty() {
         // Not fatal — names degrade to "Unknown item (ID:n)" — but an operator
         // should be told rather than left to notice in chat.
@@ -81,13 +71,6 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             games = report.unresolved.len(),
             "no data package for {}",
             report.unresolved.join(", ")
-        );
-    }
-    if !report.missing_hint_blacklist.is_empty() {
-        tracing::warn!(
-            games = report.missing_hint_blacklist.len(),
-            "no hint blacklist; !hint will not refuse non-hintable names for \
-             them (export one with tools/export-datapackage.py)"
         );
     }
 

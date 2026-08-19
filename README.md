@@ -34,7 +34,6 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--bind <addr>` | `0.0.0.0` | Listen address |
 | `--port <n>` | `38281` | Listen port |
 | `--filtered-port <n>` | — | A second port serving the scoped feed |
-| `--snapshot <file.json>` | — | Data package snapshot, from `tools/export-datapackage.py` |
 | `--save-dir <dir>` | — | Where the room persists itself |
 | `--save-interval <secs>` | `60` | Save cadence |
 | `--journal` | off | Append the room's history to `history.jsonl` beside the save |
@@ -171,11 +170,18 @@ With `--log-format json` the split is unnecessary and stdout stays silent; see
 A room stops cleanly on SIGINT or SIGTERM alike, so a container teardown gets
 the same final save that Ctrl-C does.
 
-Without `--snapshot`, games resolve from the seed's own embedded data package.
-That covers item and location names and ids for every game in the seed, so a
-room runs fine on it; what it never carries is each world's hint blacklist, so
-`!hint` cannot refuse a non-hintable name. The server warns at startup for the
-games affected.
+Item and location names, ids and name groups come from the seed's own embedded
+data package, so a custom apworld this build has never heard of still resolves
+its own names. The one thing Archipelago serializes nowhere is each world's
+`hint_blacklist`, so **that table is compiled into pahoa** and regenerated from a
+checkout by `tools/export-datapackage.py`. A game absent from it hints
+everything, which is what the reference gives a world that sets none.
+
+The trade is that the blacklist tracks the pahoa build rather than the apworld
+that generated the seed, so a world newly adding one needs a pahoa release to be
+honored. Two worlds set one today and both have for years. A seed whose package
+WebHost stripped on upload is reported at startup and its names degrade to
+`Unknown item (ID:n)`; the room still hosts.
 
 The outbound budget defaults to 288 KiB per slot — three connections each, since
 players commonly run a game client, a text client and a tracker — with a 64 MiB
@@ -384,7 +390,7 @@ warns about anything it recognized but could not use.
 ### Inspecting
 
 ```sh
-pahoa inspect seed.archipelago [--snapshot <datapackage.json>]
+pahoa inspect seed.archipelago
 ```
 
 Slot, game, location and hint counts, plus what the data package resolved to.

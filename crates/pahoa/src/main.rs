@@ -28,8 +28,7 @@ pahoa — Archipelago multiworld server
 USAGE:
     pahoa serve <file.archipelago> [options]
                                      Host a multiworld
-    pahoa inspect <file.archipelago> [--snapshot <datapackage.json>]
-                                     Summarize a multidata file
+    pahoa inspect <file.archipelago> Summarize a multidata file
     pahoa selftest                   Verify the build against known-answer tests
     pahoa --version
 
@@ -40,7 +39,6 @@ SERVE OPTIONS
                              connecting here receives only what concerns its own
                              slot. Needs no client support — the port is the
                              interface.
-    --snapshot <file.json>   Data package snapshot, from export-datapackage.py
     --save-dir <dir>         Where the room persists itself
     --save-interval <secs>   Save cadence (default 60)
     --journal                Append the room's history to history.jsonl in the
@@ -93,9 +91,9 @@ ROOM OPTIONS
 The reference server's underscored spellings (--hint_cost, --release_mode,
 --disable_item_cheat, --host, …) are accepted as aliases.
 
-The data package snapshot is produced by tools/export-datapackage.py. Without
-it, games are resolved from the seed's embedded package alone, which covers
-names and ids but never hint blacklists.
+Names and ids come from the seed's own embedded data package. The hint
+blacklist is compiled into this binary, since Archipelago serializes it nowhere;
+tools/export-datapackage.py regenerates that table from a checkout.
 
 --save-dir is an ordinary directory; one room per directory, claimed with an
 exclusive lock for as long as the process runs. Without it the room keeps
@@ -107,7 +105,6 @@ const SERVE_OPTS: &[Opt] = &[
     flag("--help", &["-h"]),
     value("--bind", &["--host"]),
     value("--port", &[]),
-    value("--snapshot", &[]),
     value("--save-dir", &[]),
     value("--save-interval", &[]),
     value("--outbound-budget", &[]),
@@ -132,7 +129,7 @@ const SERVE_OPTS: &[Opt] = &[
     flag("--use-embedded-options", &["--use_embedded_options"]),
 ];
 
-const INSPECT_OPTS: &[Opt] = &[flag("--help", &["-h"]), value("--snapshot", &[])];
+const INSPECT_OPTS: &[Opt] = &[flag("--help", &["-h"])];
 
 /// `!release` and `!collect` test their mode with `"enabled" in mode`, so every
 /// spelling means something for them. `!remaining` and `!countdown` compare for
@@ -359,7 +356,6 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
 
     serve::run(serve::ServeArgs {
         multidata: Path::new(multidata),
-        snapshot: args.get("--snapshot").map(Path::new),
         outbound_budget_bytes,
         log_level,
         log_format,
@@ -387,7 +383,7 @@ fn inspect_command(argv: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let path = one_path(&args, "inspect")?;
-    inspect::run(Path::new(path), args.get("--snapshot").map(Path::new))
+    inspect::run(Path::new(path))
 }
 
 /// Exactly one multidata path.
@@ -442,11 +438,29 @@ fn log_level(text: &str) -> Result<LevelFilter, String> {
         })
 }
 
+/// Print why we are exiting, through the log if there is one.
+///
+/// The split is on whether a subscriber has been installed, and it is exactly
+/// the right question. Before `init_logging` there is nowhere for an event to
+/// go — a bad `--log-format` value genuinely cannot be reported as JSON, since
+/// the format is what failed to parse — and after it, `eprintln!` would put a
+/// bare prose line into the stream `--log-format json` exists to keep
+/// machine-readable. That line is the *fatal* one, so it is the worst possible
+/// one to lose: a shipper configured to reject non-JSON would drop precisely
+/// the room's cause of death, and a log view that renders fields would show it
+/// as an unattributed fragment or not at all.
+///
+/// The text goes in the event's message rather than a field, so that a viewer
+/// keyed on `message` shows it without knowing anything about pahoa.
 fn report(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("pahoa: {e}");
+            if tracing::dispatcher::has_been_set() {
+                tracing::error!("{e}");
+            } else {
+                eprintln!("pahoa: {e}");
+            }
             ExitCode::FAILURE
         }
     }

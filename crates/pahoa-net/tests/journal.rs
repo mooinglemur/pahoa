@@ -1,9 +1,8 @@
 //! The journal writer: what reaches the file, and what happens when it cannot.
 
-use pahoa_multidata::{GamePackage, MultiData};
+use pahoa_multidata::MultiData;
 use pahoa_net::journal::{FILE_NAME, Journal};
 use pahoa_room::CheckRecord;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,8 +20,7 @@ fn seed() -> Option<(Arc<MultiData>, Arc<pahoa_multidata::DataPackage>)> {
         });
     let raw = std::fs::read(dir.join(FIXTURE)).ok()?;
     let data = Arc::new(MultiData::parse(&raw).expect("fixture parses"));
-    let snapshot: BTreeMap<String, GamePackage> = BTreeMap::new();
-    let (names, _) = data.resolve_datapackage(&snapshot);
+    let (names, _) = data.resolve_datapackage();
     Some((data, Arc::new(names)))
 }
 

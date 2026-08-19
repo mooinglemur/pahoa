@@ -137,7 +137,7 @@ mod tests {
             ),
         ]);
         let needed = embedded.keys().cloned().collect();
-        NameTables::merge(&BTreeMap::new(), &embedded, &needed).0
+        NameTables::merge(&embedded, &needed).0
     }
 
     /// The assembled path must produce exactly what the typed path would, or
