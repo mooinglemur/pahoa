@@ -22,7 +22,7 @@ mod tracker;
 
 pub use admin::Admin;
 pub use response::Response;
-pub use status::{SlotStatus, Status};
+pub use status::{Options, SlotStatus, Status};
 
 use crate::actor::ActorMsg;
 use std::sync::{Arc, Mutex};

@@ -370,3 +370,121 @@ preferred one — which matches what puna already built for its own reasons.
 
 `race_mode` remains parsed and unused by this decision. If a race wants something stronger than the
 gate — a reduced document, say — that is a separate question and pahoa has the flag it would need.
+
+## Round three: P18 is declined — there will be no live password setter
+
+**Position 1.** Pahoa will not implement `/option password` or any equivalent, and this is settled
+rather than deferred. Nothing is needed from puna: no `PAHOA_MANAGED_BY`, no identity signal of any
+kind. The analysis that framed the question was right and the answer falls out of it.
+
+The reason is simpler than the orchestrated/hand-run distinction the question turned on. That
+distinction is real but it is not the deciding one — **a live password change is wrong in every
+deployment, not just under an orchestrator.** Pahoa persists no password, so the setter would revert
+at the next restart whoever ran it. Under puna it also disagrees with the console in the meantime;
+hand-run it merely reverts silently. Those are two severities of the same defect, and a command whose
+best case is "correct until something restarts" is not one worth shipping. So there was never a
+signal to look for, which is why the `password_from_env` dead end could not be worked around.
+
+Rotation belongs to whatever owns the configuration. Under puna that is the Secret and a room
+restart, which puna already does for every `slot_auth` transition anyway. Standalone, it is the
+operator restarting the process — which is a fair thing to ask of someone who started it from a
+shell in the first place.
+
+**This covers `server_password` too**, by the same argument — it is the third non-persisted secret,
+so `/option server_password` would revert on restart identically.
+
+## Round three: `!admin` is implemented, and the rule that shaped it
+
+The exclusion above is narrower than "no live setters", and the rule behind it is worth puna having
+because it predicts what pahoa will and will not gain: **a setter is honest exactly where the save is
+authoritative.** The gameplay options are — `save::encode_options` persists every one of them and
+`Room::restore` takes them from the snapshot — so setting them live is truthful and they now have a
+setter. The passwords are not, deliberately, which is the whole of why they do not. Two conclusions
+from one rule rather than a special case, and it is recorded on `cmd_admin` in
+[`room/commands.rs`](crates/pahoa-room/src/room/commands.rs) and in
+[`room/server_commands.rs`](crates/pahoa-room/src/room/server_commands.rs), at the point someone would
+add the thing it forbids.
+
+### What shipped
+
+`!admin login <server_password>` opens a session; `!admin logout` or a disconnect ends it; one
+administrator at a time, replacing rather than accumulating, as the reference does. Then:
+
+- **`/option <name> <value>`** — `hint_cost`, `location_check_points`, `release_mode`,
+  `collect_mode`, `remaining_mode`, `countdown_mode`, `item_cheat`, `compatibility`. Persisted at the
+  next save; survives restart.
+- **`/options`** — the current values.
+- **`/help`**.
+- **Anything not starting with `/`** is announced to the room as `[Server]: …`, which is how an
+  organizer says something that does not read as coming from their own slot.
+
+`/option password` and `/option server_password` are refused **by name**, with a message saying they
+would revert at the next restart and to set them where the room is configured — not reported as
+unknown options, because they are recognized and declined and those are different facts.
+
+Deliberately **not** implemented: `/release`, `/collect`, `/send`, `/kick`. They exist on the admin
+API, which authenticates with a bearer token over TLS rather than a password typed into chat, and
+does not put the operation in the room's chat log. `/help` says so, so an administrator who reaches
+for one learns where it went instead of concluding the shell is broken.
+
+### Two things puna should act on
+
+**1. On gameplay options the room is the source of truth, not puna.** This is the opposite of the
+password contract. Whatever puna passes as flags is an *initial* value; after the first save the
+room's own copy wins, including any live `/option` an organizer ran. A room up for a week may
+legitimately disagree with its own manifest, and that is correct rather than drift. This was already
+true before `!admin`, purely from the restore path — `!admin` only makes it reachable.
+
+The concrete case to expect: an organizer runs `!admin /option hint_cost 15`, puna later redeploys
+that room for an unrelated reason with `--hint-cost 10` still in the pod spec, and the room comes up
+at 15. **That is correct** — the alternative silently discards what the organizer did — but it used
+to happen with no trace at all, which is the same silence that hid the password-persistence bug for
+as long as it did. It is now a startup `WARN` naming the flag, both values, and which won:
+
+```
+WARN pahoa::serve: --hint-cost asked for 99, but the restored save says 15 and wins; room options
+live in the save once one exists, and are changed with !admin /option or by starting from an empty
+--save-dir
+```
+
+Only flags actually passed are compared, so a room puna starts without option flags stays quiet.
+Worth surfacing in puna's room log view rather than filtering out: it is the one signal that a
+manifest and a running room have diverged, and it is the answer to "I changed the setting and
+nothing happened."
+
+**2. `/admin/v1/status` now has an `options` block, and that is what to render.**
+
+```json
+"options": {
+  "hint_cost": 10, "location_check_points": 1,
+  "release_mode": "auto", "collect_mode": "auto",
+  "remaining_mode": "goal", "countdown_mode": "enabled",
+  "item_cheat": true, "compatibility": 2
+}
+```
+
+Modes are the word rather than the bitmask, since this document is read by people as well as by
+puna. The three passwords are absent by design; `/api/v1/room`'s `password_required` already answers
+what a status reader legitimately needs without disclosing a secret.
+
+Before this there was no way to read a room's effective `hint_cost` without speaking the game
+protocol, so anything rendering it from puna's own configuration was showing a value that might be
+false. Clients were never affected — `RoomInfo` has always carried these at connect, and `/option`
+now pushes `RoomUpdate` deltas exactly as the reference does: one room-wide broadcast for the
+permission modes, and a **per-slot** update carrying recomputed `hint_points` for `hint_cost` and
+`location_check_points`, because hint cost is a percentage of a slot's own location count and one
+shared number would be wrong for every slot but one.
+
+**`POST /admin/v1/slots/<n>/password` is unaffected and stays live**, exactly as the question asked.
+The line is the one puna drew: the room-wide password and the per-slot *mode* are configuration and
+move at restart; individual per-slot values are operational and move immediately.
+
+That endpoint stays an *HTTP* one, though, and the distinction is worth keeping if `!admin` is ever
+built out. It is bearer-authenticated over TLS to a single caller. Reaching the same mutation through
+`!admin` would put a password in a chat command — echoed to the room, masked but present in the
+sender's own client, and through the room's inbound path. Same operation, materially worse credential
+handling, so "the per-slot setter stays live" means over HTTP and not over any channel that asks.
+
+One consequence for puna's console: pahoa now has no path at all by which a room-wide password
+changes while the room is up. If the console offers such a control it must be a puna-side edit plus a
+restart, never a call into pahoa, because there is no endpoint to call and there will not be one.

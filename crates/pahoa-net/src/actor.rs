@@ -423,6 +423,16 @@ pub async fn run_with_saves(
                     save_dirty: saver.dirty,
                     save_interval: saver.config.interval,
                     saving: saver.config.store.is_some(),
+                    options: crate::http::Options {
+                        hint_cost: room.options.hint_cost,
+                        location_check_points: room.options.location_check_points,
+                        release_mode: room.options.release_mode.as_text(),
+                        collect_mode: room.options.collect_mode.as_text(),
+                        remaining_mode: room.options.remaining_mode.as_text(),
+                        countdown_mode: room.options.countdown_mode.as_text(),
+                        item_cheat: room.options.item_cheat,
+                        compatibility: room.options.compatibility,
+                    },
                     // The roster question, so spectators are included: an
                     // organizer needs to see a connected spectator.
                     slots: room

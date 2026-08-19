@@ -182,7 +182,7 @@ these are `https://`; without it, `http://`.
 | `GET /api/v1/room` | none | What a room page shows. No secrets |
 | `GET /api/tracker` | see below | The reference WebHost's tracker document |
 | `GET /api/static_tracker` | see below | The half that only changes with the seed |
-| `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress |
+| `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress, the room's effective options |
 | `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
 | `POST /admin/v1/command` | bearer | The typed command set below |
 | `POST /admin/v1/slots/<n>/password` | bearer | Rotate one slot's password, live |
@@ -259,6 +259,29 @@ someone who cannot is the point. `hint` is the exception with two behaviors —
 points exactly as `!hint` would. `kick` disconnects every connection a slot has
 and is not a ban; nothing stops an immediate reconnect.
 
+### Changing the rules on a live room
+
+`!admin login <server-password>` from any connected client opens a remote
+administration session, and `!admin /option <name> <value>` sets any of the room
+options below except the passwords. The change is announced to the connected
+clients that need it — a `RoomUpdate` carrying the permission map, or one per
+slot carrying its recomputed hint points — and it **persists**, because the save
+is authoritative for these fields and a restart restores them over whatever flag
+the room was started with.
+
+The passwords are refused, and the same fact is why: the save deliberately
+carries no secret, so a live change to one would silently revert at the next
+restart. Rotation belongs to whatever configures the room. The one exception is
+`POST /admin/v1/slots/<n>/password`, which is per-slot and stays live —
+[docs/slots.md](docs/slots.md) covers the difference.
+
+The consequence is that **once a save exists, these flags no longer decide
+anything.** Starting a room with `--hint-cost 10` against a save that says `15`
+gets you `15`, which is what makes a live change worth making. Since that would
+otherwise be a flag silently doing nothing, a startup `WARN` names any option
+flag the save overruled and both values. To actually change one, use `!admin
+/option` or start from an empty `--save-dir`.
+
 ### Room options
 
 | option | default | |
@@ -310,8 +333,10 @@ Deliberately absent so far, and reachable from no flag:
 - **The PROXY protocol.** With TLS terminated here there is less call for it,
   but a room behind a load balancer still sees the balancer's address rather
   than the client's.
-- **The `/` console command set**, and therefore what `!admin` dispatches into.
-  It overlaps the admin REST API heavily and is worth writing once, with it.
+- **Most of the `/` console command set.** `!admin` dispatches into `/option`,
+  `/options` and `/help`; the commands that act on a player — `/release`,
+  `/collect`, `/send`, `/kick` — are on the admin REST API instead, which
+  authenticates with a bearer token rather than a password typed into chat.
 - The lobby integration.
 - `--auto_shutdown` and `--disable_save`, which the reference has. Both are
   covered by omitting `--save-dir`. Its `--loglevel` is spelled `--log-level`

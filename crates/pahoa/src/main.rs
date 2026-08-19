@@ -229,6 +229,28 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         options.compatibility = v as u8;
     }
 
+    // Which of those were actually asked for. A save restores all of them and
+    // wins, so `serve::run` needs to know which ones the operator will be
+    // surprised to see overruled — a flag left off cannot be overruled, since
+    // its value is the default the save is replacing anyway.
+    //
+    // Both halves of the test are needed: `is_set` only knows about bare flags,
+    // so it answers `false` for every `--option value` pair, and `get` only
+    // knows about pairs.
+    let explicit_options: Vec<&'static str> = [
+        "--hint-cost",
+        "--location-check-points",
+        "--release-mode",
+        "--collect-mode",
+        "--remaining-mode",
+        "--countdown-mode",
+        "--no-item-cheat",
+        "--compatibility",
+    ]
+    .into_iter()
+    .filter(|flag| args.get(flag).is_some() || args.is_set(flag))
+    .collect();
+
     let save_interval = match args.number::<u64>("--save-interval")? {
         // Zero would spin the actor on a timer that fires continuously, so it
         // is an error rather than a clever way to ask for constant saving.
@@ -289,6 +311,7 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         save_dir: args.get("--save-dir").map(Path::new),
         save_interval,
         options,
+        explicit_options,
         use_embedded_options: args.is_set("--use-embedded-options"),
     })
 }

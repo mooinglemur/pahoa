@@ -6,6 +6,7 @@
 
 mod admin;
 mod commands;
+mod server_commands;
 
 pub use admin::{AdminCommand, AdminOutcome};
 
@@ -120,6 +121,18 @@ pub struct Room {
     /// The running `!countdown`, if any.
     countdown: Option<Countdown>,
 
+    /// The one connection logged in through `!admin login`, if any.
+    ///
+    /// **One at a time**, replacing rather than accumulating, because the
+    /// reference keeps a single `commandprocessor.client` and a second login
+    /// simply overwrites the first (`MultiServer.py:1477`).
+    ///
+    /// Deliberately not persisted and not part of a snapshot: it names a live
+    /// connection, and a `ConnId` from a previous process means nothing. A room
+    /// that restarts has no administrator until someone logs in again, which is
+    /// the same thing the reference does by holding a client object.
+    admin_conn: Option<ConnId>,
+
     /// Free-form client key-value store.
     ///
     /// `Arc` per value for the snapshot's sake, as above. No `make_mut` is ever
@@ -187,6 +200,7 @@ impl Room {
             allow_releases: HashSet::new(),
             group_collected: HashMap::new(),
             countdown: None,
+            admin_conn: None,
             stored_data: HashMap::new(),
             stored_data_subscriptions: HashMap::new(),
             start_time,
@@ -235,6 +249,14 @@ impl Room {
     }
 
     pub fn on_disconnect(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
+        // Before the `auth` guard below, and unconditionally: an administrator
+        // that has gone away must not leave the room holding a `ConnId` that
+        // now names nothing. The reference keeps a client object here and never
+        // clears it on disconnect, so its `output()` writes into a dead socket;
+        // there is no reason to reproduce that.
+        if self.admin_conn == Some(conn) {
+            self.admin_conn = None;
+        }
         let Some(client) = self.clients.remove(&conn) else {
             return;
         };
@@ -1943,6 +1965,19 @@ impl Room {
 
     // --- derived views ---------------------------------------------------
 
+    /// The three modes clients are told about (`get_permissions`).
+    ///
+    /// `countdown_mode` is deliberately absent: the reference does not publish
+    /// it, in `RoomInfo` or in the `RoomUpdate` that follows a `/option`, so a
+    /// client has no representation for it to update.
+    pub(crate) fn permissions(&self) -> BTreeMap<String, Permission> {
+        BTreeMap::from([
+            ("release".to_string(), self.options.release_mode),
+            ("collect".to_string(), self.options.collect_mode),
+            ("remaining".to_string(), self.options.remaining_mode),
+        ])
+    }
+
     fn room_info(&self) -> RoomInfo {
         let mut games: Vec<String> = self.data.games().into_iter().collect();
         games.sort();
@@ -1956,11 +1991,7 @@ impl Room {
             // per-slot password cannot be reported per slot — and reporting
             // `false` would stop a client prompting for one it does need.
             password: self.password_required(),
-            permissions: BTreeMap::from([
-                ("release".to_string(), self.options.release_mode),
-                ("collect".to_string(), self.options.collect_mode),
-                ("remaining".to_string(), self.options.remaining_mode),
-            ]),
+            permissions: self.permissions(),
             hint_cost: self.options.hint_cost,
             location_check_points: self.options.location_check_points,
             games,

@@ -7,9 +7,11 @@ tree by file and line; now that nothing is outstanding, the behavioral detail li
 
 Last updated 2026-08-18 against `05be9f5`, during puna's M4 (artifact ingest).
 
-**Nothing is outstanding.** P1–P17 are all implemented. This document is now the record of what was
-asked and the standing list of what puna depends on — not a queue. `NOTES-FOR-PUNA.md` is the reply
-in the other direction and is the authority on what shipped and how; nothing in it is disputed here.
+**Nothing is blocking.** P1–P17 are all implemented; the only open item is **P18 below, a design note
+about a feature that does not exist yet** and which puna does not need. Otherwise this document is
+the record of what was asked and the standing list of what puna depends on — not a queue.
+`NOTES-FOR-PUNA.md` is the reply in the other direction and is the authority on what shipped and how;
+nothing in it is disputed here.
 
 ---
 
@@ -103,19 +105,68 @@ Breaking one of these produces a failure that will not look like it came from pa
 
 ---
 
-## One small suggestion, take it or leave it
+## Withdrawn: the `{}` startup error
 
-**Consider making `PAHOA_SLOT_PASSWORDS={}` a startup error.** An empty map is now a room nobody can
-join, and there is no configuration that legitimately wants one — per-slot mode with zero keys is
-always a mistake, and specifically the mistake an orchestrator makes when it renders the variable
-before its slot list is assembled. `secrets.rs` already refuses to start when both password modes are
-set, on the same principle: a configuration that cannot mean anything useful should not run.
+An earlier revision of this document suggested making `PAHOA_SLOT_PASSWORDS={}` a startup error, on
+the grounds that no configuration legitimately wants per-slot mode with zero keys. `secrets.rs`
+already answers it, in `merge`: presence of the variable is what turns the mode on, not the map
+having entries, and `{}` means *"per-slot mode, nobody holds a key"* — a locked room, and a
+deliberate thing to be able to ask for. That is a coherent position and the suggestion is withdrawn.
 
-Deliberately *not* the startup cross-check that was declined — this needs no knowledge of the seed at
-all, just a length check on the parsed map, so it does not couple the secret to the generation.
+Puna never emits `{}` regardless. That stays a constraint on puna's side, where it belongs.
 
-Puna guards against emitting `{}` on its own side regardless, so this is defense in depth rather than
-something puna needs. Nothing is blocked either way.
+---
+
+## P18 — a live password setter, if the `/` command set ever gets one
+
+**Nothing is wrong today.** `!admin` is a stub that masks the echo and refuses, and `cmd_admin`'s own
+comment says the `/` command set it would dispatch into "is a later milestone". There is no `/option`
+setter anywhere in the tree. This is a note *before* the feature, which is the cheap time to have it.
+
+**The problem it would create.** Pahoa persists no password at all — that was round one's fix, and it
+is what makes rotation trustworthy. So a live password change is temporary-until-restart in **every**
+deployment, hand-run included. Under puna it is worse than temporary: puna's Secret is the source of
+truth, so the change also silently disagrees with what the room console shows, right up until a
+restart quietly reverts it. The reference offers `/option password` on its server console, so this is
+a real divergence — but the divergence is the right way round, and it follows from not persisting.
+
+**One thing that will look like a clean trigger and is not.** `Secrets::password_from_env` seems like
+the natural condition — refuse when the environment supplied the password. It does not work: `pick`
+returns `(None, false)` when neither the environment nor argv supplies one, so an **open room reports
+`password_from_env: false`**. That is the most common puna room, and it is exactly the `none → room`
+transition an organizer would reach for this to perform. There is no capability-shaped fact that
+separates "open room, orchestrated" from "open room, run by hand", which is the whole difficulty.
+
+Three coherent positions, ranked:
+
+1. **Do not implement a password setter.** Free, matches today's behavior, and arguably the reference's
+   version misleads there too.
+2. **Implement it, always labeled as until-restart.** Accurate for every deployment, no coupling to
+   anything. The weakness is the audience: the person who reaches for this is an organizer, who
+   cannot reach an environment variable and will not know what one is.
+3. **Refuse when the room is orchestrated, and say where to go instead.** The best message, and the
+   only option that needs anything from puna.
+
+**If option 3, the signal wants three constraints**, all learned from things already settled here:
+
+- **`PAHOA_MANAGED_BY` as free text** (`"Puna"`), not a boolean `PAHOA_UNDER_PUNA`. Same reasoning
+  that made `--open-tracker` deployment-shaped rather than puna-shaped: pahoa stays a general tool
+  and does not carry one orchestrator's name in its interface.
+- **Message-only, never behavior beyond this refusal.** Pahoa varies behavior on *capability* facts
+  today — a token is configured, so gate the tracker. An identity fact is a different kind of thing,
+  and identity flags accrete conditionals until there are two implementations behind one switch.
+- **Assume the value gets said out loud.** `cmd_admin` broadcasts the command echo to the room, and
+  error text migrates. So it carries a display name, **never puna's room URL** — that URL is a bearer
+  capability, the unguessable path *is* the authorization, which is why `tracker_id` is a separate id
+  in the first place.
+
+**Explicitly not in scope: `POST /admin/v1/slots/<n>/password` must stay live.** Not bouncing the room
+is its entire purpose. The line is the room-wide password and the mode on one side, per-slot values on
+the other.
+
+**Puna needs none of this to work.** Every `slot_auth` transition is a room restart on puna's side
+already, for the same non-persistence reason, and puna does not set `server_password`, so `!admin` is
+refused outright in a puna room today. This is about what an organizer sees if they try.
 
 ---
 

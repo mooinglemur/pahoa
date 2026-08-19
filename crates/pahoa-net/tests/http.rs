@@ -326,6 +326,57 @@ async fn status_reports_the_room() {
     server.shutdown().await;
 }
 
+/// The room's rules, which an orchestrator cannot get any other way.
+///
+/// Worth a test of its own because the failure is a *stale* reading rather than
+/// a missing one: these are the fields the save is authoritative for and that
+/// `!admin /option` moves mid-game, so anything rendering them from its own
+/// configuration will look right and be wrong.
+#[tokio::test]
+async fn status_reports_the_options_the_room_is_actually_running() {
+    let server = Server::start(
+        room(RoomOptions {
+            hint_cost: 7,
+            location_check_points: 3,
+            release_mode: pahoa_proto::types::Permission::Goal,
+            server_password: Some("not-for-this-document".to_string()),
+            ..Default::default()
+        }),
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("server should bind");
+
+    let response = authed(server.local_addr, "GET", "/admin/v1/status", TOKEN).await;
+    let (_, body) = split(&response);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    let options = &json["options"];
+    assert_eq!(options["hint_cost"], 7);
+    assert_eq!(options["location_check_points"], 3);
+    // The word, not the bitmask: this document is read by people as well as by
+    // puna, and `2` says nothing.
+    assert_eq!(options["release_mode"], "goal");
+    // Untouched, so it reports the room's default rather than nothing.
+    assert_eq!(options["collect_mode"], "auto");
+    assert_eq!(options["item_cheat"], true);
+
+    // Secrets stay out. `/api/v1/room` already answers "does this room want a
+    // password" without disclosing one.
+    assert!(
+        !body.contains("not-for-this-document"),
+        "a password reached the status document: {body}"
+    );
+    assert!(options.get("password").is_none(), "{options}");
+    assert!(options.get("server_password").is_none(), "{options}");
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn metrics_are_prometheus_text() {
     let server = start_with_admin().await;

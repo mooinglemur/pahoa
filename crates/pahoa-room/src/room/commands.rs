@@ -224,13 +224,40 @@ impl Room {
     // --- output ----------------------------------------------------------
 
     /// `notify_client`: one line, to the caller only, skipped for `NoText`.
-    fn notify(&self, conn: ConnId, text: String, out: &mut dyn EffectSink) {
+    pub(super) fn notify(&self, conn: ConnId, text: String, out: &mut dyn EffectSink) {
         self.notify_multiple(conn, vec![text], out);
     }
 
     /// `notify_client_multiple`: several lines in one batch, so a long listing
     /// is one frame rather than hundreds.
-    fn notify_multiple(&self, conn: ConnId, texts: Vec<String>, out: &mut dyn EffectSink) {
+    pub(super) fn notify_multiple(
+        &self,
+        conn: ConnId,
+        texts: Vec<String>,
+        out: &mut dyn EffectSink,
+    ) {
+        self.notify_typed(conn, texts, PrintJsonType::CommandResult, out);
+    }
+
+    /// As [`Room::notify_multiple`], for the `/` command set.
+    ///
+    /// Its replies carry `AdminCommandResult` rather than `CommandResult`,
+    /// because the two processors have different `output` methods in the
+    /// reference (`MultiServer.py:1432` against `:2227-2230`). Clients render
+    /// them differently, so the distinction is visible rather than cosmetic —
+    /// and `!admin`'s *own* replies, the login and usage lines, stay
+    /// `CommandResult`: they come from the client-side processor.
+    pub(super) fn notify_admin(&self, conn: ConnId, texts: Vec<String>, out: &mut dyn EffectSink) {
+        self.notify_typed(conn, texts, PrintJsonType::AdminCommandResult, out);
+    }
+
+    fn notify_typed(
+        &self,
+        conn: ConnId,
+        texts: Vec<String>,
+        print_type: PrintJsonType,
+        out: &mut dyn EffectSink,
+    ) {
         let Some(client) = self.clients.get(&conn) else {
             return;
         };
@@ -242,7 +269,7 @@ impl Room {
             .map(|text| {
                 ServerPacket::PrintJSON(PrintJson {
                     data: vec![JsonMessagePart::text(text)],
-                    print_type: Some(PrintJsonType::CommandResult),
+                    print_type: Some(print_type),
                     ..Default::default()
                 })
             })
@@ -799,12 +826,14 @@ impl Room {
 
     // --- admin -----------------------------------------------------------
 
-    /// The remote-administration shell.
+    /// The remote-administration shell (`MultiServer.py:1445-1491`).
     ///
-    /// Only the parts that must exist from day one: the echo masking, so a
-    /// password typed into chat never reaches the room, and the refusal when
-    /// no server password is configured. The `/` command set it would dispatch
-    /// into is a later milestone.
+    /// Three layers, in this order, and the order is the point: the echo is
+    /// masked and broadcast *first*, so what a client typed reaches the room
+    /// whether or not the command is accepted, exists, or was even allowed to
+    /// run. Then the room-level refusal when no server password is configured.
+    /// Then login state, and only then dispatch into the `/` command set —
+    /// which is [`Room::server_command`].
     fn cmd_admin(&mut self, conn: ConnId, command: &str, out: &mut dyn EffectSink) {
         let Some(client) = self.clients.get(&conn) else {
             return;
@@ -813,6 +842,13 @@ impl Room {
 
         // Mask before echoing, whether or not the password was correct — the
         // room must not learn it from a failed attempt either.
+        //
+        // The `/option server_password` arm masks a command pahoa will never
+        // implement, and it is **not** dead code: masking happens before the
+        // refusal below, so what a client types is echoed to the room either
+        // way. Deleting the arm because the command does not exist is exactly
+        // backwards — an unimplemented setter is still a string someone types a
+        // real password into.
         let lower = command.to_lowercase();
         let masked = if lower.starts_with("login") {
             let n = 4 + self.rng.randbelow(13) as usize;
@@ -825,19 +861,83 @@ impl Room {
         };
         self.broadcast_chat(key, &masked, &masked, out);
 
-        if self.options.server_password.is_none() {
+        let Some(server_password) = self.options.server_password.clone() else {
             self.notify(
                 conn,
                 "Sorry, Remote administration is disabled".to_string(),
                 out,
             );
             return;
+        };
+
+        let authenticated = self.admin_conn == Some(conn);
+
+        if command.is_empty() {
+            let usage = if authenticated {
+                vec![
+                    "Usage: !admin [Server command].".to_string(),
+                    "Use !admin /help for help.".to_string(),
+                    "Use !admin logout to log out of the current session.".to_string(),
+                ]
+            } else {
+                vec!["Usage: !admin login [password]".to_string()]
+            };
+            self.notify_multiple(conn, usage, out);
+            return;
         }
-        self.notify(
-            conn,
-            "Remote administration is not available on this server yet.".to_string(),
-            out,
-        );
+
+        if let Some(supplied) = command.strip_prefix("login ") {
+            // Constant-time, like every other password comparison here. The
+            // reference compares the whole `f"login {password}"` string, which
+            // is the same test; splitting the prefix off first is what lets the
+            // secret go through `ct_eq` rather than through `==`.
+            if crate::secret::ct_eq(supplied.as_bytes(), server_password.as_bytes()) {
+                // Replaces whoever held it, matching the reference's single
+                // `commandprocessor.client` slot. Worth telling the displaced
+                // administrator, which the reference does not do — silently
+                // losing the session is the sort of thing that reads as a bug.
+                if let Some(previous) = self.admin_conn.replace(conn)
+                    && previous != conn
+                {
+                    self.notify(
+                        previous,
+                        "Another client has logged in for remote administration; \
+                         your session has ended."
+                            .to_string(),
+                        out,
+                    );
+                }
+                self.notify(
+                    conn,
+                    "Login successful. You can now issue server side commands.".to_string(),
+                    out,
+                );
+            } else {
+                self.notify(conn, "Password incorrect.".to_string(), out);
+            }
+            return;
+        }
+
+        if !authenticated {
+            self.notify(
+                conn,
+                "You must first login using !admin login [password]".to_string(),
+                out,
+            );
+            return;
+        }
+
+        if command == "logout" {
+            self.admin_conn = None;
+            self.notify(
+                conn,
+                "Logout successful. You can no longer issue server side commands.".to_string(),
+                out,
+            );
+            return;
+        }
+
+        self.server_command(conn, command, out);
     }
 
     // --- hints -----------------------------------------------------------
@@ -1212,14 +1312,14 @@ fn shell_split(raw: &str) -> Vec<String> {
 }
 
 /// How Python renders an optional option value in `!options`.
-fn opt_str(v: &Option<String>) -> String {
+pub(super) fn opt_str(v: &Option<String>) -> String {
     match v {
         Some(s) => s.clone(),
         None => "None".to_string(),
     }
 }
 
-fn py_bool(v: bool) -> &'static str {
+pub(super) fn py_bool(v: bool) -> &'static str {
     if v { "True" } else { "False" }
 }
 

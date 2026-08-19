@@ -19,7 +19,32 @@ pub struct Status {
     /// Whether this room persists at all. A room with no `--save-dir` reports
     /// its save block as absent rather than as a save that never happens.
     pub saving: bool,
+    pub options: Options,
     pub slots: Vec<SlotStatus>,
+}
+
+/// The room's rules, as they are *now*.
+///
+/// Worth reading from here rather than from whatever configured the room.
+/// These are the fields the save is authoritative for: after the first save the
+/// room's own copy wins over any flag it was started with, and `!admin /option`
+/// can move them mid-game. A room that has been up for a week may legitimately
+/// disagree with its own manifest.
+///
+/// The three passwords are deliberately absent. They are the mirror image —
+/// never saved, always from configuration — and there is nothing to learn here
+/// that `/api/v1/room`'s `password_required` does not already say without
+/// disclosing a secret to anything that reads a status document.
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub hint_cost: u32,
+    pub location_check_points: u32,
+    pub release_mode: &'static str,
+    pub collect_mode: &'static str,
+    pub remaining_mode: &'static str,
+    pub countdown_mode: &'static str,
+    pub item_cheat: bool,
+    pub compatibility: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +103,17 @@ pub fn document(
         "activity": {
             "last_client_message_at": crate::metrics::last_client_message_at().map(rfc3339),
             "idle_seconds": idle_seconds(),
+        },
+
+        "options": {
+            "hint_cost": live.options.hint_cost,
+            "location_check_points": live.options.location_check_points,
+            "release_mode": live.options.release_mode,
+            "collect_mode": live.options.collect_mode,
+            "remaining_mode": live.options.remaining_mode,
+            "countdown_mode": live.options.countdown_mode,
+            "item_cheat": live.options.item_cheat,
+            "compatibility": live.options.compatibility,
         },
 
         "slots": live.slots.iter().map(|s| serde_json::json!({

@@ -24,6 +24,13 @@ pub struct ServeArgs<'a> {
     /// `None` derives it from the seed's slot count.
     pub outbound_budget_bytes: Option<usize>,
     pub options: RoomOptions,
+    /// Which room-option flags were actually given, as their flag spellings.
+    ///
+    /// Only used to notice that a restored save is about to overrule one. A
+    /// flag that was not given cannot be overruled — its value *is* the
+    /// default — so warning without this would fire on every restart of every
+    /// room whose options are not all default.
+    pub explicit_options: Vec<&'static str>,
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
     pub log_level: LevelFilter,
@@ -112,9 +119,14 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             match load_save(&store, dir)? {
                 Some(snapshot) => {
                     let slots = snapshot.location_checks.len();
+                    let asked_for = room.options.clone();
                     room.restore(snapshot)
                         .map_err(|e| format!("{}: {e}", store.path().display()))?;
                     tracing::info!("restored {} from {}", plural(slots), store.path().display());
+                    for line in overruled_options(&args.explicit_options, &asked_for, &room.options)
+                    {
+                        tracing::warn!("{line}");
+                    }
                 }
                 None => tracing::info!("no save in {}; starting fresh", dir.display()),
             }
@@ -246,6 +258,92 @@ async fn shutdown_signal() -> &'static str {
         _ = tokio::signal::ctrl_c() => "SIGINT",
         _ = term.recv() => "SIGTERM",
     }
+}
+
+/// Say when a restored save has overruled a flag that was actually given.
+///
+/// The save winning is correct and deliberate — it is what lets `!admin
+/// /option` mean anything past the next restart — but it is the mirror of the
+/// bug that made passwords non-persistent, and silently ignoring a flag someone
+/// typed is how that bug went unnoticed for as long as it did. An operator who
+/// edits `--hint-cost` in a manifest, redeploys, and sees nothing change is owed
+/// an explanation rather than a debugging session.
+///
+/// Only flags actually supplied are compared. A flag left off holds the default,
+/// and "the save replaced the default" is every restart of every room that has
+/// ever changed an option.
+///
+/// Returns the lines rather than logging them so the decision can be tested;
+/// which flags count as *supplied* is the part that was wrong first time, and it
+/// is invisible from outside.
+fn overruled_options(
+    explicit: &[&str],
+    asked_for: &RoomOptions,
+    restored: &RoomOptions,
+) -> Vec<String> {
+    fn cheat_state(on: bool) -> String {
+        if on { "enabled" } else { "disabled" }.to_string()
+    }
+
+    // Flag spelling, what was asked for, what the save had. Rendered eagerly
+    // because a `Permission` and a `u32` do not share a type.
+    let compared: [(&str, String, String); 8] = [
+        (
+            "--hint-cost",
+            asked_for.hint_cost.to_string(),
+            restored.hint_cost.to_string(),
+        ),
+        (
+            "--location-check-points",
+            asked_for.location_check_points.to_string(),
+            restored.location_check_points.to_string(),
+        ),
+        (
+            "--release-mode",
+            asked_for.release_mode.as_text().to_string(),
+            restored.release_mode.as_text().to_string(),
+        ),
+        (
+            "--collect-mode",
+            asked_for.collect_mode.as_text().to_string(),
+            restored.collect_mode.as_text().to_string(),
+        ),
+        (
+            "--remaining-mode",
+            asked_for.remaining_mode.as_text().to_string(),
+            restored.remaining_mode.as_text().to_string(),
+        ),
+        (
+            "--countdown-mode",
+            asked_for.countdown_mode.as_text().to_string(),
+            restored.countdown_mode.as_text().to_string(),
+        ),
+        (
+            // Rendered as the cheat's state rather than the flag's boolean: a
+            // negative flag reporting "asked for false, save says true" makes a
+            // reader work out which way round it goes.
+            "--no-item-cheat",
+            cheat_state(asked_for.item_cheat),
+            cheat_state(restored.item_cheat),
+        ),
+        (
+            "--compatibility",
+            asked_for.compatibility.to_string(),
+            restored.compatibility.to_string(),
+        ),
+    ];
+
+    compared
+        .into_iter()
+        .filter(|(flag, wanted, actual)| explicit.contains(flag) && wanted != actual)
+        .map(|(flag, wanted, actual)| {
+            format!(
+                "{flag} asked for {wanted}, but the restored save says {actual} and wins; \
+                 room options live in the save once one exists, and are changed with \
+                 !admin /option or by starting from an empty --save-dir"
+            )
+        })
+        .collect()
 }
 
 /// Overlay the seed's own `server_options` onto what the command line asked for.
@@ -670,5 +768,77 @@ mod tests {
         };
         embed(&mut o, None);
         assert_eq!(o.hint_cost, 7);
+    }
+
+    // --- a restored save overruling a flag -------------------------------
+
+    #[test]
+    fn a_save_overruling_a_flag_that_was_given_is_reported() {
+        let asked = RoomOptions {
+            hint_cost: 99,
+            release_mode: Permission::Disabled,
+            ..Default::default()
+        };
+        let restored = RoomOptions {
+            hint_cost: 15,
+            release_mode: Permission::Enabled,
+            ..Default::default()
+        };
+
+        let lines = overruled_options(&["--hint-cost", "--release-mode"], &asked, &restored);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("--hint-cost asked for 99"), "{lines:?}");
+        assert!(lines[0].contains("save says 15"), "{lines:?}");
+        assert!(
+            lines[1].contains("--release-mode asked for disabled"),
+            "{lines:?}"
+        );
+    }
+
+    /// The half that was wrong when this was first written, and that only
+    /// showed up by running a real room: `Args::is_set` answers for bare flags
+    /// and `Args::get` for `--option value` pairs, so testing the wrong one
+    /// leaves `explicit` permanently empty and the warning permanently silent.
+    #[test]
+    fn a_flag_that_was_not_given_is_not_reported() {
+        let asked = RoomOptions::default();
+        let restored = RoomOptions {
+            hint_cost: 15,
+            ..Default::default()
+        };
+        assert!(
+            overruled_options(&[], &asked, &restored).is_empty(),
+            "a default nobody asked for was reported as overruled"
+        );
+    }
+
+    #[test]
+    fn a_flag_the_save_agrees_with_is_not_reported() {
+        let same = RoomOptions {
+            hint_cost: 15,
+            ..Default::default()
+        };
+        assert!(overruled_options(&["--hint-cost"], &same, &same).is_empty());
+    }
+
+    /// A negative flag reads backwards as a raw boolean, so it reports the
+    /// cheat's state rather than the flag's value.
+    #[test]
+    fn the_item_cheat_reports_its_own_state_not_the_flags() {
+        let asked = RoomOptions {
+            item_cheat: false,
+            ..Default::default()
+        };
+        let restored = RoomOptions {
+            item_cheat: true,
+            ..Default::default()
+        };
+        let lines = overruled_options(&["--no-item-cheat"], &asked, &restored);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("asked for disabled") && lines[0].contains("says enabled"),
+            "{}",
+            lines[0]
+        );
     }
 }
