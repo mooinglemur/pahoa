@@ -89,7 +89,14 @@ Breaking one of these produces a failure that will not look like it came from pa
 6. **`outbound_budget_for` stays the sizing signal.** Puna derives `limits.memory` from it and the
    seed's slot count — counting **every** slot including spectators and groups, matching
    `slot_info.len()`, not `connectable_slots()`.
-7. **The startup line keeps its shape**, and now carries the build version (P9).
+7. **Under `--log-format json`, the `serving` event keeps its `message` value and its fields.**
+   Restated: this constraint used to name the stdout startup line, and the JSON work correctly
+   replaced that line rather than adding to it — puna matches `message == "serving"` now, and its
+   docker verification job asserts that stdout is empty and that every stderr line parses. What puna
+   depends on is the event, not the channel: renaming it, or moving `addr`/`seed_name` out of it,
+   would break the one signal that means "this room is really serving". The banner's `cpu_quota`
+   matters for the same reason as constraint 5 — its absence is how a `limits.cpu` that did not apply
+   announces itself.
 8. **`/healthz` stays unauthenticated and stays on the game port.** It is the kubelet's HTTPS
    readiness and startup probe. Moving it or gating it makes every room unschedulable at once.
 9. **`/admin/v1/**` keeps returning `404` when no token is configured**, not `401`. Puna diagnoses a
