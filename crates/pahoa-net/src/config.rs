@@ -91,8 +91,9 @@ pub struct NetConfig {
     /// configured.
     ///
     /// Off by default. With a token set, the tracker is gated behind it — an
-    /// open tracker on a public port lets an anonymous port scan iterate rooms
-    /// and read every slot name out of them. A standalone pahoa with no token
+    /// open tracker on a public port lets an anonymous port scan read the
+    /// participant list out of every room, which is what a room without a
+    /// password relies on staying hidden. A standalone pahoa with no token
     /// serves it openly regardless, which is the case the CORS headers exist
     /// for. See `docs/tracker.md`.
     pub open_tracker: bool,

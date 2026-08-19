@@ -59,8 +59,8 @@ SERVE OPTIONS
                              token's traffic in the clear.
     --open-tracker           Serve /api/tracker without the admin token even
                              when one is configured. Without a token the tracker
-                             is open anyway; with one it is gated, so that a
-                             port scan cannot read slot names out of a room.
+                             is open anyway; with one it is gated, so a port
+                             scan cannot find out whose game a room is.
 
 ROOM OPTIONS
     --password <pw>              Required from every client on connect

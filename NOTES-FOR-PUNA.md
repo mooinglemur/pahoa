@@ -343,9 +343,16 @@ review — no zip we had contained a group.
 ### The tracker is gated when an admin token exists
 
 **Not just for race seeds.** The reasoning that decided it: an open tracker on a public port lets an
-anonymous port scan iterate rooms and read every slot name out of them, and slot names are people's
-names. That is a disclosure whether or not the seed is a race, so gating on `race_mode` would have
-left the larger hole open.
+anonymous port scan read the participant list out of every room, which turns a port range into an
+index from "whose game is this" to an address.
+
+The threat is identification rather than name disclosure. Running without a room password is the
+common case — the reference defaults to it and most groups leave it — and those rooms are protected
+in practice only by the fact that a scanner cannot tell which port is the interesting one. An open
+tracker removes that: sweep the range, read the slot lists, find the room containing a streamer or
+any other high-visibility player, and griefing it costs one connection. So the gate preserves a
+property unpassworded rooms already depend on, and gating on `race_mode` would have left exactly
+the population that relies on it exposed.
 
 The rule is about deployment, not seed:
 

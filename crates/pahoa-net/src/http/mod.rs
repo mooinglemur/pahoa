@@ -119,12 +119,14 @@ impl Router {
     /// The tracker, behind the admin token unless this room serves it openly.
     ///
     /// **Gated whenever a token exists at all, not only for race seeds.** An
-    /// open tracker on a public port lets an anonymous port scan iterate rooms
-    /// and read every slot name out of them, which is a disclosure in its own
-    /// right regardless of whether the seed is a race. A standalone pahoa
-    /// configures no token and serves it openly, which is the deployment the
-    /// CORS headers exist for; `open_tracker` restores that for an orchestrated
-    /// room whose operator wants it. See `docs/tracker.md`.
+    /// open tracker on a public port lets an anonymous port scan read the
+    /// participant list out of every room, which turns a port range into an
+    /// index from "whose game is this" to an address. Rooms without a password
+    /// are common and are protected today only by being unidentifiable; the
+    /// gate keeps them that way. A standalone pahoa configures no token and
+    /// serves it openly, which is the deployment the CORS headers exist for;
+    /// `open_tracker` restores that for an orchestrated room whose operator
+    /// wants it. See `docs/tracker.md`.
     async fn gated_tracker(
         &self,
         request: &crate::ws::handshake::HttpRequest,

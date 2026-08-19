@@ -54,9 +54,19 @@ a zero that would render as 1970.
 
 The reference restricts race rooms because its tracker links are handed out publicly. pahoa's
 exposure is different and, left open, worse in one specific way: the endpoints sit on a public port
-with no authentication, so an **anonymous port scan can iterate rooms and read every slot name out
-of them**. That is a disclosure regardless of whether a seed is a race, and slot names are people's
-names.
+with no authentication, so an **anonymous port scan can iterate rooms and read the participant list
+out of each one**.
+
+The risk that creates is *identification*, not the names themselves. Running a room without a
+password is common — the reference makes it the default and most groups never change it — and what
+protects those rooms is that a scanner cannot tell which one is worth attacking. There is no index
+from a port number to whose game it is. An open tracker supplies exactly that index: sweep the port
+range, read the slot lists, find the one containing a high-visibility player, and now a stream's
+multiworld is a known address with an open door. Griefing it costs one connection.
+
+So the gate is not protecting slot names as private data. It is preserving the property that a room
+on a public port is anonymous until its operator chooses otherwise, which is the property an
+unpassworded room has been silently relying on all along.
 
 So the rule is about deployment rather than seed:
 
@@ -69,7 +79,8 @@ So the rule is about deployment rather than seed:
   public tracker.
 
 `race_mode` is parsed and available, and deliberately does **not** enter into this: gating on the
-seed would leave the ordinary case open to the scan, which is the larger hole.
+seed would leave the ordinary case open to the scan, and the ordinary case — an unpassworded room
+that expects to go unnoticed — is the one with the most to lose from being findable.
 
 ## CORS
 

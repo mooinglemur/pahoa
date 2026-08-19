@@ -202,9 +202,11 @@ static half for 300, matching the windows the reference memoizes with.
 
 **The tracker is gated behind the admin token whenever one is configured**, and
 open when none is. An unauthenticated tracker on a public port lets a port scan
-iterate rooms and read every slot name out of them, which is a disclosure
-whether or not the seed is a race. A standalone pahoa configures no token and
-serves it openly; `--open-tracker` restores that alongside an admin API. [docs/tracker.md](docs/tracker.md) covers the shapes,
+read the participant list out of every room, and that turns a port range into an
+index from a player's name to a room's address. Rooms run without a password —
+the usual case — are protected today only by being unidentifiable, so the gate
+holds whether or not the seed is a race. A standalone pahoa configures no token
+and serves it openly; `--open-tracker` restores that alongside an admin API. [docs/tracker.md](docs/tracker.md) covers the shapes,
 the CORS rules, and the live-tracker direction this is a stepping stone to.
 
 **The admin surface is authenticated by `PAHOA_ADMIN_TOKEN` and nothing else.**
