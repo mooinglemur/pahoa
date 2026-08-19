@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn fixture_dir() -> PathBuf {
     std::env::var_os("PAHOA_FIXTURE_DIR")
@@ -89,8 +89,19 @@ impl Client {
     async fn wait_for(&mut self, cmd: &str) -> Value {
         for _ in 0..50 {
             for packet in self.recv_frame().await {
-                if packet.get("cmd").and_then(Value::as_str) == Some(cmd) {
+                let seen = packet.get("cmd").and_then(Value::as_str);
+                if seen == Some(cmd) {
                     return packet;
+                }
+                // A refused connection never sends anything else, so waiting on
+                // it is a hang rather than a failure. Say what the room said
+                // instead: this is how a fixture whose slots demand a newer
+                // client than the tests claim announces itself.
+                if seen == Some("ConnectionRefused") && cmd != "ConnectionRefused" {
+                    panic!(
+                        "waiting for {cmd}, but the room refused the connection: {}",
+                        packet.get("errors").unwrap_or(&Value::Null)
+                    );
                 }
             }
         }
@@ -103,6 +114,18 @@ fn first_player(data: &MultiData) -> (u32, String, String) {
     (*slot, info.name.clone(), info.game.clone())
 }
 
+/// The client version these tests claim.
+///
+/// Deliberately ahead of any fixture's floor rather than matching a real
+/// client: a seed carries a *per-slot* minimum client version, and a slot that
+/// demands more than this is refused — correctly — which leaves a test waiting
+/// for a `Connected` that will never arrive. The fixture that prompted this
+/// number has a slot requiring 0.7.0.
+///
+/// If a new fixture refuses a connection for `IncompatibleVersion`, raise this;
+/// nothing here is testing version negotiation.
+const CLIENT_VERSION: (u32, u32, u32) = (0, 9, 0);
+
 fn connect_packet(name: &str, game: &str, items_handling: u8) -> Value {
     json!([{
         "cmd": "Connect",
@@ -110,7 +133,12 @@ fn connect_packet(name: &str, game: &str, items_handling: u8) -> Value {
         "game": game,
         "name": name,
         "uuid": "integration-test",
-        "version": {"major": 0, "minor": 6, "build": 8, "class": "Version"},
+        "version": {
+            "major": CLIENT_VERSION.0,
+            "minor": CLIENT_VERSION.1,
+            "build": CLIENT_VERSION.2,
+            "class": "Version",
+        },
         "items_handling": items_handling,
         "tags": ["AP"],
         "slot_data": true,

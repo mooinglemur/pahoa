@@ -15,7 +15,7 @@ use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 use serde_json::Value;
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn print_json<'a>(
     sink: &'a Recorder,

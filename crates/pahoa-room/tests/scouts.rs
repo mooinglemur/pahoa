@@ -14,7 +14,7 @@ use pahoa_multidata::HintStatus;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{CloseReason, ConnId, Event, Recorder, Room, RoomOptions};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn location_info<'a>(
     sink: &'a Recorder,

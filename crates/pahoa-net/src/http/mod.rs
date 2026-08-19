@@ -45,6 +45,11 @@ struct Inner {
     /// Fired by `POST /admin/v1/shutdown`, and awaited by whatever owns the
     /// process's exit.
     shutdown: Arc<tokio::sync::Notify>,
+    /// Whether the tracker answers without the bearer token.
+    ///
+    /// True when no admin token is configured at all — a standalone pahoa — or
+    /// when an operator asked for it explicitly.
+    open_tracker: bool,
     /// Rendered tracker documents, held for their TTL.
     tracker_cache: Mutex<Cached>,
     static_tracker_cache: Mutex<Cached>,
@@ -63,6 +68,7 @@ impl Router {
             started_at: SystemTime::now(),
             admin: Admin::new(config.admin_token.clone()),
             outbound_budget_bytes: config.outbound_budget_bytes,
+            open_tracker: config.admin_token.is_none() || config.open_tracker,
             shutdown,
             tracker_cache: Mutex::default(),
             static_tracker_cache: Mutex::default(),
@@ -99,8 +105,8 @@ impl Router {
         match (method, path) {
             ("GET", "/healthz") => Response::text(200, "ok\n"),
             ("GET", "/api/v1/room") => self.room().await,
-            ("GET", "/api/tracker") => self.tracker(Which::Live).await,
-            ("GET", "/api/static_tracker") => self.tracker(Which::Static).await,
+            ("GET", "/api/tracker") => self.gated_tracker(request, Which::Live).await,
+            ("GET", "/api/static_tracker") => self.gated_tracker(request, Which::Static).await,
             // A path that exists but not for this verb is worth distinguishing
             // from one that does not exist at all.
             (_, "/healthz" | "/api/v1/room" | "/api/tracker" | "/api/static_tracker") => {
@@ -108,6 +114,31 @@ impl Router {
             }
             _ => Response::not_found(),
         }
+    }
+
+    /// The tracker, behind the admin token unless this room serves it openly.
+    ///
+    /// **Gated whenever a token exists at all, not only for race seeds.** An
+    /// open tracker on a public port lets an anonymous port scan iterate rooms
+    /// and read every slot name out of them, which is a disclosure in its own
+    /// right regardless of whether the seed is a race. A standalone pahoa
+    /// configures no token and serves it openly, which is the deployment the
+    /// CORS headers exist for; `open_tracker` restores that for an orchestrated
+    /// room whose operator wants it. See `docs/tracker.md`.
+    async fn gated_tracker(
+        &self,
+        request: &crate::ws::handshake::HttpRequest,
+        which: Which,
+    ) -> Response {
+        if !self.0.open_tracker {
+            let Some(admin) = &self.0.admin else {
+                return Response::not_found();
+            };
+            if let admin::Auth::Refused(response) = admin.check(request.header("Authorization")) {
+                return response;
+            }
+        }
+        self.tracker(which).await
     }
 
     /// Serve a tracker document, from the cache when one is warm.
@@ -307,8 +338,9 @@ impl Router {
         let seed = &self.0.seed;
         let live = self.live().await;
 
+        // The roster question: who may connect, which includes spectators.
         let slots: Vec<serde_json::Value> = seed
-            .player_slots()
+            .connectable_slots()
             .map(|(number, info)| {
                 serde_json::json!({
                     "slot": number,

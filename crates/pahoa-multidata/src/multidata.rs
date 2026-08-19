@@ -273,11 +273,36 @@ impl MultiData {
         DataPackage::merge(snapshot, &self.embedded_datapackage, &self.games())
     }
 
-    /// Slots that a client may actually connect to and play.
+    /// Slots that have **progress to report** — checks, a goal, a completion
+    /// percentage.
+    ///
+    /// Players only. A spectator has nothing to report here and would be a
+    /// `0/0` row; a group is not a participant at all.
+    ///
+    /// This is not the same question as "who may connect" — see
+    /// [`Self::connectable_slots`]. The two came apart the moment a spectator
+    /// appeared, and using one where the other belongs is how a spectator goes
+    /// missing from a roster or shows up as an idle player.
     pub fn player_slots(&self) -> impl Iterator<Item = (&u32, &NetworkSlot)> {
         self.slot_info
             .iter()
             .filter(|(_, s)| s.slot_type == SlotType::Player)
+    }
+
+    /// Slots a client may **connect as** — players and spectators, groups
+    /// excluded.
+    ///
+    /// The roster question: who needs a password, who appears on a room page,
+    /// whose connections are counted. A spectator comes from someone's yaml,
+    /// has a name in `connect_names`, connects, and watches the whole
+    /// multiworld; it is a participant that happens to play nothing. A group is
+    /// an item-link construct with no client behind it.
+    ///
+    /// Matches `WebHostLib/upload.py`'s rule, which keeps everything but groups.
+    pub fn connectable_slots(&self) -> impl Iterator<Item = (&u32, &NetworkSlot)> {
+        self.slot_info
+            .iter()
+            .filter(|(_, s)| s.slot_type != SlotType::Group)
     }
 
     /// The client version floor for a slot, including the global minimum.

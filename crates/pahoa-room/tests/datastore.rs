@@ -7,7 +7,7 @@ use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 use serde_json::{Map, Value, json};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn raw(cmd_name: &str, fields: &[(&str, Value)]) -> Map<String, Value> {
     let mut m = Map::new();

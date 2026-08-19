@@ -22,9 +22,21 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 const SHARDS: usize = 4;
 const CLIENTS: usize = 64;
+
+/// Serializes the two tests in this file.
+///
+/// Both measure `pahoa_net::ws::deflate::compressions()`, which is a
+/// **process-wide** counter, by sampling it around an action. Cargo runs the
+/// tests in one binary concurrently, so without this the other test's
+/// compressions land inside the measurement window — reliably enough under a
+/// loaded machine to fail about one full-workspace run in three, and never when
+/// this file is run on its own, which is the worst way for a flake to behave.
+/// Async-aware rather than `std`, because the guard is held across the awaits
+/// that do the measuring — a blocking lock there would park a runtime worker.
+static COUNTER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn load() -> Option<Arc<MultiData>> {
     let dir = std::env::var_os("PAHOA_FIXTURE_DIR")
@@ -184,6 +196,7 @@ async fn a_broadcast_is_compressed_once_per_shard_not_once_per_connection() {
     }
 
     // One `Say` is exactly one `Recipients::AllText` broadcast.
+    let _exclusive = COUNTER.lock().await;
     let before = pahoa_net::ws::deflate::compressions();
     clients[0]
         .send(&serde_json::json!([{"cmd": "Say", "text": "hello everyone"}]).to_string())
@@ -240,6 +253,7 @@ async fn a_connection_without_deflate_costs_no_compression_at_all() {
     client.drain().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let _exclusive = COUNTER.lock().await;
     let before = pahoa_net::ws::deflate::compressions();
     client
         .send(&serde_json::json!([{"cmd": "Say", "text": "nobody wants deflate"}]).to_string())

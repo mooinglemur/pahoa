@@ -57,6 +57,10 @@ SERVE OPTIONS
     --allow-plaintext        Keep answering ws:// after a certificate is
                              configured. Off by default: it puts the admin
                              token's traffic in the clear.
+    --open-tracker           Serve /api/tracker without the admin token even
+                             when one is configured. Without a token the tracker
+                             is open anyway; with one it is gated, so that a
+                             port scan cannot read slot names out of a room.
 
 ROOM OPTIONS
     --password <pw>              Required from every client on connect
@@ -102,6 +106,7 @@ const SERVE_OPTS: &[Opt] = &[
     value("--tls-cert", &["--tls_cert"]),
     value("--tls-key", &["--tls_key"]),
     flag("--allow-plaintext", &["--allow_plaintext"]),
+    flag("--open-tracker", &["--open_tracker"]),
     value("--password", &[]),
     value("--server-password", &["--server_password"]),
     value("--hint-cost", &["--hint_cost"]),
@@ -277,6 +282,7 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         secrets,
         tls,
         allow_plaintext,
+        open_tracker: args.is_set("--open-tracker"),
         filtered_port,
         port: args.number("--port")?.unwrap_or(38281),
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),

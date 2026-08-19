@@ -30,7 +30,7 @@ use pahoa_room::{Recorder, RoomOptions};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 const VECTORS: &str = include_str!("hint_vectors.jsonl");
 
 /// A hint reduced to what identifies it on the wire.
@@ -327,7 +327,43 @@ fn selection_and_pricing_match_archipelago() {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(said, want, "reply text for {label}");
+
+        // When several candidates share the top fuzzy score, *which* one the
+        // reference names is not reproducible: `!hint` matches against a
+        // `set` (`MultiServer.py:248`), and set iteration order for strings
+        // follows `PYTHONHASHSEED`, which CPython randomizes per process. The
+        // same seed generated under four hash seeds names four different
+        // items — one of which is the one pahoa picks.
+        //
+        // So the suggestion is elided and everything around it still compared:
+        // the score, the wording, and that a rejection happened at all. The
+        // same concession this file already makes for hint ordering, and for
+        // the same reason.
+        if case["suggestion_is_tied"].as_bool().unwrap_or(false) {
+            let elide = |lines: &[String]| -> Vec<String> {
+                lines
+                    .iter()
+                    .map(|l| match (l.find('\''), l.rfind('\'')) {
+                        (Some(a), Some(b)) if a < b => format!("{}…{}", &l[..=a], &l[b..]),
+                        _ => l.clone(),
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                elide(&said),
+                elide(&want),
+                "reply text for {label}, ignoring the tied suggestion"
+            );
+            // The score is the part that must still agree exactly.
+            assert!(
+                said.iter().zip(&want).all(|(a, b)| {
+                    a.rsplit_once('(').map(|(_, s)| s) == b.rsplit_once('(').map(|(_, s)| s)
+                }),
+                "confidence differs for {label}: {said:?} vs {want:?}"
+            );
+        } else {
+            assert_eq!(said, want, "reply text for {label}");
+        }
     }
 }
 
@@ -339,9 +375,21 @@ fn hint_order_is_reproducible_for_a_given_seed() {
     // The half of the exit criterion that *is* about ordering: pahoa's own
     // order must be stable, since the shuffle is seeded from the seed name and
     // insertion order is deterministic. Two identical rooms, same result.
+    // Slot and item taken from the vectors rather than written in: the
+    // generator picks the richest slot in whatever fixture it was run against,
+    // and a hard-coded item name is a fixture that has silently moved on. The
+    // first case is the free-hints one, so it grants everything at once.
+    let case = cases()
+        .into_iter()
+        .find(|c| !c["candidates"].as_array().unwrap().is_empty())
+        .expect("a vector with candidates to order");
+    let subject = case["slot"].as_u64().unwrap() as u32;
+    let item = case["input"].as_str().unwrap().to_string();
+
     let run = || {
         let data = load(FIXTURE).unwrap();
-        let (slot, name, game) = first_player(&data);
+        let info = &data.slot_info[&subject];
+        let (name, game) = (info.name.clone(), info.game.clone());
         let mut room = room_for(
             data,
             RoomOptions {
@@ -350,17 +398,17 @@ fn hint_order_is_reproducible_for_a_given_seed() {
             },
         );
         let conn = join(&mut room, 1, &name, &game, 0b111);
-        room.set_hints((0, slot), Vec::new());
+        room.set_hints((0, subject), Vec::new());
 
         let mut sink = Recorder::default();
         room.handle(
             conn,
             ClientPacket::Say(cmd::Say {
-                text: "!hint Additional Palette Color".to_string(),
+                text: format!("!hint {item}"),
             }),
             &mut sink,
         );
-        room.hints_for((0, slot))
+        room.hints_for((0, subject))
             .iter()
             .map(|h| (h.finding_player, h.location))
             .collect::<Vec<_>>()

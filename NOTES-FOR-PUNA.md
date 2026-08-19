@@ -293,3 +293,73 @@ tracker connects to, receiving the current state once and then deltas for as lon
 connected — which is the thing pahoa can do and a database-backed WebHost structurally cannot,
 since the room knows a check landed in the tick it processed it. Recorded in `docs/tracker.md`.
 Puna should treat the polling endpoints as the contract now and the fallback later.
+
+---
+
+## Round two: P16, P17 and the tracker gate
+
+All three decided, all three implemented. One is a **behavior change puna must act on**; the others
+are safe.
+
+### P17 — per-slot passwords now fail **closed**
+
+`PAHOA_SLOT_PASSWORDS` being set is what puts a room in per-slot mode. Once it is in force, a slot
+**missing from the map is refused**, not admitted. The map says who holds a key, not who needs one.
+
+This is the change to act on, and it has a sharp edge:
+
+- **`{}` is now a locked room, not an unconfigured one.** Rendering the variable as an empty object
+  — which an orchestrator might do while a slot list is still being assembled — produces a room
+  nobody can join. Do not emit `PAHOA_SLOT_PASSWORDS` at all unless per-slot mode is intended.
+- **A map that is merely incomplete now locks slots out rather than leaving one open.** That is the
+  point: the failure that motivated this was a map built from a player-filtered list, leaving the
+  spectator as the single unauthenticated door. It fails loudly at the affected player instead of
+  silently at the room.
+- **`POST /admin/v1/slots/<n>/password` with `{"password": null}` bars that slot** rather than
+  opening it. That is deliberate and useful — one call locks a slot mid-async, no restart, nobody
+  else disturbed — but it is the opposite of what the name suggests, so it is worth knowing before
+  reaching for it.
+- **Rotation requires the mode to already be in force.** With no `PAHOA_SLOT_PASSWORDS`, the route
+  returns `404`; there is no per-slot mode to rotate within.
+
+Deliberately *not* the startup cross-check the handoff leaned toward. Coupling the secret to the
+seed at startup would make the two undeployable independently, and the fail-closed connect check
+already removes the open door — which was the actual concern.
+
+### P16 — two accessors, and the rule written down
+
+`docs/slots.md` is the answer to "if that split is right, write it down". Roster questions —
+`/api/v1/room`, `/admin/v1/status` — are now **`connectable_slots`**: players and spectators, groups
+excluded, matching `WebHostLib/upload.py`. Progress questions stay players-only.
+
+**A connected spectator now appears in `/admin/v1/status` and `/api/v1/room`**, which it did not
+before. If puna renders either directly, expect one more row per spectator.
+
+This also fixed a bug of ours: `/api/tracker` was emitting spectators and groups in every
+per-player array. The reference walks `get_all_players()` for those and `get_all_slots()` for hints
+alone, and pahoa now does the same. Invisible on a seed with neither, which is why it survived
+review — no zip we had contained a group.
+
+### The tracker is gated when an admin token exists
+
+**Not just for race seeds.** The reasoning that decided it: an open tracker on a public port lets an
+anonymous port scan iterate rooms and read every slot name out of them, and slot names are people's
+names. That is a disclosure whether or not the seed is a race, so gating on `race_mode` would have
+left the larger hole open.
+
+The rule is about deployment, not seed:
+
+- **A token configured** — every puna room — and the tracker requires it, exactly like
+  `/admin/v1/**`. Puna proxies server-side and holds the token, so **nothing changes for puna**.
+- **No token** — a standalone pahoa — and it stays open and browser-fetchable, which is what the
+  CORS headers are for.
+- **`--open-tracker`** restores the open behavior alongside an admin API, for an operator who wants
+  a public tracker.
+
+The consequence worth stating: a gated tracker is **not** fetchable from a page, because sending
+`Authorization` makes the request non-simple and needs a preflight pahoa does not answer. Puna's
+server-side proxy is therefore the supported path for an orchestrated room, not merely the
+preferred one — which matches what puna already built for its own reasons.
+
+`race_mode` remains parsed and unused by this decision. If a race wants something stronger than the
+gate — a reduced document, say — that is a separate question and pahoa has the flag it would need.

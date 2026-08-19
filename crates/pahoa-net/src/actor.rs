@@ -423,9 +423,11 @@ pub async fn run_with_saves(
                     save_dirty: saver.dirty,
                     save_interval: saver.config.interval,
                     saving: saver.config.store.is_some(),
+                    // The roster question, so spectators are included: an
+                    // organizer needs to see a connected spectator.
                     slots: room
                         .multidata()
-                        .player_slots()
+                        .connectable_slots()
                         .map(|(number, info)| {
                             let key = (0, *number);
                             crate::http::SlotStatus {
@@ -453,12 +455,22 @@ pub async fn run_with_saves(
                 password,
                 reply,
             } => {
-                let known = room.multidata().slot_info.contains_key(&slot);
+                let mut known = room.multidata().slot_info.contains_key(&slot);
                 if known {
-                    match password {
-                        Some(password) => room.options.slot_passwords.insert(slot, password),
-                        None => room.options.slot_passwords.remove(&slot),
-                    };
+                    // Only meaningful while per-slot mode is in force. Setting
+                    // one stores it; clearing one *removes* the key, which
+                    // under fail-closed semantics bars the slot rather than
+                    // opening it — the useful answer during live abuse.
+                    match room.options.slot_passwords.as_mut() {
+                        Some(passwords) => {
+                            match password {
+                                Some(password) => passwords.insert(slot, password),
+                                None => passwords.remove(&slot),
+                            };
+                        }
+                        // No per-slot mode to rotate within.
+                        None => known = false,
+                    }
                     // Deliberately no `mark_dirty`: this changes configuration,
                     // not game state, and configuration is not what a save
                     // carries.

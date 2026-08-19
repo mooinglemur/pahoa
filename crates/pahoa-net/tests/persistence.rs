@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn load() -> Option<Arc<MultiData>> {
     let dir = std::env::var_os("PAHOA_FIXTURE_DIR")

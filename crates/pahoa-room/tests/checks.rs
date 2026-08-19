@@ -6,7 +6,7 @@ use common::*;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn checks(locations: Vec<i64>) -> ClientPacket {
     ClientPacket::LocationChecks(cmd::LocationChecks { locations })

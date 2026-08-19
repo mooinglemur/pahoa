@@ -87,6 +87,16 @@ pub struct NetConfig {
     /// feed cannot select a tag or a path. See `docs/scoped-feed.md`.
     pub filtered_port: Option<u16>,
 
+    /// Serve the tracker without authentication even when an admin token is
+    /// configured.
+    ///
+    /// Off by default. With a token set, the tracker is gated behind it — an
+    /// open tracker on a public port lets an anonymous port scan iterate rooms
+    /// and read every slot name out of them. A standalone pahoa with no token
+    /// serves it openly regardless, which is the case the CORS headers exist
+    /// for. See `docs/tracker.md`.
+    pub open_tracker: bool,
+
     /// Bearer token for `/admin/v1/**`.
     ///
     /// `None` makes the admin surface answer `404` — absent rather than merely
@@ -114,6 +124,7 @@ impl Default for NetConfig {
             tls: None,
             allow_plaintext: false,
             filtered_port: None,
+            open_tracker: false,
             admin_token: None,
         }
     }

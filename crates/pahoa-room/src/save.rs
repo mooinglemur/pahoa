@@ -542,7 +542,7 @@ fn decode_options(r: &mut Reader<'_>) -> Result<RoomOptions> {
         // `encode_options`.
         password: None,
         server_password: None,
-        slot_passwords: Default::default(),
+        slot_passwords: None,
         hint_cost,
         location_check_points,
         release_mode: modes[0],
@@ -731,6 +731,7 @@ fn inflate(body: &[u8], expected: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// Build a header around an arbitrary body, so a decode can be aimed at the
     /// body parser rather than being stopped by the checksum first.
@@ -809,9 +810,7 @@ mod tests {
             hint_cost: 42,
             ..Default::default()
         };
-        options
-            .slot_passwords
-            .insert(3, "per-slot-secret".to_string());
+        options.slot_passwords = Some(BTreeMap::from([(3, "per-slot-secret".to_string())]));
 
         let mut w = Writer::default();
         encode_options(&mut w, &options);
@@ -831,7 +830,7 @@ mod tests {
         let decoded = decode_options(&mut Reader::new(&body)).expect("decodes");
         assert_eq!(decoded.password, None);
         assert_eq!(decoded.server_password, None);
-        assert!(decoded.slot_passwords.is_empty());
+        assert!(decoded.slot_passwords.is_none());
         assert_eq!(
             decoded.hint_cost, 42,
             "the non-secret options still survive"

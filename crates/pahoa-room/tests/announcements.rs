@@ -21,7 +21,7 @@ use pahoa_proto::types::Version;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 /// A player slot as `(slot, name, game)`.
 type Player = (u32, String, String);

@@ -8,7 +8,7 @@ use pahoa_proto::types::Version;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn room(options: RoomOptions) -> Option<(Room, u32, String, String)> {
     let data = load(FIXTURE)?;
@@ -181,10 +181,13 @@ fn a_per_slot_password_gates_only_its_own_slot() {
 
     // Every other slot in the seed is left without one, which is what "slots
     // absent from the object have no password" has to mean in practice.
-    let mut options = RoomOptions::default();
-    options
-        .slot_passwords
-        .insert(slot, "quiet-harbor-ledger".to_string());
+    let options = RoomOptions {
+        slot_passwords: Some(std::collections::BTreeMap::from([(
+            slot,
+            "quiet-harbor-ledger".to_string(),
+        )])),
+        ..Default::default()
+    };
     let mut room = room_for(data.clone(), options);
 
     assert_eq!(
@@ -211,7 +214,9 @@ fn a_per_slot_password_gates_only_its_own_slot() {
         "the right password"
     );
 
-    // A different slot, which was given none, is unaffected.
+    // A slot *missing* from the map is refused, not admitted. The map says who
+    // holds a key, not who needs one — so an incomplete map locks a slot out
+    // rather than leaving it the one open door in the room.
     let (other_slot, other_name, other_game) = data
         .player_slots()
         .nth(1)
@@ -224,8 +229,76 @@ fn a_per_slot_password_gates_only_its_own_slot() {
             ConnId(4),
             connect(&other_name, &other_game, 0b001)
         ),
-        [] as [Refused; 0],
-        "a slot with no password of its own stays open"
+        [Refused::InvalidPassword],
+        "per-slot mode fails closed for a slot it does not know"
+    );
+}
+
+/// Clearing a slot's password bars it rather than opening it, which is the
+/// useful answer during live abuse: one call, no restart, nobody else touched.
+#[test]
+fn clearing_a_slot_password_locks_that_slot() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(
+        data,
+        RoomOptions {
+            slot_passwords: Some(std::collections::BTreeMap::from([(
+                slot,
+                "quiet-harbor-ledger".to_string(),
+            )])),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        attempt(
+            &mut room,
+            ConnId(1),
+            connect_with(&name, &game, "quiet-harbor-ledger")
+        ),
+        [] as [Refused; 0]
+    );
+
+    room.options
+        .slot_passwords
+        .as_mut()
+        .expect("per-slot mode")
+        .remove(&slot);
+
+    for attempt_packet in [
+        connect(&name, &game, 0b001),
+        connect_with(&name, &game, "quiet-harbor-ledger"),
+    ] {
+        assert_eq!(
+            attempt(&mut room, ConnId(2), attempt_packet),
+            [Refused::InvalidPassword],
+            "the slot should be barred, not opened"
+        );
+    }
+}
+
+/// An empty map is per-slot mode with nobody holding a key: a locked room.
+#[test]
+fn an_empty_slot_password_map_locks_every_slot() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let mut room = room_for(
+        data,
+        RoomOptions {
+            slot_passwords: Some(std::collections::BTreeMap::new()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        attempt(&mut room, ConnId(1), connect(&name, &game, 0b001)),
+        [Refused::InvalidPassword]
     );
 }
 
@@ -239,8 +312,13 @@ fn room_info_announces_a_password_in_per_slot_mode_too() {
     }
     let data = load(FIXTURE).unwrap();
     let (slot, ..) = first_player(&data);
-    let mut options = RoomOptions::default();
-    options.slot_passwords.insert(slot, "secret".to_string());
+    let options = RoomOptions {
+        slot_passwords: Some(std::collections::BTreeMap::from([(
+            slot,
+            "secret".to_string(),
+        )])),
+        ..Default::default()
+    };
 
     let mut room = room_for(data, options);
     let mut sink = Recorder::default();
@@ -262,8 +340,13 @@ fn a_per_slot_refusal_is_indistinguishable_from_a_room_wide_one() {
     let data = load(FIXTURE).unwrap();
     let (slot, name, game) = first_player(&data);
 
-    let mut per_slot = RoomOptions::default();
-    per_slot.slot_passwords.insert(slot, "secret".to_string());
+    let per_slot = RoomOptions {
+        slot_passwords: Some(std::collections::BTreeMap::from([(
+            slot,
+            "secret".to_string(),
+        )])),
+        ..Default::default()
+    };
     let mut a = room_for(data.clone(), per_slot);
 
     let room_wide = RoomOptions {

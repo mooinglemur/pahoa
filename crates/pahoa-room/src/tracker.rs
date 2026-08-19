@@ -25,6 +25,14 @@ pub struct TrackerSlot {
     pub alias: Option<String>,
     pub status: ClientStatus,
     pub total_locations: usize,
+    /// Whether this slot has progress to report — a player, not a spectator or
+    /// a group.
+    ///
+    /// The reference's tracker walks two different sets: `get_all_players()`
+    /// (players only) for every per-player array, and `get_all_slots()`
+    /// (everything) for hints alone. Carrying the flag lets the renderer make
+    /// that split from one snapshot rather than taking two.
+    pub playing: bool,
     /// Shared with the room; never copied unless the room writes to it next.
     pub checks: Arc<HashSet<i64>>,
     /// The *remote* queue, which is the one the reference's tracker reads.

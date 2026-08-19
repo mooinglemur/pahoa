@@ -10,7 +10,7 @@ use pahoa_multidata::ClientStatus;
 use pahoa_proto::ServerPacket;
 use pahoa_room::{AdminCommand, AdminOutcome, ConnId, Recorder, Room, RoomOptions};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 /// A room, the first player slot, and its name.
 fn room() -> Option<(Room, u32, String, String)> {

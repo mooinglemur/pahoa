@@ -10,17 +10,25 @@ use serde_json::{Value, json};
 
 /// The live document.
 pub fn tracker(data: &TrackerData) -> Value {
+    // The reference walks two different sets, and the difference is invisible
+    // until a seed has a spectator or an item-link group in it:
+    // `get_all_players()` — players only — for every per-player array, and
+    // `get_all_slots()` for hints alone. A spectator has no progress to report
+    // and a group has no client behind it.
+    let players: Vec<&pahoa_room::tracker::TrackerSlot> =
+        data.slots.iter().filter(|s| s.playing).collect();
+
     json!({
-        "aliases": data.slots.iter().map(|s| json!({
+        "aliases": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot, "alias": s.alias,
         })).collect::<Vec<_>>(),
 
-        "player_items_received": data.slots.iter().map(|s| json!({
+        "player_items_received": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot,
             "items": s.items_received.iter().map(item).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
 
-        "player_checks_done": data.slots.iter().map(|s| {
+        "player_checks_done": players.iter().map(|s| {
             // Sorted, as the reference sorts them: a tracker diffing two polls
             // should not see a reordering as a change.
             let mut locations: Vec<i64> = s.checks.iter().copied().collect();
@@ -37,15 +45,15 @@ pub fn tracker(data: &TrackerData) -> Value {
             "hints": s.hints.iter().map(hint).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
 
-        "activity_timers": data.slots.iter().map(|s| json!({
+        "activity_timers": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot, "time": rfc1123(s.last_activity),
         })).collect::<Vec<_>>(),
 
-        "connection_timers": data.slots.iter().map(|s| json!({
+        "connection_timers": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot, "time": rfc1123(s.last_connection),
         })).collect::<Vec<_>>(),
 
-        "player_status": data.slots.iter().map(|s| json!({
+        "player_status": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot, "status": s.status as i64,
         })).collect::<Vec<_>>(),
     })
@@ -53,6 +61,9 @@ pub fn tracker(data: &TrackerData) -> Value {
 
 /// The document that only changes when the seed does.
 pub fn static_tracker(data: &TrackerData) -> Value {
+    let players: Vec<&pahoa_room::tracker::TrackerSlot> =
+        data.slots.iter().filter(|s| s.playing).collect();
+
     json!({
         "groups": data.groups.iter().map(|g| json!({
             "slot": g.slot, "name": g.name, "members": g.members,
@@ -68,11 +79,11 @@ pub fn static_tracker(data: &TrackerData) -> Value {
             (game.clone(), json!({ "checksum": checksum, "version": 0 }))
         }).collect::<serde_json::Map<String, Value>>(),
 
-        "player_locations_total": data.slots.iter().map(|s| json!({
+        "player_locations_total": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot, "total_locations": s.total_locations,
         })).collect::<Vec<_>>(),
 
-        "player_game": data.slots.iter().map(|s| json!({
+        "player_game": players.iter().map(|s| json!({
             "team": s.team, "player": s.slot, "game": s.game,
         })).collect::<Vec<_>>(),
     })

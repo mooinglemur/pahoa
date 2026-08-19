@@ -32,7 +32,10 @@ const MIN_ADMIN_TOKEN_BYTES: usize = 32;
 pub struct Secrets {
     pub password: Option<String>,
     pub server_password: Option<String>,
-    pub slot_passwords: BTreeMap<u32, String>,
+    /// `None` when `PAHOA_SLOT_PASSWORDS` was not set at all. `Some` puts the
+    /// room in per-slot mode, in which a slot missing from the map is refused
+    /// — so an empty object is a **locked room**, not an unconfigured one.
+    pub slot_passwords: Option<BTreeMap<u32, String>>,
     /// Whether the room-wide password came from the environment.
     ///
     /// Needed because `--use-embedded-options` lets a seed's own
@@ -70,9 +73,12 @@ pub fn resolve(argv: FromArgv<'_>) -> Result<Secrets, String> {
 fn merge(argv: FromArgv<'_>, env: impl Fn(&str) -> Option<String>) -> Result<Secrets, String> {
     let mut warnings = Vec::new();
 
+    // Presence of the variable is what turns the mode on, not the map having
+    // entries in it: `{}` means "per-slot mode, nobody holds a key", which is a
+    // locked room and a legitimate thing to ask for.
     let slot_passwords = match env(SLOT_PASSWORDS) {
-        None => BTreeMap::new(),
-        Some(raw) => parse_slot_passwords(&raw)?,
+        None => None,
+        Some(raw) => Some(parse_slot_passwords(&raw)?),
     };
 
     let (password, password_from_env) = pick(
@@ -94,7 +100,7 @@ fn merge(argv: FromArgv<'_>, env: impl Fn(&str) -> Option<String>) -> Result<Sec
     // `--password` against `PAHOA_SLOT_PASSWORDS` is caught too. Silently
     // preferring one would give an operator a room that asks for a password
     // they did not configure.
-    if password.is_some() && !slot_passwords.is_empty() {
+    if password.is_some() && slot_passwords.is_some() {
         return Err(format!(
             "a room-wide password and per-slot passwords are mutually exclusive, \
              but both are set ({SLOT_PASSWORDS}, and a room-wide password from \
@@ -264,17 +270,12 @@ mod tests {
             )]),
         )
         .unwrap();
-        assert_eq!(s.slot_passwords.len(), 2);
-        assert_eq!(
-            s.slot_passwords.get(&1).map(String::as_str),
-            Some("quiet-harbor-ledger")
-        );
-        assert_eq!(
-            s.slot_passwords.get(&7).map(String::as_str),
-            Some("amber-ferry-quartz")
-        );
+        let map = s.slot_passwords.as_ref().expect("per-slot mode is on");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&1).map(String::as_str), Some("quiet-harbor-ledger"));
+        assert_eq!(map.get(&7).map(String::as_str), Some("amber-ferry-quartz"));
         // Slots absent from the object have none.
-        assert!(!s.slot_passwords.contains_key(&2));
+        assert!(!map.contains_key(&2));
     }
 
     #[test]
@@ -317,7 +318,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.server_password.as_deref(), Some("admin"));
-        assert_eq!(s.slot_passwords.len(), 1);
+        assert_eq!(s.slot_passwords.as_ref().map(|p| p.len()), Some(1));
     }
 
     #[test]
@@ -349,12 +350,21 @@ mod tests {
         assert!(!e.contains("by-name-no"), "leaked the password: {e}");
     }
 
-    /// An empty object is a configured mode with nobody in it, not an error:
-    /// the orchestrator renders the same variable whether or not any slot has
-    /// been given a password yet.
+    /// An empty object parses, and means per-slot mode with nobody holding a
+    /// key — a **locked room**, since the mode fails closed. That is a
+    /// legitimate thing to ask for and a dangerous thing to render by accident,
+    /// so it is worth pinning.
     #[test]
-    fn an_empty_slot_object_is_allowed() {
+    fn an_empty_slot_object_is_per_slot_mode_with_nobody_in_it() {
         let s = merge(FromArgv::default(), env(&[("PAHOA_SLOT_PASSWORDS", "{}")])).unwrap();
-        assert!(s.slot_passwords.is_empty());
+        let map = s.slot_passwords.as_ref().expect("the mode is on");
+        assert!(map.is_empty(), "and nobody holds a key");
+    }
+
+    /// Absence of the variable is what turns the mode off, not an empty map.
+    #[test]
+    fn no_variable_means_no_per_slot_mode() {
+        let s = merge(FromArgv::default(), empty()).unwrap();
+        assert!(s.slot_passwords.is_none());
     }
 }

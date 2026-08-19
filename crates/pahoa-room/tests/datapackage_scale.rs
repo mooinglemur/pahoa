@@ -16,7 +16,7 @@ use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 use std::time::Instant;
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn encoded_size(sink: &Recorder, conn: ConnId, room: &Room) -> usize {
     sink.packets_for(conn, room)

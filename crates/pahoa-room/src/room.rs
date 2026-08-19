@@ -367,11 +367,19 @@ impl Room {
                 // absent from the map has none. Pushed as the same
                 // `InvalidPassword` the room-wide check uses, so which of the
                 // two modes is in force is not something a caller can probe.
-                if !crate::secret::ct_eq_opt(
-                    self.options.slot_passwords.get(&slot).map(String::as_str),
-                    args.password.as_deref(),
-                ) {
-                    errors.push(ConnectionRefusedReason::InvalidPassword);
+                // Fails **closed**: with the mode in force, a slot missing from
+                // the map is refused rather than admitted. The map says who
+                // holds a key, not who needs one — so an incomplete map locks
+                // a slot out instead of leaving it the one open door, and
+                // clearing a password is a way to bar a slot mid-async.
+                if let Some(slot_passwords) = &self.options.slot_passwords {
+                    let expected = slot_passwords.get(&slot).map(String::as_str);
+                    let ok = expected.is_some_and(|expected| {
+                        crate::secret::ct_eq_opt(Some(expected), args.password.as_deref())
+                    });
+                    if !ok {
+                        errors.push(ConnectionRefusedReason::InvalidPassword);
+                    }
                 }
 
                 let ignore_game = Client::ignores_game(&args.game, &args.tags);
@@ -2137,7 +2145,7 @@ impl Room {
     /// Deliberately does not say *which* mode, and per-slot passwords cannot be
     /// reported per slot anyway on a surface that has no slot in hand.
     pub fn password_required(&self) -> bool {
-        self.options.password.is_some() || !self.options.slot_passwords.is_empty()
+        self.options.password.is_some() || self.options.slot_passwords.is_some()
     }
 
     /// Snapshot everything the tracker API reports.
@@ -2164,6 +2172,7 @@ impl Room {
                     alias: self.name_aliases.get(&key).cloned(),
                     status: self.status(key),
                     total_locations: self.data.locations.count_for(*number),
+                    playing: info.slot_type == pahoa_multidata::SlotType::Player,
                     checks: self
                         .location_checks
                         .get(&key)

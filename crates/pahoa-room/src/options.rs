@@ -14,12 +14,28 @@ pub struct RoomOptions {
     /// Mutually exclusive with [`slot_passwords`](Self::slot_passwords): a room
     /// has one password, a password per slot, or none at all.
     pub password: Option<String>,
-    /// Per-slot passwords, keyed by slot number. A slot absent from the map has
-    /// none, and an empty map means the mode is unused.
+    /// Per-slot passwords, keyed by slot number.
     ///
-    /// Checked *after* the slot name is resolved, unlike [`password`](Self::password),
-    /// which can be checked before anything about the client is known.
-    pub slot_passwords: BTreeMap<u32, String>,
+    /// `None` means the mode is off. `Some` means it is **in force**, and a
+    /// slot missing from the map is **refused**, not admitted — the map says
+    /// who holds a key, not who needs one.
+    ///
+    /// That is deliberate and it fails closed. `PAHOA_SLOT_PASSWORDS` arrives
+    /// as JSON from another system, and a map that is merely *incomplete* would
+    /// otherwise produce a room where most slots need a credential and one does
+    /// not, with nothing anywhere saying so. The likeliest way to get there is
+    /// building the map from a slot list that filters out spectators, leaving
+    /// the one slot that watches every world as the single unauthenticated
+    /// door.
+    ///
+    /// It also makes clearing a slot's password a **lock**, not an opening,
+    /// which is the useful answer during live abuse: one call bars a slot
+    /// without restarting the room or disturbing anyone else.
+    ///
+    /// Checked *after* the slot name is resolved, unlike
+    /// [`password`](Self::password), which can be checked before anything about
+    /// the client is known.
+    pub slot_passwords: Option<BTreeMap<u32, String>>,
     /// Enables `!admin login`. `None` disables remote administration entirely.
     pub server_password: Option<String>,
     /// Hint price as a *percentage* of a slot's total locations, not an
@@ -41,7 +57,7 @@ impl Default for RoomOptions {
     fn default() -> Self {
         Self {
             password: None,
-            slot_passwords: BTreeMap::new(),
+            slot_passwords: None,
             server_password: None,
             hint_cost: 10,
             location_check_points: 1,

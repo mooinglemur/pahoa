@@ -83,6 +83,23 @@ async fn start_with_admin() -> Server {
     .expect("server should bind")
 }
 
+/// A room in per-slot password mode, with the admin API enabled.
+async fn start_with_slot_passwords() -> Server {
+    Server::start(
+        room(RoomOptions {
+            slot_passwords: Some(BTreeMap::from([(1, "quiet-harbor-ledger".to_string())])),
+            ..Default::default()
+        }),
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("server should bind")
+}
+
 async fn authed(addr: SocketAddr, method: &str, path: &str, token: &str) -> String {
     request(
         addr,
@@ -496,12 +513,12 @@ async fn a_command_needs_the_token_like_everything_else() {
 
 #[tokio::test]
 async fn a_slot_password_rotates_without_a_restart() {
-    let server = start_with_admin().await;
+    let server = start_with_slot_passwords().await;
 
-    // Before: no password of any kind.
+    // Per-slot mode is in force from the start, so the room asks for one.
     let before = get(server.local_addr, "/api/v1/room").await;
     let before: serde_json::Value = serde_json::from_str(&split(&before).1).unwrap();
-    assert_eq!(before["password"], false);
+    assert_eq!(before["password"], true);
 
     let response = post(
         server.local_addr,
@@ -513,12 +530,9 @@ async fn a_slot_password_rotates_without_a_restart() {
     assert_eq!(status, "HTTP/1.1 200 OK", "{response}");
     assert!(!body.contains("quiet-harbor-ledger"), "echoed: {body}");
 
-    // After: the room now asks for one, which is the observable effect.
-    let after = get(server.local_addr, "/api/v1/room").await;
-    let after: serde_json::Value = serde_json::from_str(&split(&after).1).unwrap();
-    assert_eq!(after["password"], true);
-
-    // And clearing it puts the room back.
+    // Clearing a slot's password does **not** open it. Per-slot mode fails
+    // closed, so removing the key bars the slot — which is the useful answer
+    // during live abuse, and the opposite of what a naive reading expects.
     let response = post(
         server.local_addr,
         "/admin/v1/slots/1/password",
@@ -528,14 +542,17 @@ async fn a_slot_password_rotates_without_a_restart() {
     assert_eq!(split(&response).0, "HTTP/1.1 200 OK");
     let cleared = get(server.local_addr, "/api/v1/room").await;
     let cleared: serde_json::Value = serde_json::from_str(&split(&cleared).1).unwrap();
-    assert_eq!(cleared["password"], false);
+    assert_eq!(
+        cleared["password"], true,
+        "the room is still in per-slot mode; the slot is locked, not opened"
+    );
 
     server.shutdown().await;
 }
 
 #[tokio::test]
 async fn rotating_an_unknown_slot_is_a_404() {
-    let server = start_with_admin().await;
+    let server = start_with_slot_passwords().await;
     let response = post(
         server.local_addr,
         "/admin/v1/slots/9999/password",
@@ -549,7 +566,7 @@ async fn rotating_an_unknown_slot_is_a_404() {
 /// The one route with a variable in its path, so its matcher is worth pinning.
 #[tokio::test]
 async fn a_malformed_slot_password_path_is_not_found() {
-    let server = start_with_admin().await;
+    let server = start_with_slot_passwords().await;
     for path in [
         "/admin/v1/slots//password",
         "/admin/v1/slots/-1/password",
@@ -707,7 +724,7 @@ async fn the_tracker_documents_mirror_the_reference_shape() {
 async fn the_tracker_is_cached_within_its_window() {
     let server = start_with_admin().await;
 
-    let before = split(&get(server.local_addr, "/api/tracker").await).1;
+    let before = split(&authed(server.local_addr, "GET", "/api/tracker", TOKEN).await).1;
     let parsed: serde_json::Value = serde_json::from_str(&before).unwrap();
     assert_eq!(parsed["total_checks_done"][0]["checks_done"], 0);
 
@@ -716,7 +733,7 @@ async fn the_tracker_is_cached_within_its_window() {
     assert_eq!(released["ok"], true, "{released}");
 
     // Within the 60-second window the answer is the one already rendered.
-    let after = split(&get(server.local_addr, "/api/tracker").await).1;
+    let after = split(&authed(server.local_addr, "GET", "/api/tracker", TOKEN).await).1;
     assert_eq!(
         after, before,
         "a second request inside the TTL should be served from the cache"
@@ -724,8 +741,67 @@ async fn the_tracker_is_cached_within_its_window() {
 
     // The static document has its own, longer window and its own entry, so a
     // hit on one must not have populated the other.
-    let stat = split(&get(server.local_addr, "/api/static_tracker").await).1;
+    let stat = split(&authed(server.local_addr, "GET", "/api/static_tracker", TOKEN).await).1;
     assert!(stat.contains("player_locations_total"), "{stat}");
+
+    server.shutdown().await;
+}
+
+/// Gated whenever a token exists, not only for race seeds: an open tracker on
+/// a public port lets an anonymous port scan iterate rooms and read every slot
+/// name out of them.
+#[tokio::test]
+async fn the_tracker_is_gated_when_an_admin_token_is_configured() {
+    let server = start_with_admin().await;
+
+    for path in ["/api/tracker", "/api/static_tracker"] {
+        let (status, _) = split(&get(server.local_addr, path).await);
+        assert_eq!(
+            status, "HTTP/1.1 401 Unauthorized",
+            "{path} should be gated"
+        );
+
+        let response = authed(server.local_addr, "GET", path, TOKEN).await;
+        assert_eq!(
+            split(&response).0,
+            "HTTP/1.1 200 OK",
+            "{path} with the token"
+        );
+    }
+
+    server.shutdown().await;
+}
+
+/// A standalone pahoa configures no token, and serves the tracker openly —
+/// which is the deployment the CORS headers exist for.
+#[tokio::test]
+async fn the_tracker_is_open_when_no_token_is_configured() {
+    let server = start(RoomOptions::default()).await;
+    let (status, _) = split(&get(server.local_addr, "/api/tracker").await).clone();
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    server.shutdown().await;
+}
+
+/// And an operator can have both: an admin API and an open tracker.
+#[tokio::test]
+async fn open_tracker_restores_it_alongside_a_token() {
+    let server = Server::start(
+        room(RoomOptions::default()),
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            open_tracker: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("server should bind");
+
+    let (status, _) = split(&get(server.local_addr, "/api/tracker").await);
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    // The admin surface stays gated regardless.
+    let (status, _) = split(&get(server.local_addr, "/admin/v1/status").await);
+    assert_eq!(status, "HTTP/1.1 401 Unauthorized");
 
     server.shutdown().await;
 }

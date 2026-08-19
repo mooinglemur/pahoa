@@ -182,6 +182,7 @@ def run_case(ctx, MultiServer, slot, text, for_location, checks):
             key=lambda d: (d["finding_player"], d["location"]),
         ),
         "output": outputs,
+        "suggestion_is_tied": suggestion_is_tied(ctx, text, for_location, slot),
     }
 
 
@@ -229,6 +230,37 @@ def resolve_candidates(ctx, MultiServer, team, slot, text, for_location):
     return MultiServer.collect_hint_location_name(ctx, team, slot, name)
 
 
+def suggestion_is_tied(ctx, text, for_location, slot):
+    """Whether the "did you mean …" name this run produced is reproducible.
+
+    `!hint` feeds the fuzzy matcher `all_item_and_group_names[game]`, which is a
+    **`set`** (`MultiServer.py:248`). Set iteration order for strings follows
+    `PYTHONHASHSEED`, which CPython randomizes per process — so when several
+    candidates share the top score, *which* one the reference names is an
+    artifact of the run rather than a property of Archipelago. Generating the
+    same seed under four hash seeds gives four different suggestions.
+
+    Recording that here is what lets the Rust side compare the reply exactly
+    where it can, and only elide the name where the reference does not agree
+    with itself. The same reasoning as hint ordering, which this file has always
+    declined to compare.
+    """
+    from Utils import get_fuzzy_results
+
+    game = ctx.games[slot]
+    names = (
+        ctx.all_location_and_group_names.get(game)
+        if for_location
+        else ctx.all_item_and_group_names.get(game)
+    )
+    if not names or not text:
+        return False
+    picks = get_fuzzy_results(text, names)
+    if not picks:
+        return False
+    return sum(1 for _, score in picks if score == picks[0][1]) > 1
+
+
 def pick_scenarios(ctx):
     """Choose slots and item names that exercise the interesting branches.
 
@@ -253,16 +285,22 @@ def pick_scenarios(ctx):
     # A slot with no entrance data: its hints hash deterministically, so even
     # the ordering is stable there. Preferred, because it makes the vector a
     # tighter test.
-    plain = [s for s in player_slots if not ctx.er_hint_data.get(s)]
-    subject = (plain or player_slots)[0]
+    plain = [s for s in player_slots if not ctx.er_hint_data.get(s)] or player_slots
 
-    # The item this slot is owed in the most places, so the one-per-call rule
-    # has something to choose between.
-    owed = collections.Counter()
+    # How many placements each slot is owed, which is what decides whether the
+    # scenarios below have anything to choose between.
+    owed_by_slot = collections.defaultdict(collections.Counter)
     for finder, locs in ctx.locations.items():
         for loc, (item, receiver, _flags) in locs.items():
-            if receiver == subject:
-                owed[item] += 1
+            owed_by_slot[receiver][item] += 1
+
+    # The *richest* eligible slot, not merely the first. Taking `[0]` was fine
+    # while every fixture's slot 1 happened to be well supplied; on a seed where
+    # it is owed two items the vectors degenerate to empty candidate sets and
+    # stop testing the selection rule at all. Ties break on the lowest slot so
+    # the choice stays deterministic.
+    subject = max(plain, key=lambda s: (sum(owed_by_slot[s].values()), -s))
+    owed = owed_by_slot[subject]
     names = ctx.item_names_for_game(ctx.games[subject])
     by_id = {i: n for n, i in names.items()}
     ranked = [i for i, _ in owed.most_common() if i in by_id]

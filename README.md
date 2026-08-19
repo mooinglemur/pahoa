@@ -148,9 +148,15 @@ keys are strings the slot number is quoted:
 {"1": "quiet-harbor-ledger", "2": "amber-ferry-quartz"}
 ```
 
-Slots absent from the object have no password. Setting a room-wide *and* a
-per-slot password is an error at startup rather than a silent preference for
-one. `--server-password` is a third, orthogonal thing — it gates `!admin`, not
+Setting `PAHOA_SLOT_PASSWORDS` at all is what puts a room in per-slot mode, and
+the mode **fails closed**: a slot absent from the object is *refused*, not
+admitted. The map says who holds a key, not who needs one, so an incomplete map
+locks a slot out rather than leaving it the one open door in the room. An empty
+object is therefore a locked room, and clearing a slot's password through the
+admin API bars that slot rather than opening it — which is a useful thing to be
+able to do mid-async. Setting a room-wide *and* a per-slot password is an error
+at startup rather than a silent preference for one. See
+[docs/slots.md](docs/slots.md) for which slots this covers. `--server-password` is a third, orthogonal thing — it gates `!admin`, not
 joining — so it coexists with either mode.
 
 **Precedence is environment, then seed, then flag.** The flags still work,
@@ -174,8 +180,8 @@ these are `https://`; without it, `http://`.
 |---|---|---|
 | `GET /healthz` | none | `200` once the room is serving |
 | `GET /api/v1/room` | none | What a room page shows. No secrets |
-| `GET /api/tracker` | none | The reference WebHost's tracker document |
-| `GET /api/static_tracker` | none | The half that only changes with the seed |
+| `GET /api/tracker` | see below | The reference WebHost's tracker document |
+| `GET /api/static_tracker` | see below | The half that only changes with the seed |
 | `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress |
 | `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
 | `POST /admin/v1/command` | bearer | The typed command set below |
@@ -190,10 +196,15 @@ tracker page written against `archipelago.gg` works against a pahoa room with
 only its base URL changed — down to `NetworkItem` and `Hint` serializing as
 arrays and timestamps being RFC 1123, both of which are artifacts of how Flask
 renders Python and both of which pahoa reproduces deliberately. They carry
-`Access-Control-Allow-Origin: *`, because the intended deployment is a tracker
-page served from somewhere else fetching the room directly. Rendered documents
-are cached for 60 seconds, and the static half for 300, matching the windows the
-reference memoizes with. [docs/tracker.md](docs/tracker.md) covers the shapes,
+`Access-Control-Allow-Origin: *`, so a tracker page served from another origin
+can fetch a room directly. Rendered documents are cached for 60 seconds, and the
+static half for 300, matching the windows the reference memoizes with.
+
+**The tracker is gated behind the admin token whenever one is configured**, and
+open when none is. An unauthenticated tracker on a public port lets a port scan
+iterate rooms and read every slot name out of them, which is a disclosure
+whether or not the seed is a race. A standalone pahoa configures no token and
+serves it openly; `--open-tracker` restores that alongside an admin API. [docs/tracker.md](docs/tracker.md) covers the shapes,
 the CORS rules, and the live-tracker direction this is a stepping stone to.
 
 **The admin surface is authenticated by `PAHOA_ADMIN_TOKEN` and nothing else.**

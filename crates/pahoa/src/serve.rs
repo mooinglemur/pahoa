@@ -33,6 +33,8 @@ pub struct ServeArgs<'a> {
     /// `None` serves plaintext only.
     pub tls: Option<pahoa_net::TlsPaths>,
     pub allow_plaintext: bool,
+    /// Serve the tracker unauthenticated even with an admin token configured.
+    pub open_tracker: bool,
     /// A second port serving the scoped feed.
     pub filtered_port: Option<u16>,
 }
@@ -156,6 +158,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         outbound_budget_bytes: budget,
         tls: args.tls,
         allow_plaintext: args.allow_plaintext,
+        open_tracker: args.open_tracker,
         filtered_port: args.filtered_port,
         admin_token: args.secrets.admin_token.clone(),
         ..Default::default()
@@ -286,7 +289,7 @@ fn apply_embedded(
                     );
                     continue;
                 }
-                if !secrets.slot_passwords.is_empty() {
+                if secrets.slot_passwords.is_some() {
                     tracing::warn!(
                         "the seed sets a room password, but this room is in per-slot \
                          password mode; ignoring the seed's"
@@ -584,8 +587,13 @@ mod tests {
     #[test]
     fn a_seed_password_is_ignored_in_per_slot_mode() {
         let mut o = RoomOptions::default();
-        let mut secrets = crate::secrets::Secrets::default();
-        secrets.slot_passwords.insert(1, "per-slot".to_string());
+        let secrets = crate::secrets::Secrets {
+            slot_passwords: Some(std::collections::BTreeMap::from([(
+                1,
+                "per-slot".to_string(),
+            )])),
+            ..Default::default()
+        };
 
         apply_embedded(
             &mut o,

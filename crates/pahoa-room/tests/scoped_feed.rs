@@ -10,7 +10,7 @@ use common::*;
 use pahoa_proto::client as cmd;
 use pahoa_room::{ConnId, Event, FeedPolicy, Recipients, Recorder, Room, RoomOptions, SlotKey};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 /// Connect a client on a chosen feed policy, discarding the handshake traffic.
 fn join_with(room: &mut Room, conn: ConnId, name: &str, game: &str, feed: FeedPolicy) {

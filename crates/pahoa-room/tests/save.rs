@@ -14,13 +14,13 @@ use pahoa_room::save::{FORMAT_VERSION, SaveError, Snapshot};
 use pahoa_room::{Recorder, Room, RoomOptions};
 use serde_json::{Map, json};
 
-const FIXTURE: &str = "AP_56807069331869547085.archipelago";
+const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 /// A room with a bit of everything in it: checks, items owed, hints, aliases,
 /// datastorage, a spent hint budget.
 fn played_room() -> (Room, u32, String, String) {
     let data = load(FIXTURE).unwrap();
-    let (slot, name, game) = first_player(&data);
+    let (slot, name, game) = richest_player(&data);
     let mut room = room_for(
         data.clone(),
         RoomOptions {
@@ -29,6 +29,7 @@ fn played_room() -> (Room, u32, String, String) {
         },
     );
     let conn = join(&mut room, 1, &name, &game, 0b111);
+    let hintable = most_owed_item(&room, slot).unwrap_or_default();
     let mut sink = Recorder::default();
 
     let locations: Vec<i64> = data
@@ -50,7 +51,7 @@ fn played_room() -> (Room, u32, String, String) {
     room.handle(
         conn,
         ClientPacket::Say(cmd::Say {
-            text: "!hint Additional Palette Color".to_string(),
+            text: format!("!hint {hintable}"),
         }),
         &mut sink,
     );
@@ -145,20 +146,21 @@ fn the_hint_prng_resumes_where_it_left_off() {
     // The point of persisting the random state at all: hint ordering must not
     // reset to the start of the sequence on every restart, or a restart becomes
     // a way to re-roll which hint a player is granted.
-    let (mut room, _slot, name, game) = played_room();
+    let (mut room, slot, name, game) = played_room();
     let mut restored = reload(&room.snapshot().encode(false));
 
     // Read the *announcement* order rather than the store: these placements are
     // already banked under their finders from the hint in `played_room`, and
     // `notify_hints` will not bank a second copy. The order they are announced
     // in is what the shuffle decided, and is what a player sees.
+    let hintable = most_owed_item(&room, slot).expect("an item the slot is owed");
     let next_hints = |room: &mut Room, id: u64| {
         let conn = join(room, id, &name, &game, 0b111);
         let mut sink = Recorder::default();
         room.handle(
             conn,
             ClientPacket::Say(cmd::Say {
-                text: "!hint Additional Palette Color".to_string(),
+                text: format!("!hint {hintable}"),
             }),
             &mut sink,
         );
@@ -310,10 +312,10 @@ fn a_saved_password_never_replaces_the_configured_one() {
             ..Default::default()
         },
     );
-    before
-        .options
-        .slot_passwords
-        .insert(3, "original-slot-3".to_string());
+    before.options.slot_passwords = Some(std::collections::BTreeMap::from([(
+        3,
+        "original-slot-3".to_string(),
+    )]));
     let bytes = before.snapshot().encode(true);
 
     // Restarted with a different set. Rotation has to survive the restart,
@@ -326,10 +328,10 @@ fn a_saved_password_never_replaces_the_configured_one() {
             ..Default::default()
         },
     );
-    after
-        .options
-        .slot_passwords
-        .insert(3, "rotated-slot-3".to_string());
+    after.options.slot_passwords = Some(std::collections::BTreeMap::from([(
+        3,
+        "rotated-slot-3".to_string(),
+    )]));
     after
         .restore(Snapshot::decode(&bytes).expect("save decodes"))
         .expect("save restores");
@@ -340,7 +342,12 @@ fn a_saved_password_never_replaces_the_configured_one() {
         Some("rotated-admin")
     );
     assert_eq!(
-        after.options.slot_passwords.get(&3).map(String::as_str),
+        after
+            .options
+            .slot_passwords
+            .as_ref()
+            .and_then(|p| p.get(&3))
+            .map(String::as_str),
         Some("rotated-slot-3")
     );
 }
@@ -355,7 +362,7 @@ fn tracker_timestamps_survive_a_restart() {
         return;
     }
     let data = load(FIXTURE).unwrap();
-    let (slot, name, game) = first_player(&data);
+    let (slot, name, game) = richest_player(&data);
     let mut room = room_for(data.clone(), RoomOptions::default());
 
     // Connecting stamps the connection timer; checking a location stamps the

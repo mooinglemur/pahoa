@@ -30,6 +30,13 @@ Three details that are easy to get wrong, all confirmed against a live 185-slot 
   the packages themselves. 26 KB for 99 games. A tracker page fetches the real data separately and
   caches it by checksum.
 
+**Which slots appear where.** The reference walks two different sets and the difference is
+invisible until a seed has a spectator or an item-link group in it: `get_all_players()` — players
+only — feeds every per-player array, while `get_all_slots()` feeds `hints` alone. A spectator has no
+progress to report and a group has no client behind it. pahoa mirrors that split; see
+`MultiData::player_slots` against `MultiData::connectable_slots` for the same distinction on the
+room's own surfaces.
+
 `player_items_received` comes from the **remote** item queue — `(team, player, True)` in the
 reference — not the combined one.
 
@@ -40,21 +47,46 @@ abandoned slot from an active one. The reference persists them for the same reas
 (`MultiServer.py:667-670`). A slot that has genuinely never acted still reports `null` rather than
 a zero that would render as 1970.
 
+## Who may read it
+
+**The tracker is gated behind the admin token whenever one is configured** — not only for
+`race_mode` seeds.
+
+The reference restricts race rooms because its tracker links are handed out publicly. pahoa's
+exposure is different and, left open, worse in one specific way: the endpoints sit on a public port
+with no authentication, so an **anonymous port scan can iterate rooms and read every slot name out
+of them**. That is a disclosure regardless of whether a seed is a race, and slot names are people's
+names.
+
+So the rule is about deployment rather than seed:
+
+- **No admin token configured** — a standalone pahoa — and the tracker is open. This is the case the
+  CORS headers exist for, and it stays browser-fetchable.
+- **A token configured**, which is what an orchestrated room has, and the tracker requires it like
+  the rest of the admin surface. An orchestrator that proxies the tracker server-side holds the
+  token already and is unaffected.
+- **`--open-tracker`** restores the open behavior for an operator who wants both an admin API and a
+  public tracker.
+
+`race_mode` is parsed and available, and deliberately does **not** enter into this: gating on the
+seed would leave the ordinary case open to the scan, which is the larger hole.
+
 ## CORS
 
 Both endpoints send `Access-Control-Allow-Origin: *`, as the reference does
 (`WebHostLib/api/__init__.py:15-16`, and confirmed on the live endpoint).
 
-The intended deployment is that the orchestrator serves the tracker's static assets and its
+One intended deployment is that an orchestrator serves the tracker's static assets and its
 JavaScript fetches from the room, which is cross-origin: a different port alone is enough to make
 it so. Since these are plain `GET`s with no custom headers they are *simple requests*, so there is
 no preflight and no `OPTIONS` handler to write — the one response header is the whole of it.
 
 Two constraints that follow, and are worth not tripping over later:
 
-- **Adding a custom request header would end that.** An `Authorization` header on the tracker
-  would make it a non-simple request, requiring a preflight and an `OPTIONS` route. The tracker is
-  public, which is what keeps this simple; authenticating it is a bigger change than it looks.
+- **A gated tracker is not browser-fetchable.** Sending `Authorization` makes the request
+  non-simple, which needs a preflight pahoa does not answer. That is the trade accepted above: an
+  orchestrated room's tracker is fetched server-side by something holding the token, and only the
+  open cases — standalone, or `--open-tracker` — are reachable from a page.
 - **`*` and credentials are mutually exclusive.** If cookies were ever needed the wildcard would be
   rejected by the browser, and pahoa would have to echo the specific `Origin` and add
   `Access-Control-Allow-Credentials`. Nothing here needs credentials.
