@@ -1079,6 +1079,18 @@ impl Room {
         let sender_scoped = self.has_scoped(key);
 
         for (receiver, item, location, flags) in sortable {
+            // The room's durable history, if anything is keeping one. A no-op
+            // on every sink but the journalling one, so a room without
+            // `--journal` pays an empty call here rather than a branch on
+            // configuration it would otherwise have to carry.
+            out.journal_check(crate::effect::CheckRecord {
+                at: self.clock,
+                finder: slot,
+                receiver,
+                item,
+                location,
+                flags,
+            });
             let net = NetworkItem {
                 item,
                 location,

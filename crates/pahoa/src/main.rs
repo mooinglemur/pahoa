@@ -43,6 +43,11 @@ SERVE OPTIONS
     --snapshot <file.json>   Data package snapshot, from export-datapackage.py
     --save-dir <dir>         Where the room persists itself
     --save-interval <secs>   Save cadence (default 60)
+    --journal                Append a per-check history to history.jsonl in the
+                             save directory: one JSON line per location checked,
+                             continuing across restarts. Needs --save-dir. This
+                             is the organizer's record of a room, and it is not
+                             in the log stream.
     --outbound-budget <MiB>  Cap on queued outbound data across all clients.
                              Defaults to 288 KiB per slot, floored at 64 MiB —
                              a 2000-slot room gets 562 MiB, a small one 64.
@@ -108,6 +113,7 @@ const SERVE_OPTS: &[Opt] = &[
     value("--outbound-budget", &[]),
     value("--log-level", &["--loglevel"]),
     value("--log-format", &["--log_format"]),
+    flag("--journal", &[]),
     value("--filtered-port", &["--filtered_port"]),
     value("--tls-cert", &["--tls_cert"]),
     value("--tls-key", &["--tls_key"]),
@@ -367,6 +373,7 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
         save_dir: args.get("--save-dir").map(Path::new),
         save_interval,
+        journal: args.is_set("--journal"),
         options,
         explicit_options,
         use_embedded_options: args.is_set("--use-embedded-options"),

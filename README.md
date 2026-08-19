@@ -37,6 +37,7 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--snapshot <file.json>` | — | Data package snapshot, from `tools/export-datapackage.py` |
 | `--save-dir <dir>` | — | Where the room persists itself |
 | `--save-interval <secs>` | `60` | Save cadence |
+| `--journal` | off | Append a per-check history to `history.jsonl` beside the save |
 | `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
 | `--log-level <level>` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
 | `--log-format <fmt>` | `text` | `text` for a terminal, `json` for a log aggregator |
@@ -47,6 +48,24 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+### The room journal
+
+`--journal` appends one JSON line per location checked to `history.jsonl` in the
+save directory, continuing across restarts — the organizer's record of what
+happened in their room and when. It needs `--save-dir`, and it is **not** in the
+log stream: nothing about checks goes to stderr.
+
+That split is about access rather than durability. A log aggregator is the right
+place for an operator debugging across rooms, but scoping one organizer to one
+room's lines is not something Loki enforces, retention is a platform setting an
+async room can outlive, and a restarted room is a new pod. A file in the room's
+own directory has none of those problems.
+
+The actor pays 0.9% of a mass release to write it — it queues plain numbers and a
+thread does the JSON — and the channel drops rather than blocks if a disk stalls,
+recording the gap in the journal itself. [docs/journal.md](docs/journal.md) has
+the measurements and the format.
 
 ### Logging
 

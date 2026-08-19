@@ -393,6 +393,44 @@ shell in the first place.
 **This covers `server_password` too**, by the same argument — it is the third non-persisted secret,
 so `/option server_password` would revert on restart identically.
 
+## The room journal: `--journal`, and puna will want it on every room
+
+**New flag, off by default, needs `--save-dir`.** It appends one JSON line per location checked to
+`history.jsonl` in the save directory, continuing across restarts. This is the organizer-facing
+history — "when did each check happen" — and puna serving it is a file read from a directory it
+already owns exclusively, with no query language and no cross-room surface.
+
+```json
+{"type":"check","at":1787157141.420,"finder":1,"finder_name":"amperketBalala",
+ "receiver":1,"receiver_name":"amperketBalala","item":5606235,"item_name":"Archipelago Tarot",
+ "location":5606192,"location_name":"Green Deck Ante 1 White Stake","flags":1}
+```
+
+**Deliberately not in the log stream.** Checks do not reach stderr at any level, so this changes
+nothing about what puna ships to Loki. The reasoning is access rather than durability: Loki has no
+label-level authorization, so "this organizer reads this room and nothing else" would need room logs
+routed to their own tenant; retention is a platform setting an async room can outlive; and a
+restarted room is a new pod, so reassembling one room's history from pod logs needs a stable label
+promoted through the shipper. A file in the room's own directory needs none of that. Full reasoning
+and the format in [`docs/journal.md`](docs/journal.md).
+
+Three things puna should know:
+
+- **Size it.** ~264 bytes per check, so a full playthrough is 6 MB for a 96-slot seed and ~90 MB for
+  a 2000-slot one. It grows monotonically and is never pruned by pahoa — if a room directory has a
+  quota, this is the file that will find it.
+- **It is safe to read while the room is running.** Append-only, line-oriented, flushed every 1024
+  records and on the save timer. A reader that tails it or reads it whole will see complete lines; a
+  crash can lose the tail, which is the same bargain the save file makes.
+- **A gap announces itself.** If a disk stalls badly enough to fill the buffer, the writer drops
+  rather than blocking — because the alternative is a stalled disk stopping a live multiworld — and
+  writes `{"type":"gap","dropped":n}` into the journal at that point. Anything rendering the history
+  should show that line rather than skip it, since it is the only evidence the record is incomplete.
+
+The cost to the room is 0.9% of a mass release: the actor queues `Copy` records and a thread does the
+name resolution and JSON. Doing it inline would have cost 286% of that release, which is why the
+threading is not incidental.
+
 ## Logging: JSON, a startup banner, and reference-level verbosity
 
 **Set `--log-format json` on every puna room.** Default is `text`, for the standalone case where a

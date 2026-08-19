@@ -31,6 +31,8 @@ pub struct ServeArgs<'a> {
     /// default — so warning without this would fire on every restart of every
     /// room whose options are not all default.
     pub explicit_options: Vec<&'static str>,
+    /// Append a durable per-check history to the save directory.
+    pub journal: bool,
     /// Let the seed's own `server_options` override the options above.
     pub use_embedded_options: bool,
     pub log_level: LevelFilter,
@@ -142,6 +144,30 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         }
     };
 
+    // Opened after the restore, so a room that fails to load never appends to
+    // the history of the one it failed to become.
+    let (journal, journal_writer) = match (args.journal, args.save_dir) {
+        (false, _) => (None, None),
+        (true, None) => {
+            return Err(
+                "--journal needs --save-dir: the history is kept beside the save, so that \
+                 it survives a restart the way the save does"
+                    .to_string(),
+            );
+        }
+        (true, Some(dir)) => {
+            let (journal, writer) = pahoa_net::journal::Journal::open(
+                dir,
+                data.clone(),
+                Arc::clone(room.datapackage()),
+            )
+            .map_err(|e| format!("journal in {}: {e}", dir.display()))?;
+            tracing::info!(path = %writer.path().display(), "appending a per-check history");
+            (Some(journal), Some(writer))
+        }
+    };
+    let saves = SaveConfig { journal, ..saves };
+
     // Sized from the seed rather than left at a constant: the cap is there to
     // survive clients that stop reading, and how much that is depends entirely
     // on how many of them there are.
@@ -181,7 +207,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     };
     let runtime = build_runtime(&config).map_err(|e| format!("runtime: {e}"))?;
 
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         let server = Server::start_with_saves(room, config, saves)
             .await
             .map_err(|e| format!("bind: {e}"))?;
@@ -240,7 +266,16 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         tracing::info!(reason, "shutting down");
         server.shutdown().await;
         Ok(())
-    })
+    });
+
+    // After the runtime is done, so every `Journal` clone the actor held has
+    // been dropped and the writer's channel has closed. Joining before that
+    // would wait forever; skipping it would end the process with the last
+    // checks still in a buffer.
+    if let Some(writer) = journal_writer {
+        writer.finish();
+    }
+    result
 }
 
 /// Start collecting the `tracing` events the crates below this one emit.

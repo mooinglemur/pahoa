@@ -10,6 +10,7 @@ pub mod actor;
 pub mod budget;
 pub mod config;
 pub mod http;
+pub mod journal;
 pub mod metrics;
 pub mod save;
 pub mod server;

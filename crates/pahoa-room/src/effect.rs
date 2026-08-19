@@ -116,6 +116,40 @@ pub trait EffectSink {
         _slot: Option<crate::SlotKey>,
     ) {
     }
+
+    /// One location was checked, for the room's durable history.
+    ///
+    /// An effect rather than something the room writes, for the usual reason —
+    /// the room owns no files and has no clock beyond what it is handed. The
+    /// transport decides whether anyone is listening, and a sink that is not
+    /// journalling does nothing at all here.
+    ///
+    /// **Deliberately carries ids, not names.** A release pushes every location
+    /// a slot owns through this in one burst — 341,851 of them on a 2000-slot
+    /// room — and this runs on the task that owns all room state. Resolving
+    /// four names per record would put the allocations on that thread; the
+    /// record is `Copy`, and whatever consumes it resolves names on its own
+    /// time. See `docs/journal.md`.
+    fn journal_check(&mut self, _record: CheckRecord) {}
+}
+
+/// One location becoming checked, as the journal records it.
+///
+/// Every field is a number so the whole thing is `Copy` and costs an integer
+/// copy to emit. `at` is the room's clock rather than a fresh `SystemTime`,
+/// because the room has no clock of its own and reading one per record would be
+/// a syscall inside the release loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CheckRecord {
+    /// Unix seconds, from the room's clock.
+    pub at: f64,
+    /// The slot whose world contained the location.
+    pub finder: u32,
+    /// The slot the item belongs to.
+    pub receiver: u32,
+    pub item: i64,
+    pub location: i64,
+    pub flags: u32,
 }
 
 /// An [`EffectSink`] that records everything, for tests.
@@ -123,6 +157,8 @@ pub trait EffectSink {
 pub struct Recorder {
     pub events: Vec<Event>,
     pub dirty: bool,
+    /// Checks the room offered to the journal, in the order it offered them.
+    pub journal: Vec<CheckRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +198,10 @@ impl EffectSink for Recorder {
 
     fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    fn journal_check(&mut self, record: CheckRecord) {
+        self.journal.push(record);
     }
 }
 
@@ -203,6 +243,7 @@ impl Recorder {
 
     pub fn clear(&mut self) {
         self.events.clear();
+        self.journal.clear();
         self.dirty = false;
     }
 }

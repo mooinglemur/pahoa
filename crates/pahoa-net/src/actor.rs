@@ -103,14 +103,18 @@ struct Dispatcher<'a> {
     /// Membership changes the shards need, collected during a handler and
     /// flushed after, so the room's borrow is released first.
     updates: Vec<(ConnId, crate::shard::Membership)>,
+    /// Where checks go when the room is keeping a history. `None` is the
+    /// common case and costs one branch per check.
+    journal: Option<&'a crate::journal::Journal>,
 }
 
 impl<'a> Dispatcher<'a> {
-    fn new(shards: &'a Shards) -> Self {
+    fn new(shards: &'a Shards, journal: Option<&'a crate::journal::Journal>) -> Self {
         Self {
             shards,
             dirty: false,
             updates: Vec::new(),
+            journal,
         }
     }
 }
@@ -170,6 +174,14 @@ impl EffectSink for Dispatcher<'_> {
     fn mark_dirty(&mut self) {
         self.dirty = true;
     }
+
+    fn journal_check(&mut self, record: pahoa_room::CheckRecord) {
+        // `record` never blocks: it drops rather than wait, so a stalled disk
+        // slows the journal and not the multiworld.
+        if let Some(journal) = self.journal {
+            journal.record(record);
+        }
+    }
 }
 
 /// Unix time as a float, the scale `RoomInfo.time` and the room's clock use.
@@ -197,6 +209,12 @@ pub struct SaveConfig {
     /// `terminationGracePeriodSeconds`, node loss, OOM kill and spot preemption
     /// all skip it. The cadence above is what actually bounds data loss.
     pub shutdown_timeout: Duration,
+    /// The room's durable history, if it is keeping one.
+    ///
+    /// Here rather than as its own parameter because it is persistence: it
+    /// lives in the save directory, it appends across restarts, and a room with
+    /// no `--save-dir` has nowhere to put it.
+    pub journal: Option<crate::journal::Journal>,
 }
 
 impl Default for SaveConfig {
@@ -206,6 +224,7 @@ impl Default for SaveConfig {
             interval: Duration::from_secs(60),
             compress: true,
             shutdown_timeout: Duration::from_secs(10),
+            journal: None,
         }
     }
 }
@@ -319,6 +338,11 @@ pub async fn run_with_saves(
     mut rx: mpsc::Receiver<ActorMsg>,
     save_config: SaveConfig,
 ) {
+    // Held apart from the `Saver` so that a `Dispatcher` can borrow it while
+    // `saver.dirty` is still being written — the two are independent, and
+    // leaving the journal inside the config would make them look otherwise.
+    let mut save_config = save_config;
+    let journal = save_config.journal.take();
     let mut saver = Saver::new(save_config);
     let mut save_timer = tokio::time::interval(saver.config.interval);
     // The first tick of an `Interval` completes immediately, which would save an
@@ -345,20 +369,25 @@ pub async fn run_with_saves(
             // actor wait, and a clock is not a client. Neither is a save that
             // has already finished on another thread.
             _ = tokio::time::sleep(countdown.unwrap_or_default()), if countdown.is_some() => {
-                let mut sink = Dispatcher::new(&shards);
+                let mut sink = Dispatcher::new(&shards, journal.as_ref());
                 room.tick(now(), &mut sink);
                 saver.dirty |= sink.dirty;
                 continue;
             }
             _ = save_timer.tick() => {
                 saver.maybe_start(room);
+                // The journal reaches the disk on the same cadence as the save,
+                // so the two agree about how much a hard kill can cost.
+                if let Some(journal) = &journal {
+                    journal.flush();
+                }
                 continue;
             }
             () = saver.finished() => continue,
         };
         let Some(msg) = msg else { break };
 
-        let mut sink = Dispatcher::new(&shards);
+        let mut sink = Dispatcher::new(&shards, journal.as_ref());
         // Refresh the room's notion of "now" before it acts on anything, so a
         // command that needs a clock has a current one.
         room.tick(now(), &mut sink);

@@ -36,6 +36,13 @@ const CLIENTS: usize = 64;
 /// this file is run on its own, which is the worst way for a flake to behave.
 /// Async-aware rather than `std`, because the guard is held across the awaits
 /// that do the measuring — a blocking lock there would park a runtime worker.
+///
+/// **Taken before the setup, not just around the measurement.** Holding it only
+/// over the sampling window is not enough and was still failing under load: the
+/// *other* test's setup connects 64 deflate clients, each join is an `AllText`
+/// broadcast, and each of those compresses. Those compressions land inside
+/// whatever window the other test is measuring, however tight it is. Serializing
+/// the tests whole is the only version of this that holds.
 static COUNTER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn load() -> Option<Arc<MultiData>> {
@@ -166,6 +173,8 @@ async fn a_broadcast_is_compressed_once_per_shard_not_once_per_connection() {
         eprintln!("SKIP: fixture {FIXTURE} not present");
         return;
     };
+    // Held across the *whole* test, setup included. See `COUNTER`.
+    let _exclusive = COUNTER.lock().await;
     let slots: Vec<(String, String)> = data
         .player_slots()
         .take(CLIENTS)
@@ -196,7 +205,6 @@ async fn a_broadcast_is_compressed_once_per_shard_not_once_per_connection() {
     }
 
     // One `Say` is exactly one `Recipients::AllText` broadcast.
-    let _exclusive = COUNTER.lock().await;
     let before = pahoa_net::ws::deflate::compressions();
     clients[0]
         .send(&serde_json::json!([{"cmd": "Say", "text": "hello everyone"}]).to_string())
@@ -238,6 +246,7 @@ async fn a_connection_without_deflate_costs_no_compression_at_all() {
         eprintln!("SKIP: fixture {FIXTURE} not present");
         return;
     };
+    let _exclusive = COUNTER.lock().await;
     let (name, game) = data
         .player_slots()
         .next()
@@ -253,7 +262,6 @@ async fn a_connection_without_deflate_costs_no_compression_at_all() {
     client.drain().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let _exclusive = COUNTER.lock().await;
     let before = pahoa_net::ws::deflate::compressions();
     client
         .send(&serde_json::json!([{"cmd": "Say", "text": "nobody wants deflate"}]).to_string())
