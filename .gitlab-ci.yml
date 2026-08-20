@@ -70,27 +70,6 @@ test:
       - .cargo/
   variables:
     CARGO_HOME: $CI_PROJECT_DIR/.cargo
-    # This is the job worth giving CPU to. Unlike the image build — whose tail is
-    # a single-threaded LTO link — nearly all of this is compiling many crates
-    # and linking many test binaries, which parallelizes well.
-    #
-    # It also matters more than it looks: cargo picks its default job count from
-    # `available_parallelism()`, which respects the cgroup CPU quota. A pod with
-    # a small default quota therefore builds at that many jobs no matter how big
-    # the node is, so the quota *is* the build's parallelism.
-    #
-    # Measured on 8 CPUs, from cold with no cache: clippy 64 s, test 13 s
-    # (dependencies are built during clippy and reused), peaking at 2.27 GiB
-    # while test binaries link. The request sits near that measured peak so
-    # scheduling is honest about what the job really takes; the limit leaves room
-    # to burst as the tree grows rather than OOM-killing mid-link.
-    #
-    # CPU request == limit, which is what makes the build's parallelism
-    # deterministic — see the note above about the quota setting cargo's -j.
-    #
-    # These do nothing unless the runner permits the overwrite — its config.toml
-    # needs the matching cpu/memory `*_overwrite_max_allowed` entries under
-    # [runners.kubernetes], set at least this high.
     KUBERNETES_CPU_REQUEST: "8"
     KUBERNETES_CPU_LIMIT: "8"
     KUBERNETES_MEMORY_REQUEST: "4Gi"
@@ -126,6 +105,10 @@ image-pahoa:
     - k8s
   variables:
     CONTAINERS_STORAGE_CONF: /tmp/storage.conf
+    KUBERNETES_CPU_REQUEST: "8"
+    KUBERNETES_CPU_LIMIT: "8"
+    KUBERNETES_MEMORY_REQUEST: "4Gi"
+    KUBERNETES_MEMORY_LIMIT: "6Gi"
   # No resource override here on purpose. This job's wall time is dominated by
   # the fat-LTO link, which is single-threaded, so extra CPU buys almost
   # nothing — a measured 8-CPU release build ran at ~1.2x parallelism over its

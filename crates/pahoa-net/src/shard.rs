@@ -180,7 +180,17 @@ impl Shards {
     pub fn tell(&self, conn: ConnId, msg: ShardMsg) {
         // try_send, never await: the actor blocking on a shard would reintroduce
         // exactly the head-of-line stall shards exist to prevent.
-        let _ = self.shard_of(conn).try_send(msg);
+        // A dropped `Remove` is not merely a lost message: it strands the
+        // member, and with it the outbound budget it still holds, for the life
+        // of the process. Say so rather than discarding it silently.
+        if let Err(e) = self.shard_of(conn).try_send(msg) {
+            let dropped = match &e {
+                mpsc::error::TrySendError::Full(m) | mpsc::error::TrySendError::Closed(m) => m,
+            };
+            if matches!(dropped, ShardMsg::Remove { .. }) {
+                tracing::warn!(%conn, "shard mailbox full; a connection's removal was dropped");
+            }
+        }
     }
 
     /// Hand a broadcast to every shard. Cost to the actor is K sends.
@@ -273,15 +283,19 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
             }
             ShardMsg::Send { conn, msg } => {
                 let mut lagged = Vec::new();
+                let mut gone = Vec::new();
                 if let Some(m) = members.get(&conn)
                     && !m.lagged
                 {
                     let frame = variant(m, &msg, level, &mut deflaters, &mut Vec::new());
-                    if !deliver(m, frame, &budget) {
-                        lagged.push(conn);
+                    match deliver(m, frame, &budget) {
+                        Delivery::Sent => {}
+                        Delivery::Behind => lagged.push(conn),
+                        Delivery::Gone => gone.push(conn),
                     }
                 }
                 mark_lagged(&mut members, &lagged);
+                mark_gone(&mut members, &gone);
             }
             ShardMsg::Broadcast { to, msg } => {
                 // Memoized across this whole broadcast, per window size, and
@@ -342,16 +356,20 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                 }
 
                 let mut lagged = Vec::new();
+                let mut gone = Vec::new();
                 for (conn, m) in recipients {
                     if m.lagged {
                         continue;
                     }
                     let frame = variant(m, &msg, level, &mut deflaters, &mut deflated);
-                    if !deliver(m, frame, &budget) {
-                        lagged.push(*conn);
+                    match deliver(m, frame, &budget) {
+                        Delivery::Sent => {}
+                        Delivery::Behind => lagged.push(*conn),
+                        Delivery::Gone => gone.push(*conn),
                     }
                 }
                 mark_lagged(&mut members, &lagged);
+                mark_gone(&mut members, &gone);
             }
             ShardMsg::Close { conn, reason } => {
                 if let Some(m) = members.get(&conn) {
@@ -401,8 +419,24 @@ fn variant(
     frame
 }
 
-/// Queue a frame. Never awaits. Returns false when the connection has fallen
-/// too far behind and must be dropped.
+/// What happened to one frame.
+///
+/// The distinction between the last two is the whole point. Both end the
+/// connection's participation, but only [`Delivery::Behind`] is a *judgment*
+/// about the client, and only that one should be counted and announced as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Delivery {
+    Sent,
+    /// The client is not keeping up: it is over budget, or its writer's queue
+    /// is full. This is the case the lag policy exists for.
+    Behind,
+    /// The writer task has already exited, so this connection is over — the
+    /// peer hung up, or it was closed. Nothing is owed to it and nothing is
+    /// wrong with it; the shard has simply not seen its `Remove` yet.
+    Gone,
+}
+
+/// Queue a frame. Never awaits.
 ///
 /// **Dropping the frame and carrying on is not an option**, which is the subtle
 /// part. `send_new_items` advances a slot's `send_index` as it sends, so a
@@ -411,18 +445,48 @@ fn variant(
 /// the protocol is resumable: `Connect` resends `checked_locations` in full and
 /// replays the item queue from index zero, so a lagged client reconnects into
 /// correct state. Only chat scrollback is lost, which any disconnect loses.
-fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> bool {
+fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> Delivery {
     let size = frame.len();
     if !budget.reserve(&member.budget, size) {
-        return false;
+        return Delivery::Behind;
     }
-    if member.tx.try_send(Outbound::Frame(frame)).is_err() {
-        // The writer is gone or its queue is full; hand the reservation back
-        // rather than leaking it, then drop the connection for the same reason.
-        Budget::release(&member.budget, size);
-        return false;
+    match member.tx.try_send(Outbound::Frame(frame)) {
+        Ok(()) => Delivery::Sent,
+        Err(e) => {
+            // Hand the reservation back rather than leaking it, whichever of
+            // the two this was.
+            Budget::release(&member.budget, size);
+            match e {
+                mpsc::error::TrySendError::Full(_) => Delivery::Behind,
+                mpsc::error::TrySendError::Closed(_) => Delivery::Gone,
+            }
+        }
     }
-    true
+}
+
+/// Stop sending to connections whose writer has already exited.
+///
+/// **This is not a lag disconnect and must not be reported as one.** Every
+/// ordinary disconnect passes through here: the writer task drops `out_rx` the
+/// moment the peer hangs up, and any broadcast between then and the actor's
+/// `Remove` arriving finds a closed channel. Counting those made
+/// `lag_disconnects` — documented as "should be zero in a healthy room" — climb
+/// once per disconnect, and put an `INFO` line accusing a client of being too
+/// slow into the log for what was a clean goodbye. On a room with reconnect
+/// churn that is the whole log.
+///
+/// The flag is reused because the effect on the shard is identical: send it
+/// nothing further and wait for `Remove`. There is nothing to close — the
+/// writer is what closed.
+fn mark_gone(members: &mut HashMap<ConnId, Member>, gone: &[ConnId]) {
+    for conn in gone {
+        if let Some(m) = members.get_mut(conn)
+            && !m.lagged
+        {
+            m.lagged = true;
+            tracing::debug!(%conn, "writer already gone; awaiting removal");
+        }
+    }
 }
 
 /// Close out the connections that could not keep up.
@@ -449,8 +513,12 @@ mod tests {
 
     /// A member whose outbound queue is already full, which is the state every
     /// interesting case here starts from.
-    fn wedged() -> (Member, mpsc::Receiver<&'static str>, mpsc::Sender<Outbound>) {
-        let (tx, _held) = mpsc::channel(1);
+    fn wedged() -> (
+        Member,
+        mpsc::Receiver<&'static str>,
+        mpsc::Receiver<Outbound>,
+    ) {
+        let (tx, held) = mpsc::channel(1);
         // Fill it, so any `try_send(Outbound::Close)` must fail.
         tx.try_send(Outbound::Frame(Bytes::from_static(b"x")))
             .expect("first send fits");
@@ -466,9 +534,12 @@ mod tests {
             lagged: false,
             scoped: false,
         };
-        // `_held` is returned so the receiver stays alive; a dropped receiver
-        // would make `try_send` fail for the wrong reason.
-        (member, close_rx, tx)
+        // `held` is *returned*, not merely bound: a receiver dropped here would
+        // close the channel, and `try_send` would then fail for the wrong
+        // reason entirely — "this connection is gone" rather than "this
+        // connection is behind". Those are the two cases these tests exist to
+        // tell apart.
+        (member, close_rx, held)
     }
 
     /// The bug in one assertion.
@@ -479,7 +550,7 @@ mod tests {
     /// socket that stays open.
     #[test]
     fn marking_a_connection_lagged_closes_it_out_of_band() {
-        let (member, mut close_rx, _tx) = wedged();
+        let (member, mut close_rx, _out_rx) = wedged();
         let mut members = HashMap::from([(ConnId(1), member)]);
 
         mark_lagged(&mut members, &[ConnId(1)]);
@@ -532,11 +603,73 @@ mod tests {
         );
     }
 
+    /// **An ordinary goodbye is not a lag disconnect.**
+    ///
+    /// The writer task drops `out_rx` the moment its peer hangs up, so any
+    /// broadcast between then and the actor's `Remove` finds a closed channel.
+    /// Reading that as "this client cannot keep up" accused every departing
+    /// player of being too slow: on the dev cluster a room with reconnect churn
+    /// logged one such line per disconnect and drove `lag_disconnects` — which
+    /// the metric's own help text says should be zero in a healthy room —
+    /// straight up, hiding the real congestion it exists to report.
+    #[test]
+    fn a_closed_writer_is_not_a_lagging_client() {
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(64);
+        drop(rx); // The writer task has exited; this is every clean disconnect.
+        let member = Member {
+            tx,
+            close: close_tx,
+            auth: true,
+            no_text: false,
+            slot: Some((0, 1)),
+            deflate: None,
+            budget: ConnHandle::default(),
+            lagged: false,
+            scoped: false,
+        };
+        let budget = Budget::new(1 << 20, 1 << 16);
+
+        assert_eq!(
+            deliver(&member, Bytes::from_static(b"hello"), &budget),
+            Delivery::Gone,
+            "a closed queue is a finished connection, not a slow one"
+        );
+        // The reservation handback is asserted in `budget`'s own tests, which
+        // serialize against the process-wide counters this one must not touch.
+
+        let mut members = HashMap::from([(ConnId(1), member)]);
+        mark_gone(&mut members, &[ConnId(1)]);
+
+        assert!(
+            members[&ConnId(1)].lagged,
+            "the shard must stop sending to it and wait for its removal"
+        );
+        assert!(
+            close_rx.try_recv().is_err(),
+            "there is nothing to close: the writer is what closed"
+        );
+    }
+
+    /// The other half of the distinction — a *full* queue really is a client
+    /// that is not keeping up, and must still be treated as one.
+    #[test]
+    fn a_full_writer_queue_is_still_a_lagging_client() {
+        let (member, _close_rx, _tx) = wedged();
+        let budget = Budget::new(1 << 20, 1 << 16);
+
+        assert_eq!(
+            deliver(&member, Bytes::from_static(b"hello"), &budget),
+            Delivery::Behind,
+            "a full queue is the case the lag policy exists for"
+        );
+    }
+
     /// Twice is not twice as closed, and the second attempt must not panic or
     /// wedge on a full signal channel.
     #[test]
     fn a_second_lag_mark_is_harmless() {
-        let (member, mut close_rx, _tx) = wedged();
+        let (member, mut close_rx, _out_rx) = wedged();
         let mut members = HashMap::from([(ConnId(1), member)]);
 
         mark_lagged(&mut members, &[ConnId(1)]);
@@ -581,7 +714,7 @@ mod tests {
     /// did not perform.
     #[test]
     fn a_kick_falls_back_out_of_band_when_the_queue_is_full() {
-        let (member, mut close_rx, _tx) = wedged();
+        let (member, mut close_rx, _out_rx) = wedged();
 
         close_member(&member, "kicked");
 

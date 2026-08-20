@@ -110,9 +110,31 @@ impl Budget {
     }
 
     /// Give the room back, once the bytes have reached the socket.
+    ///
+    /// **The global counter is decremented by what this connection actually
+    /// gave back, never by what the caller asked to give back**, and the two
+    /// differ in a race that a live room hits constantly. A disconnecting
+    /// connection is reconciled by [`release_all`] from its shard, while its
+    /// writer task may already have taken a frame off the queue and be sitting
+    /// in `write_all`. `release_all` counts that frame — it is still in
+    /// `queued` — and the writer then releases it a second time. Subtracting
+    /// blindly wraps `usize`, and because the check is `total > limit`, a
+    /// counter one byte below zero reads as sixteen exabytes: every reservation
+    /// in the room fails from that moment on, for every connection, forever.
+    /// The room drops all of its clients at once and refuses every reconnect,
+    /// while holding no memory at all.
+    ///
+    /// Clamping to what is held makes the two orderings agree. Whichever runs
+    /// first frees the bytes; the other finds nothing left and frees nothing.
     pub fn release(conn: &ConnBudget, size: usize) {
-        conn.queued.fetch_sub(size, Ordering::Relaxed);
-        QUEUED.fetch_sub(size, Ordering::Relaxed);
+        let mut freed = 0;
+        let _ = conn
+            .queued
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                freed = held.min(size);
+                Some(held - freed)
+            });
+        QUEUED.fetch_sub(freed, Ordering::Relaxed);
         // An oversize allowance is only ever claimed on an empty queue, so that
         // message is first in line and the writer drains in order — the first
         // release is therefore the one that clears it.
@@ -127,6 +149,11 @@ impl Budget {
     /// Release everything a connection still holds, when it goes away without
     /// draining. Without this the global budget leaks on every disconnect and
     /// the room slowly refuses to send anything at all.
+    ///
+    /// Safe to interleave with [`release`] in either order: this takes whatever
+    /// is left and leaves zero behind, so a writer still owing a release for a
+    /// frame counted here will find nothing to free rather than double-freeing
+    /// it.
     pub fn release_all(conn: &ConnBudget) {
         let held = conn.queued.swap(0, Ordering::Relaxed);
         conn.oversize.store(0, Ordering::Relaxed);
@@ -271,6 +298,82 @@ mod tests {
         // The failed attempt must not leave its bytes behind, or the budget
         // ratchets down until nothing can be sent.
         assert_eq!(queued_bytes(), 1024);
+    }
+
+    /// **The room-killer, in one assertion.**
+    ///
+    /// A connection disconnects. Its shard reconciles the whole reservation
+    /// with `release_all`, but its writer task had already taken that frame off
+    /// the queue and was inside `write_all`; when the write returns, the writer
+    /// releases the same bytes again. Subtracting them twice wrapped the
+    /// process-wide counter to just under `usize::MAX`, and since admission is
+    /// `total > limit`, *every* reservation in the room failed from then on:
+    /// all clients dropped in the same instant, every reconnect dropped on
+    /// arrival, and the process held no memory to show for it. Seen live as
+    /// `pahoa_outbound_queued_bytes 18446744073709548046` — 3570 bytes below
+    /// zero was enough to end the room.
+    #[test]
+    fn releasing_a_frame_a_disconnect_already_reconciled_does_not_wrap() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 3570));
+        assert_eq!(queued_bytes(), 3570);
+
+        // The shard sees the disconnect and hands back everything outstanding.
+        Budget::release_all(&conn);
+        assert_eq!(queued_bytes(), 0);
+
+        // The writer's `write_all` returns and it releases the frame it had
+        // already popped — the same bytes, a second time.
+        Budget::release(&conn, 3570);
+
+        assert_eq!(
+            queued_bytes(),
+            0,
+            "the global counter wrapped; every reservation in the room would \
+             now fail forever"
+        );
+    }
+
+    /// The same race with the halves reversed, which is equally reachable: the
+    /// writer finishes first and the shard reconciles afterwards.
+    #[test]
+    fn a_disconnect_after_the_writer_released_frees_nothing_twice() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 1024));
+        assert!(budget.reserve(&conn, 512));
+        Budget::release(&conn, 1024);
+        assert_eq!(queued_bytes(), 512);
+
+        Budget::release_all(&conn);
+        assert_eq!(
+            queued_bytes(),
+            0,
+            "only the undrained remainder should come back"
+        );
+    }
+
+    /// Partial credit, not blind subtraction: a release larger than what is
+    /// held frees what is held and stops there.
+    #[test]
+    fn a_release_never_frees_more_than_the_connection_holds() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 256));
+        Budget::release(&conn, 4096);
+        assert_eq!(queued_bytes(), 0);
+
+        // And a release against a connection holding nothing is a no-op rather
+        // than a hole in the global counter.
+        Budget::release(&conn, 4096);
+        assert_eq!(queued_bytes(), 0);
     }
 
     #[test]
