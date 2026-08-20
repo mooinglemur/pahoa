@@ -29,10 +29,61 @@ pub enum Outbound {
     Close(&'static str),
 }
 
+/// A close that does not depend on the queue it is closing.
+///
+/// **This exists because the obvious version deadlocks against itself.** A
+/// connection is marked lagged precisely *because* its outbound queue
+/// overflowed; queuing the close onto that same full queue therefore fails in
+/// exactly the case the close exists for, and the room then forgets a client
+/// that never learned it was dropped. The socket stays open, the player keeps
+/// typing into a room that is no longer listening, and neither side can tell.
+///
+/// A capacity of one is the whole design: a second close is redundant, so a
+/// full channel here means one is already on its way and dropping the duplicate
+/// is correct rather than lossy.
+pub type CloseSignal = mpsc::Sender<&'static str>;
+
+/// Close `member`, preferring the ordered path and guaranteeing the outcome.
+///
+/// The queue is tried first so that anything already queued for this connection
+/// still reaches it — an admin kick sends the player an explanation immediately
+/// before closing, and jumping the queue would drop it. The out-of-band signal
+/// is the fallback, and it only fires when the queue is full, which is when
+/// those queued frames were never going to be delivered anyway.
+fn close_member(member: &Member, reason: &'static str) {
+    if member.tx.try_send(Outbound::Close(reason)).is_ok() {
+        return;
+    }
+    // Full or gone. `try_send` failing here means either a close is already
+    // pending or the writer has stopped; both end the connection.
+    force_close(member, reason);
+}
+
+/// Close without going through the outbound queue at all.
+///
+/// For a connection already known not to be keeping up, and the distinction
+/// from [`close_member`] is the whole fix rather than a refinement of it.
+/// A queue that *accepts* a close is not a queue that will *deliver* one: the
+/// common way to lag is to exhaust the byte budget while the writer sits in a
+/// `write_all` against a peer that has stopped reading. The queue then has room,
+/// the ordered close is happily accepted, and it waits behind frames that will
+/// never be written. Every path that queues the close therefore succeeds and
+/// nothing reaches the socket — which is exactly the state that looked, from
+/// the room's side, like a completed disconnect.
+///
+/// A client that is not draining cannot read a courtesy close frame anyway, so
+/// nothing is lost by skipping the queue for it.
+fn force_close(member: &Member, reason: &'static str) {
+    let _ = member.close.try_send(reason);
+}
+
 /// Membership the shard needs to expand [`Recipients`] locally.
 #[derive(Debug, Clone)]
 struct Member {
     tx: mpsc::Sender<Outbound>,
+    /// The escape hatch for closing a connection whose queue is full. See
+    /// [`CloseSignal`].
+    close: CloseSignal,
     auth: bool,
     no_text: bool,
     slot: Option<SlotKey>,
@@ -65,6 +116,7 @@ pub enum ShardMsg {
     Add {
         conn: ConnId,
         tx: mpsc::Sender<Outbound>,
+        close: CloseSignal,
         deflate: Option<u8>,
         budget: ConnHandle,
         /// From the port this connection arrived on, and fixed for its life.
@@ -164,6 +216,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
             ShardMsg::Add {
                 conn,
                 tx,
+                close,
                 deflate,
                 budget,
                 scoped,
@@ -172,6 +225,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                     conn,
                     Member {
                         tx,
+                        close,
                         auth: false,
                         no_text: false,
                         slot: None,
@@ -301,7 +355,11 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
             }
             ShardMsg::Close { conn, reason } => {
                 if let Some(m) = members.get(&conn) {
-                    let _ = m.tx.try_send(Outbound::Close(reason));
+                    // An admin kick most often lands on a client that is
+                    // already struggling — which is exactly when a queued close
+                    // would be dropped and the kick would report success while
+                    // the client stayed connected.
+                    close_member(m, reason);
                 }
             }
         }
@@ -377,7 +435,156 @@ fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[ConnId]) {
             m.lagged = true;
             crate::metrics::record_lag_disconnect();
             tracing::info!(%conn, "dropping a connection that cannot keep up");
-            let _ = m.tx.try_send(Outbound::Close("too slow"));
+            // Out of band, unconditionally. This connection is lagged, so its
+            // writer is by definition behind — queuing the close would put it
+            // after work that is not moving. See `force_close`.
+            force_close(m, "too slow");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A member whose outbound queue is already full, which is the state every
+    /// interesting case here starts from.
+    fn wedged() -> (Member, mpsc::Receiver<&'static str>, mpsc::Sender<Outbound>) {
+        let (tx, _held) = mpsc::channel(1);
+        // Fill it, so any `try_send(Outbound::Close)` must fail.
+        tx.try_send(Outbound::Frame(Bytes::from_static(b"x")))
+            .expect("first send fits");
+        let (close_tx, close_rx) = mpsc::channel(1);
+        let member = Member {
+            tx: tx.clone(),
+            close: close_tx,
+            auth: true,
+            no_text: false,
+            slot: Some((0, 1)),
+            deflate: None,
+            budget: ConnHandle::default(),
+            lagged: false,
+            scoped: false,
+        };
+        // `_held` is returned so the receiver stays alive; a dropped receiver
+        // would make `try_send` fail for the wrong reason.
+        (member, close_rx, tx)
+    }
+
+    /// The bug in one assertion.
+    ///
+    /// A lagged connection's close must not be queued, because the queue is
+    /// either full or — more often — accepting work its writer will never get
+    /// through. Either way the client is never told, and the room forgets a
+    /// socket that stays open.
+    #[test]
+    fn marking_a_connection_lagged_closes_it_out_of_band() {
+        let (member, mut close_rx, _tx) = wedged();
+        let mut members = HashMap::from([(ConnId(1), member)]);
+
+        mark_lagged(&mut members, &[ConnId(1)]);
+
+        assert_eq!(
+            close_rx.try_recv(),
+            Ok("too slow"),
+            "a lagged connection was not closed out of band, so the client is \
+             never told and its socket stays open"
+        );
+        assert!(members[&ConnId(1)].lagged);
+    }
+
+    /// **The subtle half, and the one the cluster actually hit.**
+    ///
+    /// The queue here has plenty of room, so a queued close would be accepted —
+    /// and would then wait behind frames whose `write_all` is blocked against a
+    /// peer that stopped reading. Accepting is not delivering. A lagged
+    /// connection must therefore skip the queue *even when the queue looks
+    /// healthy*, which is exactly what a naive reading of "the queue was full"
+    /// would get wrong.
+    #[test]
+    fn a_lagged_close_skips_the_queue_even_when_the_queue_has_room() {
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(64);
+        let member = Member {
+            tx,
+            close: close_tx,
+            auth: true,
+            no_text: false,
+            slot: Some((0, 1)),
+            deflate: None,
+            budget: ConnHandle::default(),
+            lagged: false,
+            scoped: false,
+        };
+        let mut members = HashMap::from([(ConnId(1), member)]);
+
+        mark_lagged(&mut members, &[ConnId(1)]);
+
+        assert_eq!(
+            close_rx.try_recv(),
+            Ok("too slow"),
+            "the close was queued instead of forced; a wedged writer will never \
+             reach it and the client stays connected to a room that forgot it"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing should have been queued for a connection that is not draining"
+        );
+    }
+
+    /// Twice is not twice as closed, and the second attempt must not panic or
+    /// wedge on a full signal channel.
+    #[test]
+    fn a_second_lag_mark_is_harmless() {
+        let (member, mut close_rx, _tx) = wedged();
+        let mut members = HashMap::from([(ConnId(1), member)]);
+
+        mark_lagged(&mut members, &[ConnId(1)]);
+        mark_lagged(&mut members, &[ConnId(1)]);
+
+        assert_eq!(close_rx.try_recv(), Ok("too slow"));
+        // One signal is enough; the capacity-1 channel drops the duplicate.
+        assert!(close_rx.try_recv().is_err());
+    }
+
+    /// A kick prefers the ordered path, so that the explanation the room just
+    /// queued for the player still reaches them.
+    #[test]
+    fn a_kick_uses_the_queue_when_it_has_room() {
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(4);
+        let member = Member {
+            tx,
+            close: close_tx,
+            auth: true,
+            no_text: false,
+            slot: Some((0, 1)),
+            deflate: None,
+            budget: ConnHandle::default(),
+            lagged: false,
+            scoped: false,
+        };
+
+        close_member(&member, "kicked");
+
+        assert!(
+            matches!(rx.try_recv(), Ok(Outbound::Close("kicked"))),
+            "an ordered close should travel with the frames it must follow"
+        );
+        assert!(
+            close_rx.try_recv().is_err(),
+            "the out-of-band path is a fallback, not the default"
+        );
+    }
+
+    /// ...but falls back when it cannot, rather than reporting a disconnect it
+    /// did not perform.
+    #[test]
+    fn a_kick_falls_back_out_of_band_when_the_queue_is_full() {
+        let (member, mut close_rx, _tx) = wedged();
+
+        close_member(&member, "kicked");
+
+        assert_eq!(close_rx.try_recv(), Ok("kicked"));
     }
 }

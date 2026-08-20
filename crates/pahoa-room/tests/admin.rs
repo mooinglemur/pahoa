@@ -164,6 +164,59 @@ fn say_reaches_the_room() {
     );
 }
 
+/// An announcement must be recognizable *as* one.
+///
+/// Both halves are trust properties rather than formatting: without the prefix
+/// an announcement is bare unattributed text that **impersonates a player**, and
+/// with the wrong `type` a client that channels server messages will not treat
+/// it as one — `CommandResult` means "the reply to your own command" upstream.
+/// The admin API has more than one caller, so neither can be left to them.
+#[test]
+fn say_is_attributed_to_the_server_and_typed_as_server_chat() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, ..) = room().unwrap();
+    let mut sink = Recorder::default();
+    room.admin(
+        AdminCommand::Say {
+            text: "Meow?".into(),
+        },
+        &mut sink,
+    );
+
+    let announced: Vec<&pahoa_proto::server::PrintJson> = sink
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            pahoa_room::Event::Broadcast { msgs, .. } => Some(msgs),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|p| match p {
+            pahoa_proto::ServerPacket::PrintJSON(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(announced.len(), 1, "{announced:?}");
+    let printed = announced[0];
+    assert_eq!(
+        printed.print_type,
+        Some(pahoa_proto::server::PrintJsonType::ServerChat),
+        "an announcement typed as a command reply is not recognizable as one"
+    );
+    let text: String = printed
+        .data
+        .iter()
+        .filter_map(|p| p.text.as_deref())
+        .collect();
+    assert_eq!(text, "[Server]: Meow?");
+    // The unprefixed original rides along, as upstream sends it, so a client
+    // may render either.
+    assert_eq!(printed.message.as_deref(), Some("Meow?"));
+}
+
 /// The same validator client chat goes through, so an administrator cannot put
 /// control characters into every connected client's console.
 #[test]

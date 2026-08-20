@@ -266,6 +266,99 @@ Not urgent: it costs diagnosability, not correctness, and puna reads pod logs di
 
 ---
 
+## P21 — a close that depends on the queue it is closing never happens
+
+**Open, and it produces a half-open connection the client cannot detect.** Found on the dev cluster
+2026-08-20, from a symptom an operator reported as "my client thought it was connected to all three
+slots, but it wasn't".
+
+`mark_lagged` in `crates/pahoa-net/src/shard.rs`:
+
+```rust
+m.lagged = true;
+crate::metrics::record_lag_disconnect();
+tracing::info!(%conn, "dropping a connection that cannot keep up");
+let _ = m.tx.try_send(Outbound::Close("too slow"));
+```
+
+A connection is marked lagged **because its outbound queue overflowed**. The close is then
+`try_send` onto that same queue, so in the case this exists to handle it fails — and the failure is
+discarded by `let _ =`. The room marks the connection lagged, counts a lag disconnect, logs
+"dropping a connection", and stops sending to it. **Nothing reaches the socket**, so the peer never
+learns and its TCP connection stays open indefinitely.
+
+The result is the worst shape a disconnect can take: the server has forgotten the client, the client
+believes it is playing, and neither can tell. It resolves only when the player notices their inputs
+have no effect and reconnects by hand.
+
+`ShardMsg::Close` has the same line and the same flaw:
+
+```rust
+ShardMsg::Close { conn, reason } => {
+    if let Some(m) = members.get(&conn) {
+        let _ = m.tx.try_send(Outbound::Close(reason));
+    }
+}
+```
+
+That is the **admin kick** path, so a kick aimed at a slow client — the most likely reason to kick
+one — is the case most likely to silently do nothing. On the same cluster a kick reported
+`"Disconnected 1 connection for MooingYacht1. They may reconnect."` while the client stayed
+connected, which is how this was first noticed.
+
+**The requirement, rather than a prescription: a close must not depend on the queue it is closing.**
+Whether that is a reserved slot for control frames, a separate out-of-band signal to the writer
+task, or dropping the sender so the writer observes the channel closing and shuts the socket, is
+pahoa's call. What puna needs is that a connection pahoa has stopped tracking is a connection the
+peer finds out about.
+
+Worth noting the counter is honest either way: `lag_disconnects` counts the *decision*, and puna
+re-exports it as `puna_room_lag_disconnects_total`. It read 7 while three sockets were still open —
+so the metric is measuring intent, not effect, which is worth a word in its own docs whichever way
+this is fixed.
+
+---
+
+## P22 — an admin announcement is indistinguishable from player chat
+
+**Open, small, and two lines.** `admin_say` broadcasts through `broadcast_result`:
+
+```rust
+out.broadcast(
+    Recipients::AllText,
+    &[ServerPacket::PrintJSON(PrintJson {
+        data: vec![JsonMessagePart::text(text)],
+        print_type: Some(PrintJsonType::CommandResult),
+        ..Default::default()
+    })],
+);
+```
+
+Two divergences from the reference, which does this at `MultiServer.py:2233`:
+
+```python
+self.ctx.broadcast_text_all('[Server]: ' + raw, {"type": "ServerChat", "message": raw})
+```
+
+1. **The type is `CommandResult`, where the reference uses `ServerChat`.** In upstream,
+   `CommandResult` is the reply to *your own* command (`notify_client`, `MultiServer.py:1433`);
+   `ServerChat` is a server-originated announcement. A client that colors or channels server
+   messages will not treat this as one.
+2. **There is no `[Server]: ` prefix**, so an announcement arrives as bare unattributed text. On the
+   dev cluster an operator sent "Meow?" and could not tell it apart from a player having typed it.
+
+**This belongs to pahoa rather than to its callers**, which is worth stating because the opposite is
+arguable. The admin API is deliberately public and puna is one client among several — a token holder
+with curl can send an announcement too. If the prefix is the caller's job then every caller must
+remember it, they will disagree about the wording, and one that forgets produces a message that
+**impersonates a player**. That is a trust property of the room, not a formatting preference, so it
+belongs on the side that cannot be bypassed. The `type` can only be set here in any case.
+
+Note the reference puts the prefix in the rendered text *and* the unprefixed original in a `message`
+field, so a client can render either. Worth copying whole.
+
+---
+
 ## What is not verified
 
 Stated plainly so nobody inherits these as facts.

@@ -329,6 +329,41 @@ impl Room {
         );
     }
 
+    /// An announcement *from the server*, as the reference sends one
+    /// (`MultiServer.py:2233`).
+    ///
+    /// Two things distinguish this from a `CommandResult`, and both matter to
+    /// somebody reading the room:
+    ///
+    /// - **`ServerChat`, not `CommandResult`.** Upstream, `CommandResult` is the
+    ///   reply to *your own* command, so a client that colors or channels server
+    ///   messages will not treat a `CommandResult` as one.
+    /// - **The `[Server]: ` prefix**, without which an announcement arrives as
+    ///   bare unattributed text and is indistinguishable from a player having
+    ///   typed it.
+    ///
+    /// The prefix is applied *here* rather than left to callers on purpose. The
+    /// admin API is public and has more than one caller — a token holder with
+    /// `curl` is one — so a caller that forgot it would produce a message that
+    /// **impersonates a player**. That is a trust property of the room rather
+    /// than a formatting preference, so it belongs on the side that cannot be
+    /// bypassed.
+    ///
+    /// The unprefixed original travels in `message`, as upstream does, so a
+    /// client may render either.
+    pub(crate) fn broadcast_server_chat(&self, text: &str, out: &mut dyn EffectSink) {
+        tracing::info!(%text, "server announcement");
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(format!("[Server]: {text}"))],
+                print_type: Some(PrintJsonType::ServerChat),
+                message: Some(text.to_string()),
+                ..Default::default()
+            })],
+        );
+    }
+
     /// A room-wide `CommandResult`, for the commands that answer everybody.
     pub(crate) fn broadcast_result(&self, text: String, out: &mut dyn EffectSink) {
         tracing::info!(%text, "notice");

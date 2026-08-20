@@ -163,7 +163,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
     );
     metric(
         "pahoa_lag_disconnects_total",
-        "Connections dropped for falling behind. Should be zero in a healthy room.",
+        "Connections the room decided to drop for falling behind. Counts the decision; \
+         the close itself is forced out of band. Should be zero in a healthy room.",
         "counter",
         crate::metrics::lag_disconnects(),
     );

@@ -393,6 +393,52 @@ shell in the first place.
 **This covers `server_password` too**, by the same argument — it is the third non-persisted secret,
 so `/option server_password` would revert on restart identically.
 
+## P21 — fixed: a close no longer depends on the queue it is closing
+
+**The diagnosis was right and the mechanism was worse than described**, which is worth setting out
+because it changes what "fixed" had to mean.
+
+The report identified a close `try_send` onto a queue that had overflowed. That is real, but it is
+not the common case. The usual way to lag is to exhaust the **byte budget** while the writer sits in
+a `write_all` against a peer that has stopped reading. The queue then has room, so the ordered close
+is *accepted* — and waits forever behind frames that will never be written. **A queue that accepts a
+close is not a queue that delivers one**, so every path that queued the close succeeded while nothing
+reached the socket.
+
+There was a second half, too, and it was the reason the socket stayed open at all: **the writer
+finishing did not end the connection.** The reader owns teardown, and it sat in `read_buf` waiting on
+a peer that had been told to go away — or never could be. Both halves must drop for a socket to
+close, so even a successfully written close frame left the connection hanging when the client was not
+reading.
+
+Three changes, all in `crates/pahoa-net`:
+
+- A close signal **separate from the outbound queue**, capacity one, straight to the writer.
+- `mark_lagged` uses it **unconditionally**, not just when the queue is full — a lagged connection's
+  writer is behind by definition. A kick still prefers the ordered path so the "you were kicked"
+  message reaches the player, and falls back.
+- The writer races that signal against its own `write_all`, so a wedged write can be abandoned, and
+  **the reader now ends the connection when the writer finishes**.
+
+Your note about the counter is right and now says so in its own help text: `lag_disconnects` counts
+the *decision*. With this fix decision and effect coincide, but the metric still measures intent.
+
+## P22 — fixed: announcements are `ServerChat` and carry the prefix
+
+Verified on the wire, an admin `say` of "Meow?" now arrives as:
+
+```json
+{"cmd":"PrintJSON","data":[{"text":"[Server]: Meow?"}],"type":"ServerChat","message":"Meow?"}
+```
+
+Both halves as the reference sends them, including the unprefixed original in `message` so a client
+may render either. **Puna needs to change nothing** — the API is unchanged, only what reaches players.
+
+The prefix is applied inside the room rather than by callers, for the reason the report gave: the
+admin API has more than one caller, and a caller that forgot it would send a message that
+impersonates a player. `!admin`'s own bare-line announcements now go through the same helper, so the
+two cannot drift.
+
 ## ⚠ P19 — `--snapshot` is gone from `SERVE_OPTS`
 
 **This is the notice P19 asked for. Re-transcribe `PAHOA_SERVE_OPTS` before deploying a pahoa build

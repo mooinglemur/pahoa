@@ -26,6 +26,9 @@ pub enum ActorMsg {
     Connected {
         conn: ConnId,
         tx: mpsc::Sender<Outbound>,
+        /// Closes this connection when `tx` is too full to carry the close.
+        /// See [`crate::shard::CloseSignal`].
+        close: crate::shard::CloseSignal,
         /// The deflate window this connection negotiated, if any. Decides which
         /// variant of a broadcast its shard hands it.
         deflate: Option<u8>,
@@ -402,6 +405,7 @@ pub async fn run_with_saves(
             ActorMsg::Connected {
                 conn,
                 tx,
+                close,
                 deflate,
                 budget,
                 feed,
@@ -411,6 +415,7 @@ pub async fn run_with_saves(
                     ShardMsg::Add {
                         conn,
                         tx,
+                        close,
                         deflate,
                         budget,
                         scoped: feed == pahoa_room::FeedPolicy::Scoped,

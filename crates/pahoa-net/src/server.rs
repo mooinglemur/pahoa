@@ -380,6 +380,11 @@ where
     // until it is used.
     let depth = (config.per_connection_budget_bytes / 64).max(256);
     let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(depth);
+    // Deliberately separate from `out_tx`, and deliberately tiny. A connection
+    // is dropped for lagging precisely when `out_tx` is full, so a close
+    // travelling on `out_tx` cannot reach the socket in the case that matters.
+    // See `shard::CloseSignal`.
+    let (close_tx, mut close_rx) = mpsc::channel::<&'static str>(1);
     let conn_budget: crate::budget::ConnHandle = Arc::new(crate::budget::ConnBudget::default());
 
     if actor
@@ -387,6 +392,7 @@ where
             feed,
             conn,
             tx: out_tx.clone(),
+            close: close_tx.clone(),
             deflate,
             budget: Arc::clone(&conn_budget),
         })
@@ -399,14 +405,43 @@ where
     // Writer: owns the socket's write half for this connection's lifetime, and
     // writes pre-built frames verbatim. It does no framing and no compression —
     // that already happened once, in the shard, for every recipient at once.
-    let writer = {
+    let mut writer = {
         let conn_budget = Arc::clone(&conn_budget);
         tokio::spawn(async move {
-            while let Some(out) = out_rx.recv().await {
+            loop {
+                // `biased`, so a forced close is taken ahead of queued frames.
+                // That ordering is right: this arm only fires when the ordered
+                // close could not be queued, which means those frames were not
+                // reaching the client either.
+                let out = tokio::select! {
+                    biased;
+                    Some(reason) = close_rx.recv() => {
+                        tracing::debug!(%conn, reason, "closing out of band");
+                        break;
+                    }
+                    frame = out_rx.recv() => match frame {
+                        Some(frame) => frame,
+                        None => break,
+                    },
+                };
                 let result = match out {
                     Outbound::Frame(bytes) => {
                         let size = bytes.len();
-                        let written = write_half.write_all(&bytes).await;
+                        // The write races the forced close, because a peer that
+                        // has stopped reading will fill its receive window and
+                        // leave `write_all` pending forever. Without this the
+                        // signal would be delivered to a task that never
+                        // reaches a `select!` again, which is precisely the
+                        // stuck case it exists to break.
+                        let written = tokio::select! {
+                            biased;
+                            Some(reason) = close_rx.recv() => {
+                                tracing::debug!(%conn, reason, "closing mid-write");
+                                crate::budget::Budget::release(&conn_budget, size);
+                                break;
+                            }
+                            written = write_half.write_all(&bytes) => written,
+                        };
                         // Released once the bytes are the kernel's problem
                         // rather than ours, which is what makes the budget a
                         // measure of what pahoa is actually holding.
@@ -452,10 +487,21 @@ where
             }
         }
 
-        match read_half.read_buf(&mut buf).await {
-            Ok(0) => break "peer closed".to_string(),
-            Ok(_) => {}
-            Err(e) => break format!("read failed: {e}"),
+        // **The writer finishing ends the connection.** Without this the reader
+        // waits on a peer that has already been told to go away — or, worse,
+        // one that was never able to hear it — and the socket stays open with
+        // the room no longer tracking it. That is the half-open state a client
+        // cannot detect: it believes it is playing, and nothing it sends is
+        // heard. Both halves must drop for the socket to close, so the reader
+        // has to learn about a close the writer decided on.
+        tokio::select! {
+            biased;
+            _ = &mut writer => break "closed by the server".to_string(),
+            read = read_half.read_buf(&mut buf) => match read {
+                Ok(0) => break "peer closed".to_string(),
+                Ok(_) => {}
+                Err(e) => break format!("read failed: {e}"),
+            },
         }
     };
     tracing::debug!(%conn, %peer, outcome, "connection ended");

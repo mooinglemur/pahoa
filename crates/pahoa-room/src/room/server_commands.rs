@@ -115,15 +115,9 @@ impl Room {
             return;
         };
         let Some(name) = first.strip_prefix('/') else {
-            out.broadcast(
-                Recipients::AllText,
-                &[ServerPacket::PrintJSON(PrintJson {
-                    data: vec![JsonMessagePart::text(format!("[Server]: {raw}"))],
-                    print_type: Some(PrintJsonType::ServerChat),
-                    message: Some(raw.to_string()),
-                    ..Default::default()
-                })],
-            );
+            // The same helper the admin API announces through, so the two
+            // cannot disagree about what a server message looks like.
+            self.broadcast_server_chat(raw, out);
             return;
         };
 

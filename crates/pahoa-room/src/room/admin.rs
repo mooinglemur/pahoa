@@ -163,7 +163,7 @@ impl Room {
             return AdminOutcome::refused("Nothing to say.".to_string());
         }
 
-        self.broadcast_result(text.clone(), out);
+        self.broadcast_server_chat(&text, out);
         AdminOutcome::ok(format!("Said to the room: {text}"), Vec::new())
     }
 
