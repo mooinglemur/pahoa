@@ -393,6 +393,37 @@ shell in the first place.
 **This covers `server_password` too**, by the same argument — it is the third non-persisted secret,
 so `/option server_password` would revert on restart identically.
 
+## ⚠ WebSocket keepalives — new, on by default, and puna should check its idle timeouts
+
+**pahoa now pings every connection every 20 seconds and drops one that has not answered within 20.**
+`--ping-interval` and `--ping-timeout` override, `0` disables either. This matches the reference,
+which inherits both numbers from `websockets`.
+
+**This was missing entirely and it is the third member of the P21 family.** P21 was "the server
+forgot a client that thought it was connected". Its mirror is "the client is gone and the server
+still thinks it is connected", and nothing detected that: pahoa answered pings but never sent one,
+and discarded pongs without recording them.
+
+The part that makes it urgent rather than tidy: **Archipelago's own clients disable their pings**
+(`CommonClient.py:872` passes `ping_interval=None`), so keepalive is the server's job by design. A
+pahoa room therefore had *no traffic in either direction* on an idle connection. Confirmed in the
+wild on Troy's own machine — a browser client that pings survived, a custom client that did not was
+dropped, same host, same path. Something on that path reaps idle flows.
+
+What puna should do:
+
+- **Check the ingress/LB idle timeout for the room ports.** 20s of cadence beats a 60s reaper with
+  3× margin, but if anything on the path is more aggressive than ~40s, lower `--ping-interval`
+  rather than discovering it as mysterious disconnects.
+- **Expect `lag_disconnects` to stay put and connection counts to become honest.** A dead peer now
+  leaves within `interval + timeout` (40s worst case) instead of holding its slot forever, so
+  `clients_connected` and the tracker's connected states stop drifting upward over a long async.
+- Nothing to configure otherwise; the defaults are the reference's.
+
+`SO_KEEPALIVE` is deliberately not set, and the reason is worth recording because it is the obvious
+future instinct: it would shed connections wedged by a bug in pahoa itself, which sounds like
+robustness and is really a way to ensure nobody ever reports the bug.
+
 ## P21 — fixed: a close no longer depends on the queue it is closing
 
 **The diagnosis was right and the mechanism was worse than described**, which is worth setting out

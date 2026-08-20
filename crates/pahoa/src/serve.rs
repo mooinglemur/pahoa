@@ -19,6 +19,9 @@ pub struct ServeArgs<'a> {
     /// is fine for a throwaway room and a data-loss bug for anything else.
     pub save_dir: Option<&'a Path>,
     pub save_interval: Duration,
+    /// WebSocket keepalive cadence and answer deadline. Zero disables either.
+    pub ping_interval: Duration,
+    pub ping_timeout: Duration,
     /// `None` derives it from the seed's slot count.
     pub outbound_budget_bytes: Option<usize>,
     pub options: RoomOptions,
@@ -187,6 +190,8 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         bind: args.bind,
         port: args.port,
         outbound_budget_bytes: budget,
+        ping_interval: args.ping_interval,
+        ping_timeout: args.ping_timeout,
         tls: args.tls,
         allow_plaintext: args.allow_plaintext,
         open_tracker: args.open_tracker,

@@ -46,6 +46,14 @@ SERVE OPTIONS
                              cheats, hints, chat, DeathLinks, option changes —
                              continuing across restarts. Needs --save-dir, and
                              is not in the log stream.
+    --ping-interval <secs>   WebSocket keepalive cadence (default 20, 0 off).
+                             The server is the only side that pings — clients
+                             turn theirs off — so an idle connection is silent
+                             without this, and middleboxes reap silent flows.
+    --ping-timeout <secs>    How long a client has to answer a ping before it is
+                             dropped (default 20, 0 never drops). Not a retry
+                             allowance: TCP does not lose pings, so this is
+                             headroom for a busy client to reply.
     --outbound-budget <MiB>  Cap on queued outbound data across all clients.
                              Defaults to 288 KiB per slot, floored at 64 MiB —
                              a 2000-slot room gets 562 MiB, a small one 64.
@@ -107,6 +115,8 @@ const SERVE_OPTS: &[Opt] = &[
     value("--port", &[]),
     value("--save-dir", &[]),
     value("--save-interval", &[]),
+    value("--ping-interval", &["--ping_interval"]),
+    value("--ping-timeout", &["--ping_timeout"]),
     value("--outbound-budget", &[]),
     value("--log-level", &["--loglevel"]),
     value("--log-format", &["--log_format"]),
@@ -308,6 +318,24 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         None => Duration::from_secs(60),
     };
 
+    // Zero is meaningful for both and means "off", so unlike --save-interval
+    // it is accepted rather than refused.
+    let ping_interval = match args.number::<u64>("--ping-interval")? {
+        Some(v) => Duration::from_secs(v),
+        None => Duration::from_secs(20),
+    };
+    let ping_timeout = match args.number::<u64>("--ping-timeout")? {
+        Some(v) => Duration::from_secs(v),
+        None => Duration::from_secs(20),
+    };
+    if !ping_timeout.is_zero() && !ping_interval.is_zero() && ping_timeout > ping_interval * 4 {
+        return Err(
+            "--ping-timeout: more than four times --ping-interval leaves probes \
+             outstanding for longer than the cadence that sends them"
+                .to_string(),
+        );
+    }
+
     let outbound_budget_bytes = match args.number::<usize>("--outbound-budget")? {
         Some(0) => return Err("--outbound-budget: must be at least 1 MiB".to_string()),
         Some(mib) => Some(mib * 1024 * 1024),
@@ -369,6 +397,8 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         bind: args.get("--bind").unwrap_or("0.0.0.0").to_string(),
         save_dir: args.get("--save-dir").map(Path::new),
         save_interval,
+        ping_interval,
+        ping_timeout,
         journal: args.is_set("--journal"),
         options,
         explicit_options,

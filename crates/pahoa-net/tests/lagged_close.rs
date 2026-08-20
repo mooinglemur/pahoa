@@ -71,18 +71,21 @@ fn room() -> Room {
 }
 
 async fn start() -> Server {
-    Server::start(
-        room(),
-        NetConfig {
-            port: 0,
-            outbound_budget_bytes: BUDGET,
-            per_connection_budget_bytes: BUDGET,
-            admin_token: Some(TOKEN.to_string()),
-            ..Default::default()
-        },
-    )
+    start_with(NetConfig {
+        port: 0,
+        outbound_budget_bytes: BUDGET,
+        per_connection_budget_bytes: BUDGET,
+        admin_token: Some(TOKEN.to_string()),
+        // Off, so a keepalive ping cannot appear in the middle of a test about
+        // closing and be mistaken for traffic.
+        ping_interval: Duration::ZERO,
+        ..Default::default()
+    })
     .await
-    .expect("binds")
+}
+
+async fn start_with(config: NetConfig) -> Server {
+    Server::start(room(), config).await.expect("binds")
 }
 
 /// Kick a slot through the real admin API, since that is the path an operator
@@ -245,6 +248,107 @@ async fn a_kicked_client_is_disconnected_even_when_it_is_not_reading() {
     assert!(
         is_closed_by_peer(&mut slow).await,
         "the kick reported success but the client is still connected"
+    );
+
+    server.shutdown().await;
+}
+
+// --- keepalives ----------------------------------------------------------
+
+/// Read one frame's opcode, or `None` if nothing arrives in time.
+async fn opcode(stream: &mut TcpStream, within: Duration) -> Option<u8> {
+    let mut head = [0u8; 2];
+    tokio::time::timeout(within, stream.read_exact(&mut head))
+        .await
+        .ok()?
+        .ok()?;
+    let opcode = head[0] & 0x0f;
+    let len = (head[1] & 0x7f) as usize;
+    if len > 0 {
+        let mut body = vec![0u8; len];
+        let _ = stream.read_exact(&mut body).await;
+    }
+    Some(opcode)
+}
+
+/// The server must ping, because nothing else will.
+///
+/// Archipelago's own clients connect with `ping_interval=None`, so an idle
+/// connection carries no traffic in either direction unless the server makes
+/// some — and a middlebox that reaps idle flows will take it, telling neither
+/// end. Observed in the wild between two clients on one machine: the one that
+/// pinged survived, the one that did not was dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_server_pings_an_idle_connection() {
+    let server = start_with(NetConfig {
+        port: 0,
+        ping_interval: Duration::from_millis(150),
+        ping_timeout: Duration::from_secs(30),
+        ..Default::default()
+    })
+    .await;
+
+    let mut client = connect(server.local_addr, "P1").await;
+    // Drain the join traffic, then say nothing at all.
+    drain(&mut client).await;
+
+    // Opcode 0x9 is Ping (RFC 6455 §5.5.2).
+    let seen = opcode(&mut client, Duration::from_secs(5)).await;
+    assert_eq!(
+        seen,
+        Some(0x9),
+        "an idle connection received no ping, so nothing keeps it alive"
+    );
+
+    server.shutdown().await;
+}
+
+/// A peer that never answers is dropped, rather than holding its slot forever.
+///
+/// The pong is the only evidence available: writing a ping to a dead peer
+/// *succeeds*, because the bytes land in the local send buffer and TCP retries
+/// for minutes. Nothing else reports the death.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_that_never_pongs_is_dropped() {
+    let server = start_with(NetConfig {
+        port: 0,
+        ping_interval: Duration::from_millis(100),
+        ping_timeout: Duration::from_millis(100),
+        ..Default::default()
+    })
+    .await;
+
+    // Connects, then answers nothing. Reading without replying is exactly a
+    // client whose process has died with its socket still open.
+    let mut mute = connect(server.local_addr, "P1").await;
+
+    assert!(
+        is_closed_by_peer(&mut mute).await,
+        "a client that never answered a ping is still connected, so its slot \
+         stays occupied by nobody"
+    );
+
+    server.shutdown().await;
+}
+
+/// Zero means off, and off must mean silent rather than "very fast".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_interval_disables_pinging_entirely() {
+    let server = start_with(NetConfig {
+        port: 0,
+        ping_interval: Duration::ZERO,
+        ping_timeout: Duration::from_millis(50),
+        ..Default::default()
+    })
+    .await;
+
+    let mut client = connect(server.local_addr, "P1").await;
+    drain(&mut client).await;
+
+    assert_eq!(
+        opcode(&mut client, Duration::from_millis(600)).await,
+        None,
+        "pings were disabled but something still arrived"
     );
 
     server.shutdown().await;

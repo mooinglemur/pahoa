@@ -34,6 +34,41 @@ pub struct NetConfig {
     /// How long a connection may take to send its first frame.
     pub handshake_timeout: Duration,
 
+    /// How often to send a WebSocket Ping on each connection. Zero disables.
+    ///
+    /// **The server is the only side that pings.** Archipelago's own clients
+    /// connect with `ping_interval=None` (`CommonClient.py:872`), explicitly
+    /// turning theirs off, so a room that does not ping leaves an idle
+    /// connection completely silent in both directions. Middleboxes reap silent
+    /// flows — commonly at 60s — and neither end is told, which produces a
+    /// connection both sides still believe in. Observed in the wild: a browser
+    /// client that pings survived where a custom client that did not was
+    /// dropped, from the same machine over the same path.
+    ///
+    /// 20 seconds matches the reference, which inherits it from `websockets`
+    /// (`ping_interval=20`). It sits far enough under a 60s idle timeout to
+    /// survive one comfortably.
+    pub ping_interval: Duration,
+
+    /// How long to wait for the matching Pong before dropping the connection.
+    /// Zero keeps pinging but never judges the answer.
+    ///
+    /// **Not an allowance for a lost ping.** TCP retransmits, so a ping cannot
+    /// vanish the way a datagram heartbeat can; one outstanding probe is a
+    /// sufficient test and "three strikes" would only add latency. This is
+    /// headroom for the peer's *application* to turn the frame around — a
+    /// single-threaded client inside a long frame, a congested path, a client
+    /// whose own receive queue is behind.
+    ///
+    /// It is also the only signal available. Writing a ping to a dead peer
+    /// *succeeds*: the bytes land in the local send buffer and TCP retries for
+    /// minutes, so the write never reports the failure. The absent pong is the
+    /// whole of the evidence.
+    ///
+    /// Worst-case detection is `ping_interval + ping_timeout`, since a peer that
+    /// dies just after answering is not probed again for a full interval.
+    pub ping_timeout: Duration,
+
     /// permessage-deflate negotiation.
     pub deflate: crate::ws::handshake::DeflateConfig,
 
@@ -117,6 +152,9 @@ impl Default for NetConfig {
             per_connection_budget_bytes: 256 * 1024,
             max_frame_bytes: 1024 * 1024,
             handshake_timeout: Duration::from_secs(30),
+            // The reference's values, by way of `websockets`' defaults.
+            ping_interval: Duration::from_secs(20),
+            ping_timeout: Duration::from_secs(20),
             deflate: crate::ws::handshake::DeflateConfig::default(),
             compression_level: 6,
             max_message_bytes: 4 * 1024 * 1024,

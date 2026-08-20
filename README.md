@@ -36,6 +36,8 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--filtered-port <n>` | — | A second port serving the scoped feed |
 | `--save-dir <dir>` | — | Where the room persists itself |
 | `--save-interval <secs>` | `60` | Save cadence |
+| `--ping-interval <secs>` | `20` | WebSocket keepalive cadence; `0` disables |
+| `--ping-timeout <secs>` | `20` | Grace for the answering pong; `0` never drops |
 | `--journal` | off | Append the room's history to `history.jsonl` beside the save |
 | `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
 | `--log-level <level>` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
@@ -47,6 +49,29 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+### Keepalives
+
+**The server is the only side that pings.** Archipelago's clients connect with
+`ping_interval=None` (`CommonClient.py:872`), turning theirs off deliberately, so
+a room that does not ping leaves an idle connection completely silent in both
+directions — and middleboxes reap silent flows, commonly at 60 seconds, telling
+neither end. pahoa pings every 20 seconds and drops a connection that has not
+answered within 20, matching the reference, which inherits both numbers from
+`websockets`.
+
+The timeout is **not** an allowance for a lost ping: TCP retransmits, so a ping
+cannot vanish the way a datagram heartbeat can, and one outstanding probe is a
+sufficient test. It is headroom for the peer's *application* to reply. It is also
+the only signal there is — writing a ping to a dead peer **succeeds**, since the
+bytes land in the local send buffer and TCP retries for minutes, so the absent
+pong is the whole of the evidence. Worst-case detection is therefore
+`interval + timeout`, because a peer that dies just after answering is not probed
+again for a full interval.
+
+`SO_KEEPALIVE` is deliberately **not** set. It would shed connections wedged by a
+bug in pahoa itself, which sounds like robustness and is really a way to stop
+anyone ever reporting the bug.
 
 ### The room journal
 

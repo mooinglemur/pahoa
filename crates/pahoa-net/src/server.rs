@@ -183,6 +183,92 @@ impl Server {
     }
 }
 
+/// What the keepalive wants done when its timer comes due.
+enum Due {
+    /// Send this Ping frame.
+    Ping(bytes::Bytes),
+    /// No pong arrived inside the timeout. The peer is gone.
+    Dead,
+    /// The outstanding ping was answered; nothing to do yet.
+    Nothing,
+}
+
+/// Per-connection liveness, matching the reference's `ping_interval` /
+/// `ping_timeout` pair.
+///
+/// Two independent deadlines rather than one ticker, because they answer
+/// different questions: `next_ping` is the keepalive cadence that has to beat a
+/// middlebox's idle reaper, and `judge_at` is how long the peer gets to answer.
+/// Collapsing them into a single timer would make the effective cadence
+/// `interval + timeout` — halving the keepalive rate, which is the half that
+/// matters when nothing else is on the wire.
+struct Keepalive {
+    interval: Duration,
+    timeout: Duration,
+    /// Bumped by the reader on every Pong. Compared rather than timestamped:
+    /// the writer only needs to know whether *any* arrived since it asked.
+    pongs: Arc<AtomicU64>,
+    next_ping: Option<tokio::time::Instant>,
+    /// When to judge the outstanding ping, and the pong count when it was sent.
+    judge_at: Option<(tokio::time::Instant, u64)>,
+}
+
+impl Keepalive {
+    fn new(interval: Duration, timeout: Duration, pongs: Arc<AtomicU64>) -> Self {
+        Self {
+            interval,
+            timeout,
+            pongs,
+            // Zero disables pinging entirely, which also disables judging:
+            // there is nothing outstanding to judge.
+            next_ping: (!interval.is_zero()).then(|| tokio::time::Instant::now() + interval),
+            judge_at: None,
+        }
+    }
+
+    /// Resolve when something is due. Never resolves when pings are off.
+    async fn wait(&self) {
+        let at = match (self.next_ping, self.judge_at) {
+            (None, None) => return std::future::pending().await,
+            (Some(a), None) => a,
+            (None, Some((b, _))) => b,
+            (Some(a), Some((b, _))) => a.min(b),
+        };
+        tokio::time::sleep_until(at).await;
+    }
+
+    fn due(&mut self) -> Due {
+        let now = tokio::time::Instant::now();
+
+        // Judged first: a ping sent one interval ago is answered or it is not,
+        // and sending another before deciding would let a dead peer accumulate
+        // probes forever.
+        if let Some((at, seen)) = self.judge_at
+            && now >= at
+        {
+            self.judge_at = None;
+            if self.pongs.load(Ordering::Relaxed) == seen {
+                return Due::Dead;
+            }
+        }
+
+        if let Some(at) = self.next_ping
+            && now >= at
+        {
+            self.next_ping = Some(now + self.interval);
+            if !self.timeout.is_zero() {
+                self.judge_at = Some((now + self.timeout, self.pongs.load(Ordering::Relaxed)));
+            }
+            // The payload is unused by anything — a peer must echo it back and
+            // pahoa does not check which ping a pong answers, because with one
+            // outstanding at a time there is only ever one it could answer.
+            return Due::Ping(ws::frame::build(ws::frame::OpCode::Ping, false, b""));
+        }
+
+        Due::Nothing
+    }
+}
+
 /// How long to let a closing room's last frames drain.
 ///
 /// Long enough for a loopback or same-cluster write to land, short enough to be
@@ -385,6 +471,10 @@ where
     // travelling on `out_tx` cannot reach the socket in the case that matters.
     // See `shard::CloseSignal`.
     let (close_tx, mut close_rx) = mpsc::channel::<&'static str>(1);
+    // Bumped by the reader, read by the writer's keepalive. A counter rather
+    // than a timestamp: the only question is whether anything answered since
+    // the last ping went out.
+    let pongs = Arc::new(AtomicU64::new(0));
     let conn_budget: crate::budget::ConnHandle = Arc::new(crate::budget::ConnBudget::default());
 
     if actor
@@ -407,6 +497,8 @@ where
     // that already happened once, in the shard, for every recipient at once.
     let mut writer = {
         let conn_budget = Arc::clone(&conn_budget);
+        let pongs = Arc::clone(&pongs);
+        let mut keepalive = Keepalive::new(config.ping_interval, config.ping_timeout, pongs);
         tokio::spawn(async move {
             loop {
                 // `biased`, so a forced close is taken ahead of queued frames.
@@ -418,6 +510,24 @@ where
                     Some(reason) = close_rx.recv() => {
                         tracing::debug!(%conn, reason, "closing out of band");
                         break;
+                    }
+                    () = keepalive.wait() => {
+                        // Written straight to the socket rather than queued: a
+                        // liveness probe that waits behind a backlog measures
+                        // the backlog, not the peer.
+                        match keepalive.due() {
+                            Due::Dead => {
+                                tracing::info!(%conn, "no pong within the keepalive timeout");
+                                break;
+                            }
+                            Due::Ping(frame) => {
+                                if write_half.write_all(&frame).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                            Due::Nothing => continue,
+                        }
                     }
                     frame = out_rx.recv() => match frame {
                         Some(frame) => frame,
@@ -475,7 +585,9 @@ where
             match ws::frame::decode(&mut buf, config.max_frame_bytes) {
                 Ok(Some(frame)) => match session.handle(frame) {
                     Ok(Some(event)) => {
-                        if let Some(reason) = handle_event(event, conn, actor, &out_tx).await {
+                        if let Some(reason) =
+                            handle_event(event, conn, actor, &out_tx, &pongs).await
+                        {
                             break 'read reason;
                         }
                     }
@@ -518,6 +630,7 @@ async fn handle_event(
     conn: ConnId,
     actor: &mpsc::Sender<ActorMsg>,
     out: &mpsc::Sender<Outbound>,
+    pongs: &AtomicU64,
 ) -> Option<String> {
     use ws::message::Event;
     match event {
@@ -552,7 +665,12 @@ async fn handle_event(
             let _ = out.try_send(Outbound::Frame(pong));
             None
         }
-        Event::Pong(_) => None,
+        Event::Pong(_) => {
+            // The peer is alive. Which ping this answers does not matter: only
+            // one is ever outstanding, so any pong clears it.
+            pongs.fetch_add(1, Ordering::Relaxed);
+            None
+        }
         Event::Close(frame) => {
             // Echo the peer's code back, as RFC 6455 §5.5.1 requires.
             let (code, reason) = frame.unwrap_or((CLOSE_NORMAL, String::new()));
