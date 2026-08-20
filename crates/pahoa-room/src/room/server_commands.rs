@@ -27,8 +27,8 @@
 //! the next restart, in every deployment rather than only an orchestrated one.
 //! `/option password` and `/option server_password` are therefore refused
 //! explicitly rather than reported as unknown — they *are* recognized, and
-//! saying so is the difference between a decision and a gap. See
-//! `NOTES-FOR-PUNA.md`.
+//! saying so is the difference between a decision and a gap.
+//! [`Room::cmd_admin`](super::Room) states the rule the two halves come from.
 //!
 //! ## Telling clients
 //!

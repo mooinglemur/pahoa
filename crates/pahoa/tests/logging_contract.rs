@@ -1,11 +1,11 @@
 //! The startup output, as another system depends on it.
 //!
-//! `HANDOFF.md` constraint 7 pins this: puna decides a room is really serving by
-//! matching the `serving` event's `message` and reading `addr` and `seed_name`
-//! off it. That makes a rename, a moved field, or a stray `println!` a failure
-//! **in someone else's cluster**, announced by nothing here — the sort of break
-//! a unit test cannot see because it is a fact about the process's streams
-//! rather than about any function.
+//! **An orchestrator decides a room is really serving by matching the `serving`
+//! event's `message` and reading `addr` and `seed_name` off it.** That makes a
+//! rename, a moved field, or a stray `println!` a failure *in someone else's
+//! cluster*, announced by nothing here — the sort of break a unit test cannot
+//! see, because it is a fact about the process's streams rather than about any
+//! function.
 //!
 //! So this drives the real binary and reads what actually comes out of it. Both
 //! formats are covered, because the contract is different in each: `text` puts

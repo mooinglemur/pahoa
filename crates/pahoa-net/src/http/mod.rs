@@ -92,6 +92,12 @@ impl Router {
         // The admin surface is *absent* rather than locked when no token is
         // configured, so a misconfiguration fails closed and is
         // indistinguishable from an old build that never had one.
+        //
+        // `404` rather than `401` is load-bearing for whoever deploys this: a
+        // secret that failed to render produces "this route does not exist",
+        // which is diagnosable, where `401` would read as an ordinary bad
+        // credential and be retried forever against a room that has no token at
+        // all.
         if path.starts_with("/admin/v1/") {
             let Some(admin) = &self.0.admin else {
                 return Response::not_found();

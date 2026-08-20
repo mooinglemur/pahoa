@@ -1,6 +1,6 @@
 # The scoped feed, and why it is a second port
 
-`--filtered-port` (HANDOFF P5). **Implemented.** This is the design and the reasoning behind it;
+`--filtered-port`. **Implemented.** This is the design and the reasoning behind it;
 what shipped follows it exactly, and the measurement at the end is from a real room.
 
 A second listening port on which a client receives only the messages relevant to its own slot.

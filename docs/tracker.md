@@ -1,6 +1,6 @@
 # The tracker API
 
-`GET /api/tracker` and `GET /api/static_tracker` (HANDOFF P15). These mirror the reference
+`GET /api/tracker` and `GET /api/static_tracker`. These mirror the reference
 WebHost's endpoints of the same names, field for field, so that a tracker page written against
 `archipelago.gg` works against a pahoa room with only its base URL changed.
 

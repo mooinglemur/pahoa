@@ -56,6 +56,13 @@ impl Admin {
         // Rate limit first, and without looking at the token: a caller past the
         // limit gets the same answer whatever they sent, so the limit cannot
         // itself be used to test guesses.
+        //
+        // That deliberately locks out the *correct* token too, which is why the
+        // `429` carries `Retry-After` and why callers must honor it. An
+        // orchestrator polling this surface on a reconcile loop will otherwise
+        // spend every window locking itself out, and the symptom — an admin API
+        // that works by hand and not from the controller — looks nothing like
+        // its cause.
         if self.rate_limited() {
             return Auth::Refused(
                 Response::status(429, "Too Many Requests")
