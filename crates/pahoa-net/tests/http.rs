@@ -319,6 +319,21 @@ async fn status_reports_the_room() {
     assert_eq!(slots[0]["checks"], 0);
     assert_eq!(slots[0]["status"], "unknown");
 
+    // Two activity questions, and an orchestrator needs both: "is this socket
+    // set alive" and "is anyone still playing". A room nobody has played
+    // reports the second as null — not as a zero or an epoch, because puna
+    // reaps idle rooms on it and must be able to tell "nobody has checked
+    // anything yet" from "somebody checked in 1970".
+    let activity = &json["activity"];
+    assert!(
+        activity["last_check_at"].is_null(),
+        "an unplayed room must not claim a check time: {activity}"
+    );
+    assert!(
+        activity["check_idle_seconds"].is_null(),
+        "check_idle_seconds must stay null rather than collapsing to 0: {activity}"
+    );
+
     // The token must never appear in anything the surface renders.
     assert!(!body.contains(TOKEN), "the token was echoed: {body}");
 
@@ -393,6 +408,11 @@ async fn metrics_are_prometheus_text() {
         "# TYPE pahoa_lag_disconnects_total counter",
         "pahoa_slots 2",
         "pahoa_slots_connected 0",
+        // The text exposition has no null, so this reads 0 for a room nobody
+        // has played; the help text points at `pahoa_checks_total` to
+        // disambiguate, and the JSON keeps the honest answer.
+        "# TYPE pahoa_check_idle_seconds gauge",
+        "pahoa_check_idle_seconds 0",
     ] {
         assert!(body.contains(expected), "missing {expected:?} in:\n{body}");
     }

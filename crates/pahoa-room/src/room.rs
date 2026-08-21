@@ -2220,6 +2220,29 @@ impl Room {
         self.clients.len()
     }
 
+    /// When any slot last registered a *new* location check, as unix seconds.
+    ///
+    /// The room-wide `max()` of the same per-slot timers the tracker publishes
+    /// as `activity_timers`, and the number an idle reaper actually wants:
+    /// [`crate::metrics`]-style "somebody sent a packet" counts chat, `Sync`,
+    /// `Get` and `StatusUpdate`, so a room where people are talking never looks
+    /// idle. The reference reaps on exactly this value
+    /// (`MultiServer.py:2671-2682`).
+    ///
+    /// `None` means **no slot has ever checked anything**, which is a real
+    /// answer rather than a missing one — a room whose organizer is still
+    /// getting people connected has that shape, and it is not the same as a
+    /// check at the epoch. Callers are expected to distinguish the two; pahoa
+    /// deliberately does not collapse it into a zero.
+    ///
+    /// Survives a restart: `activity_at` is persisted (`save.rs`).
+    pub fn last_check_at(&self) -> Option<f64> {
+        self.activity_at
+            .values()
+            .copied()
+            .max_by(|a, b| a.total_cmp(b))
+    }
+
     /// Whether a client will be asked for a password of some kind.
     ///
     /// Deliberately does not say *which* mode, and per-slot passwords cannot be

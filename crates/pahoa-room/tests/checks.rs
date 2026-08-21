@@ -5,6 +5,7 @@ mod common;
 use common::*;
 use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
+use std::sync::Arc;
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
@@ -328,6 +329,146 @@ fn spectators_and_groups_start_already_goaled() {
             room.status((0, slot)),
             pahoa_proto::ClientStatus::Goal,
             "slot {slot} should be goal-complete at load"
+        );
+    }
+}
+
+/// `Room::last_check_at` — the room-wide "is anyone still playing" timer.
+///
+/// Distinct from "has any client sent a packet", which chat, `Sync`, `Get` and
+/// `StatusUpdate` all reset. An idle reaper wants this one; the reference
+/// auto-shuts rooms down on exactly it (`MultiServer.py:2671-2682`).
+mod last_check_at {
+    use super::*;
+
+    /// `None` rather than an epoch, and the distinction is load-bearing: a room
+    /// whose organizer is still getting people connected has this shape, and an
+    /// orchestrator must be able to tell it from a check that happened in 1970.
+    #[test]
+    fn an_unplayed_room_reports_no_check_at_all() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let (room, _conn, _slot) = setup().unwrap();
+        assert_eq!(
+            room.last_check_at(),
+            None,
+            "a room nobody has played must not report a time"
+        );
+    }
+
+    #[test]
+    fn a_check_sets_it_to_the_room_clock() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let (mut room, conn, slot) = setup().unwrap();
+        let first = room.multidata().locations.for_slot(slot)[0].location;
+
+        let mut sink = Recorder::default();
+        room.tick(1_700_000_500.0, &mut sink);
+        room.handle(conn, checks(vec![first]), &mut sink);
+
+        assert_eq!(room.last_check_at(), Some(1_700_000_500.0));
+    }
+
+    /// **The guard that makes this usable as an idle signal at all.**
+    ///
+    /// A client re-sends its whole location list on every reconnect. If that
+    /// counted, a room full of reconnecting-but-idle clients would look active
+    /// forever and never reap — which is the failure the room-wide timer exists
+    /// to avoid, reintroduced one layer down.
+    #[test]
+    fn resending_known_checks_does_not_advance_it() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let (mut room, conn, slot) = setup().unwrap();
+        let first = room.multidata().locations.for_slot(slot)[0].location;
+
+        let mut sink = Recorder::default();
+        room.tick(1_700_000_500.0, &mut sink);
+        room.handle(conn, checks(vec![first]), &mut sink);
+
+        // Much later, the same client says the same thing again.
+        room.tick(1_700_090_000.0, &mut sink);
+        room.handle(conn, checks(vec![first]), &mut sink);
+
+        assert_eq!(
+            room.last_check_at(),
+            Some(1_700_000_500.0),
+            "re-sending a known check is not activity"
+        );
+    }
+
+    /// The room-wide value is the newest across slots, not the newest of
+    /// whichever slot happened to check last in insertion order.
+    #[test]
+    fn it_is_the_newest_across_every_slot() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let players: Vec<(u32, String, String)> = data
+            .player_slots()
+            .take(2)
+            .map(|(s, i)| (*s, i.name.clone(), i.game.clone()))
+            .collect();
+        if players.len() < 2 {
+            eprintln!("SKIP: fixture has fewer than two player slots");
+            return;
+        }
+
+        let mut room = room_for(Arc::clone(&data), RoomOptions::default());
+        let mut sink = Recorder::default();
+        let conns: Vec<ConnId> = players
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name, game))| join(&mut room, i as u64 + 1, name, game, 0b111))
+            .collect();
+
+        // The *second* slot checks first, so a naive "last one written" would
+        // still pass; only a real max over the values gets this right.
+        let later = room.multidata().locations.for_slot(players[1].0)[0].location;
+        room.tick(1_700_009_000.0, &mut sink);
+        room.handle(conns[1], checks(vec![later]), &mut sink);
+
+        let earlier = room.multidata().locations.for_slot(players[0].0)[0].location;
+        room.tick(1_700_001_000.0, &mut sink);
+        room.handle(conns[0], checks(vec![earlier]), &mut sink);
+
+        assert_eq!(
+            room.last_check_at(),
+            Some(1_700_009_000.0),
+            "the room-wide timer is the newest check anywhere, not the last one recorded"
+        );
+    }
+
+    /// It survives a restart, which is the reason puna reads it from the room
+    /// rather than reconstructing it from polled check counts.
+    #[test]
+    fn it_survives_a_save_and_restore() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let (mut room, conn, slot) = setup().unwrap();
+        let first = room.multidata().locations.for_slot(slot)[0].location;
+
+        let mut sink = Recorder::default();
+        room.tick(1_700_000_500.0, &mut sink);
+        room.handle(conn, checks(vec![first]), &mut sink);
+
+        let snapshot = room.snapshot();
+        let data = load(FIXTURE).unwrap();
+        let mut restored = room_for(data, RoomOptions::default());
+        restored
+            .restore(snapshot)
+            .expect("a snapshot this room just produced");
+
+        assert_eq!(
+            restored.last_check_at(),
+            Some(1_700_000_500.0),
+            "an orchestrator's idle clock must not reset when a room restarts"
         );
     }
 }

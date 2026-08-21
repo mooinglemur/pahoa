@@ -280,7 +280,7 @@ these are `https://`; without it, `http://`.
 | `GET /api/v1/room` | none | What a room page shows. No secrets |
 | `GET /api/tracker` | see below | The reference WebHost's tracker document |
 | `GET /api/static_tracker` | see below | The half that only changes with the seed |
-| `GET /admin/v1/status` | bearer | Clients, save state, net counters, per-slot progress, the room's effective options |
+| `GET /admin/v1/status` | bearer | Clients, save state, net counters, activity, per-slot progress, the room's effective options |
 | `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
 | `POST /admin/v1/command` | bearer | The typed command set below |
 | `POST /admin/v1/slots/<n>/password` | bearer | Rotate one slot's password, live |
@@ -322,6 +322,30 @@ is indistinguishable from a build that never had one.
 ```sh
 curl -s -H "Authorization: Bearer $PAHOA_ADMIN_TOKEN" https://host:38281/admin/v1/status | jq
 ```
+
+**`status.activity` answers two different questions, and an idle reaper wants
+the second one.** `last_client_message_at` / `idle_seconds` move on *any* packet
+from any client — chat, `Sync`, `Get`, `StatusUpdate` — so they say whether the
+sockets are alive, which is what they are named for.
+`last_check_at` / `check_idle_seconds` move only when a slot registers a
+genuinely **new** location check, which is what the reference auto-shuts rooms
+down on (`MultiServer.py:2671-2682`) and the only one of the two that a room
+full of people idling in chat will let go stale. The timer is per-slot inside
+the room, room-wide on this surface, and persisted — so it survives a restart,
+which no orchestrator polling check *counts* could reconstruct.
+
+Both are `null` when nothing has happened yet, and for the check pair that is a
+real answer rather than a gap: a room whose organizer is still getting people
+connected has never had a check, and that is not the same as a check at the
+epoch. Callers that reap on this should decide what an unplayed room means to
+them rather than reading a zero.
+
+`check_idle_seconds` is measured against the wall clock, not against uptime, so
+a room that was **stopped** for three days reports three days of check-idle the
+moment it comes back. That is the honest answer — the room genuinely was not
+played — but it means a freshly started room can be reap-eligible on arrival,
+which is the opposite of what "it just started" suggests. Anything reaping on
+this wants a floor on how long the room has been up before the number counts.
 
 #### Commands
 

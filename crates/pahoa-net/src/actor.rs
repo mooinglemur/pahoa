@@ -463,6 +463,7 @@ pub async fn run_with_saves(
                     save_dirty: saver.dirty,
                     save_interval: saver.config.interval,
                     saving: saver.config.store.is_some(),
+                    last_check_at: room.last_check_at(),
                     options: crate::http::Options {
                         hint_cost: room.options.hint_cost,
                         location_check_points: room.options.location_check_points,

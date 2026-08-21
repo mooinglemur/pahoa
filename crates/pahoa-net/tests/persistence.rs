@@ -82,6 +82,30 @@ impl Client {
             .expect("send should succeed");
     }
 
+    /// Wait for a packet of this kind that also satisfies `want`.
+    ///
+    /// Needed because several different actions produce the *same* `cmd`: a
+    /// `LocationChecks` and an `!alias` both come back as `RoomUpdate`, so
+    /// matching on the command alone can return the wrong one and let the test
+    /// proceed before the thing it is actually waiting for has happened.
+    async fn wait_for_matching(&mut self, cmd: &str, want: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..50 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), self.ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for {cmd}"))
+                .expect("stream should be open")
+                .expect("frame should be readable");
+            let Message::Text(t) = msg else { continue };
+            let frame: Vec<Value> = serde_json::from_str(t.as_str()).expect("frame is JSON");
+            for packet in frame {
+                if packet.get("cmd").and_then(Value::as_str) == Some(cmd) && want(&packet) {
+                    return packet;
+                }
+            }
+        }
+        panic!("never saw a matching {cmd}");
+    }
+
     async fn wait_for(&mut self, cmd: &str) -> Value {
         for _ in 0..50 {
             let msg = tokio::time::timeout(Duration::from_secs(5), self.ws.next())
@@ -162,7 +186,14 @@ async fn a_restarted_room_remembers_what_a_client_did() {
         client
             .send(json!([{"cmd": "Say", "text": "!alias Persistent"}]))
             .await;
-        client.wait_for("RoomUpdate").await;
+        // Specifically the alias's own `RoomUpdate`, which carries `players`.
+        // The `LocationChecks` above produces one too — carrying
+        // `checked_locations` — and waiting on whichever arrives first let the
+        // shutdown below race the alias, saving a room that had not applied it
+        // yet. That failed about one run in six.
+        client
+            .wait_for_matching("RoomUpdate", |p| p.get("players").is_some())
+            .await;
 
         // Shutdown waits for the final save, which is what makes the restart
         // below deterministic rather than a race against the interval.

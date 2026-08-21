@@ -21,6 +21,9 @@ pub struct Status {
     pub saving: bool,
     pub options: Options,
     pub slots: Vec<SlotStatus>,
+    /// Unix seconds when any slot last registered a new location check, or
+    /// `None` if none ever has. See [`pahoa_room::Room::last_check_at`].
+    pub last_check_at: Option<f64>,
 }
 
 /// The room's rules, as they are *now*.
@@ -100,9 +103,15 @@ pub fn document(
             "compressions": crate::ws::deflate::compressions(),
         },
 
+        // Two different questions, and an orchestrator needs both. The first
+        // pair answers "is this socket set alive"; the second answers "is
+        // anyone still *playing*", which is what an idle reaper is really
+        // asking and what the reference shuts rooms down on.
         "activity": {
             "last_client_message_at": crate::metrics::last_client_message_at().map(rfc3339),
             "idle_seconds": idle_seconds(),
+            "last_check_at": live.last_check_at.map(room_time).map(rfc3339),
+            "check_idle_seconds": check_idle_seconds(live.last_check_at),
         },
 
         "options": {
@@ -206,6 +215,16 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "gauge",
         idle_seconds().unwrap_or(0),
     );
+    // The JSON reports `null` here for a room nobody has played yet; the text
+    // exposition has no null, so a scraper sees 0 and must read it with
+    // `pahoa_checks_total` to tell "just checked" from "never checked".
+    metric(
+        "pahoa_check_idle_seconds",
+        "Seconds since any slot last registered a new location check. 0 when \
+         none ever has, which `pahoa_checks_total` disambiguates.",
+        "gauge",
+        check_idle_seconds(live.last_check_at).unwrap_or(0),
+    );
 
     if live.saving {
         metric(
@@ -275,4 +294,92 @@ fn idle_seconds() -> Option<u64> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     )
+}
+
+/// The room's clock is unix seconds as an `f64`; this surface speaks RFC 3339.
+///
+/// Clamped at the epoch because a negative or non-finite instant is not a time
+/// anyone can act on, and `as u64` on either is a silently absurd number.
+fn room_time(at: f64) -> SystemTime {
+    let secs = if at.is_finite() { at.max(0.0) } else { 0.0 };
+    SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64)
+}
+
+/// Seconds since any slot last checked a location, or `None` if none ever has.
+///
+/// `None` is load-bearing and must not become a zero: a room that nobody has
+/// played yet and a room somebody checked a location in this second are
+/// opposite states, and an orchestrator reaping on this reads them differently.
+fn check_idle_seconds(last_check_at: Option<f64>) -> Option<u64> {
+    let at = room_time(last_check_at?);
+    Some(
+        SystemTime::now()
+            .duration_since(at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The room's clock is unix seconds; puna parses RFC 3339.
+    #[test]
+    fn a_room_timestamp_renders_as_rfc3339() {
+        assert_eq!(rfc3339(room_time(1_700_000_500.0)), "2023-11-14T22:21:40Z");
+    }
+
+    /// Fractional seconds truncate rather than rounding up, so a rendered time
+    /// never claims a check happened later than it did.
+    #[test]
+    fn fractional_seconds_truncate() {
+        assert_eq!(rfc3339(room_time(1_700_000_500.9)), "2023-11-14T22:21:40Z");
+    }
+
+    /// A clock that has gone strange must not render as a time far in the
+    /// future: `as u64` on a negative or non-finite `f64` is a garbage number,
+    /// and this surface is read by a reaper that would act on it.
+    #[test]
+    fn an_impossible_clock_clamps_to_the_epoch() {
+        for bad in [-1.0, f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+            assert_eq!(
+                rfc3339(room_time(bad)),
+                "1970-01-01T00:00:00Z",
+                "{bad} should not render as a usable time"
+            );
+        }
+    }
+
+    /// **`None` must stay `None` all the way to the wire.**
+    ///
+    /// Puna distinguishes "nobody has checked anything yet" from "somebody
+    /// checked at the epoch" and reaps on them differently: the first means a
+    /// room still filling up, and collapsing it into a zero would have puna
+    /// stopping rooms whose organizer is mid-setup.
+    #[test]
+    fn a_room_with_no_checks_reports_null_not_zero() {
+        assert_eq!(check_idle_seconds(None), None);
+    }
+
+    #[test]
+    fn check_idle_counts_from_the_last_check() {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs() as f64;
+        let idle = check_idle_seconds(Some(now - 90.0)).expect("a check happened");
+        assert!((88..=92).contains(&idle), "idle was {idle}");
+    }
+
+    /// A clock slightly ahead of the wall reads as "just now", not as a huge
+    /// number wrapped from a negative duration.
+    #[test]
+    fn a_check_in_the_future_reads_as_zero() {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs() as f64;
+        assert_eq!(check_idle_seconds(Some(now + 3600.0)), Some(0));
+    }
 }
