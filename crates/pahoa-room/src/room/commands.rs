@@ -21,6 +21,29 @@
 use super::*;
 use crate::fuzzy;
 
+/// How a cheated item is announced to the room.
+///
+/// **The reference announces the same event two different ways depending on who
+/// asked, and the difference is on the wire.** `!getitem` sends a typed
+/// `ItemCheat` carrying the `NetworkItem` and the receiving slot
+/// (`MultiServer.py:1679-1681`), while `/send` and `/send_multiple` call
+/// `broadcast_text_all` with no additional arguments at all
+/// (`MultiServer.py:2389-2392`) — a bare `PrintJSON` with a `text` part and
+/// nothing else: no `type`, no `receiving`, no `item`.
+///
+/// That looks like an oversight upstream and may well be one, but a client
+/// keying off `type == "ItemCheat"` behaves differently between the two, so
+/// "improving" the console path would be a protocol difference no client asked
+/// for. Matching upstream is the contract; the shapes are kept apart here
+/// rather than at the call sites so the distinction is visible in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CheatAnnounce {
+    /// `!getitem`: typed, carrying the item.
+    Typed,
+    /// `/send`, `/send_multiple` and the admin API's equivalents: plain text.
+    Plain,
+}
+
 /// Lines one command may print before it gives up and asks for a filter.
 ///
 /// A deliberate divergence: `!missing` on a fresh 2000-location slot would
@@ -840,6 +863,26 @@ impl Room {
         item_name: &str,
         out: &mut dyn EffectSink,
     ) -> Result<String, String> {
+        self.grant_items(key, item_name, 1, CheatAnnounce::Typed, out)
+    }
+
+    // (see `CheatAnnounce` above `Room` for why these two differ)
+
+    /// Cheat `count` copies of an item into a slot.
+    ///
+    /// The reference has this exact shape — `_cmd_send` *is*
+    /// `_cmd_send_multiple(1, …)` (`MultiServer.py:2400-2402`) — so one
+    /// implementation with a count is the faithful arrangement rather than a
+    /// generalization of it. Granting one and granting five differ only in how
+    /// many copies are queued and in the wording of the single announcement.
+    pub(super) fn grant_items(
+        &mut self,
+        key: SlotKey,
+        item_name: &str,
+        count: usize,
+        announce: CheatAnnounce,
+        out: &mut dyn EffectSink,
+    ) -> Result<String, String> {
         let (team, slot) = key;
         let game = self.slot_game(slot);
         let Some(names) = self.datapackage.get(&game) else {
@@ -872,35 +915,61 @@ impl Room {
             flags: 0,
         };
         for remote in [false, true] {
-            Arc::make_mut(self.received_items.entry((team, slot, remote)).or_default()).push(item);
+            let queue = Arc::make_mut(self.received_items.entry((team, slot, remote)).or_default());
+            queue.extend(std::iter::repeat_n(item, count));
         }
 
         // The only item movement with no location behind it, so the `check`
         // records cannot account for it. Without this line the history reads as
         // a complete account of where every item came from and quietly is not.
-        out.journal_event(crate::effect::JournalEvent::cheat(
-            self.clock,
-            key,
-            &self.slot_alias(key),
-            id,
-            &name,
-        ));
+        //
+        // One record per copy, because that is what the journal counts
+        // everywhere else — `journal_check` writes a line per location, not per
+        // packet — and five items arriving is five item movements however many
+        // commands caused them.
+        for _ in 0..count {
+            out.journal_event(crate::effect::JournalEvent::cheat(
+                self.clock,
+                key,
+                &self.slot_alias(key),
+                id,
+                &name,
+            ));
+        }
 
-        out.broadcast(
-            // Attributable to the receiving slot, so a scoped feed hears about
-            // items granted to it and not about everyone else's.
-            Recipients::AllTextAbout((team, slot)),
-            &[ServerPacket::PrintJSON(PrintJson {
-                data: vec![JsonMessagePart::text(format!(
-                    "Cheat console: sending \"{name}\" to {}",
-                    self.slot_alias((team, slot))
-                ))],
+        // "5 of" only when there is more than one, matching the reference's own
+        // conditional (`MultiServer.py:2390-2392`) so a single grant reads
+        // identically however it was issued.
+        let text = format!(
+            "Cheat console: sending {}\"{name}\" to {}",
+            if count == 1 {
+                String::new()
+            } else {
+                format!("{count} of ")
+            },
+            self.slot_alias((team, slot))
+        );
+        let print = match announce {
+            CheatAnnounce::Typed => PrintJson {
+                data: vec![JsonMessagePart::text(text)],
                 print_type: Some(PrintJsonType::ItemCheat),
                 receiving: Some(slot),
                 item: Some(item),
                 team: Some(team),
                 ..Default::default()
-            })],
+            },
+            CheatAnnounce::Plain => PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                ..Default::default()
+            },
+        };
+        out.broadcast(
+            // Attributable to the receiving slot, so a scoped feed hears about
+            // items granted to it and not about everyone else's. This is a
+            // routing decision made here, not a field on the wire, so it holds
+            // for the plain announcement too.
+            Recipients::AllTextAbout((team, slot)),
+            &[ServerPacket::PrintJSON(print)],
         );
 
         self.send_new_items(&HashSet::from([slot]), out);
@@ -1272,7 +1341,12 @@ impl Room {
         granted_count
     }
 
-    fn collect_hints_by_id(&self, key: SlotKey, id: i64, for_location: bool) -> Vec<Hint> {
+    pub(super) fn collect_hints_by_id(
+        &self,
+        key: SlotKey,
+        id: i64,
+        for_location: bool,
+    ) -> Vec<Hint> {
         if for_location {
             self.collect_location_hints(key, key.1, id, Some(HintStatus::Unspecified))
         } else {

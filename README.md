@@ -361,7 +361,13 @@ validate before sending.
 | `release` | `{"command":"release","slot":3}` |
 | `collect` | `{"command":"collect","slot":3}` |
 | `send_item` | `{"command":"send_item","slot":3,"item":"Lamp"}` |
+| `send_multiple` | `{"command":"send_multiple","slot":3,"item":"Rupee","amount":5}` |
 | `hint` | `{"command":"hint","slot":3,"item":"Progressive Sword","force":false}` |
+| `hint_location` | `{"command":"hint_location","slot":3,"location":"Attic","force":false}` |
+| `send_location` | `{"command":"send_location","slot":3,"location":"Attic"}` |
+| `allow_release` | `{"command":"allow_release","slot":3,"allowed":true}` |
+| `alias` | `{"command":"alias","slot":3,"alias":"Organizer"}` |
+| `option` | `{"command":"option","name":"hint_cost","value":20}` |
 | `kick` | `{"command":"kick","slot":3,"reason":"…"}` |
 
 Every one answers the same shape, and `output` is pahoa's own phrasing so an
@@ -381,14 +387,64 @@ someone who cannot is the point. `hint` is the exception with two behaviors —
 points exactly as `!hint` would. `kick` disconnects every connection a slot has
 and is not a ban; nothing stops an immediate reconnect.
 
+**`hint` and `hint_location` are separate verbs, and each accepts only its own
+kind of name** — or a numeric id, which addresses its target directly. The chat
+commands guess at what a player typed; this one does not, because its caller is
+a program and a near-miss should be a visible error rather than a silent
+decision to act on something else. `send_location` is the same distinction one
+step further: it *checks* the location, sending out whatever items it holds,
+rather than merely hinting at it.
+
+**`allow_release` is an exemption, not a third permission.** `release_mode` is
+the room's rule for everyone; this exempts one slot from it, and the exemption is
+checked first — so an allowed slot may `!release` under a mode that forbids
+everyone else. `{"allowed": false}` clears the exemption and returns that slot to
+the mode, which may still permit releasing; it does not forbid it. The reference
+spells these as two commands, `/allow_release` and `/forbid_release`, and the
+second name is why this is one command with a boolean instead. There is no
+collect equivalent, in pahoa or in the reference — `!collect` consults
+`collect_mode` and nothing else.
+
+`alias` sets or clears *another* player's alias, which `!alias` only lets a
+player do for themselves; an empty or omitted alias clears it, and the name is
+truncated to 16 characters exactly as the chat command truncates it.
+
+**`send_multiple` is `send_item` with a count, capped at 100**, and one copy
+reads identically either way — the reference's `/send` is literally
+`/send_multiple 1`, so the two share an implementation and cannot word the same
+grant differently. The cap is worth keeping rather than raising: every copy is
+queued on both of the slot's item streams and replayed from index zero on each
+reconnect, so a stray extra digit is a room that never finishes sending. `amount`
+is required, because a default of one would make a `send_multiple` that did a
+fraction of its job look like it worked.
+
+Both announce the grant to the room as **plain text**, with no message type, no
+`item` and no receiving slot. That is not an omission: the reference announces
+the same event two ways depending on who asked — `!getitem` sends a typed
+`ItemCheat` carrying the `NetworkItem`, while `/send` and `/send_multiple` send
+a bare `PrintJSON` with only the text. A client keying off `type == "ItemCheat"`
+therefore treats the two differently, so pahoa matches upstream on both rather
+than quietly upgrading the console path to the richer form.
+
 ### Changing the rules on a live room
 
-`!admin login <server-password>` from any connected client opens a remote
-administration session, and `!admin /option <name> <value>` sets any of the room
-options below except the passwords. The change is announced to the connected
-clients that need it — a `RoomUpdate` carrying the permission map, or one per
-slot carrying its recomputed hint points — and it **persists**, because the save
-is authoritative for these fields and a restart restores them over whatever flag
+There are two ways in, for two different people holding two different
+credentials, and they run the **same code**:
+
+- **`!admin login <server-password>`** from any connected client opens a remote
+  administration session, and `!admin /option <name> <value>` sets an option.
+  This is the organizer's path — someone running the game from inside it, with a
+  chat window and no bearer token.
+- **`{"command":"option","name":"…","value":…}`** on the admin API is the
+  operator's and the orchestrator's path, for reconfiguring a running room
+  without a restart.
+
+Both reach one function, so the settable names, the value parsing, the refusals,
+the `RoomUpdate` fan-out and the journal records are identical by construction
+rather than by agreement. The change is announced to the connected clients that
+need it — a `RoomUpdate` carrying the permission map, or one per slot carrying
+its recomputed hint points — and it **persists**, because the save is
+authoritative for these fields and a restart restores them over whatever flag
 the room was started with.
 
 The passwords are refused, and the same fact is why: the save deliberately

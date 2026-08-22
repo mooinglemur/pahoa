@@ -208,21 +208,40 @@ impl Room {
             self.admin_out(conn, "Usage: /option <name> <value>".to_string(), out);
             return;
         };
+        match self.apply_option(name, value, "!admin", out) {
+            Ok(line) => self.admin_out(conn, line, out),
+            Err(lines) => self.notify_admin(conn, lines, out),
+        }
+    }
+
+    /// Set one option, with no caller to reply to.
+    ///
+    /// Split out of [`Room::server_cmd_option`] so the HTTP admin API reaches
+    /// **exactly** this — the same names, the same value parsing, the same
+    /// refusals, the same `RoomUpdate` fan-out and the same journal records.
+    /// Two implementations of "what may be set and to what" would drift, and
+    /// the failure would be silent: a room whose rules disagree with what the
+    /// surface that set them believes.
+    ///
+    /// `Ok` carries the confirmation line, `Err` the refusal — more than one
+    /// line where the reason needs explaining.
+    pub(super) fn apply_option(
+        &mut self,
+        name: &str,
+        value: &str,
+        source: &'static str,
+        out: &mut dyn EffectSink,
+    ) -> Result<String, Vec<String>> {
         let name = name.to_ascii_lowercase();
 
         if REFUSED.contains(&name.as_str()) {
-            self.notify_admin(
-                conn,
-                vec![
-                    format!("Option {name} cannot be set while the room is running."),
-                    "Passwords are never written to the save, so a change here would \
-                     revert the next time the room restarts. Set it where the room is \
-                     configured instead."
-                        .to_string(),
-                ],
-                out,
-            );
-            return;
+            return Err(vec![
+                format!("Option {name} cannot be set while the room is running."),
+                "Passwords are never written to the save, so a change here would \
+                 revert the next time the room restarts. Set it where the room is \
+                 configured instead."
+                    .to_string(),
+            ]);
         }
 
         let Some((_, kind)) = SETTABLE.iter().find(|(option, _)| *option == name) else {
@@ -230,29 +249,15 @@ impl Room {
                 .iter()
                 .map(|(option, kind)| format!("{option}: {}", kind.as_text()))
                 .collect();
-            self.admin_out(
-                conn,
-                format!("Unrecognized option '{name}', known: {}", known.join(", ")),
-                out,
-            );
-            return;
+            return Err(vec![format!(
+                "Unrecognized option '{name}', known: {}",
+                known.join(", ")
+            )]);
         };
 
         let push = match kind {
-            Kind::Int => match self.set_int_option(&name, value) {
-                Ok(push) => push,
-                Err(message) => {
-                    self.admin_out(conn, message, out);
-                    return;
-                }
-            },
-            Kind::Mode => match self.set_mode_option(&name, value) {
-                Ok(push) => push,
-                Err(message) => {
-                    self.admin_out(conn, message, out);
-                    return;
-                }
-            },
+            Kind::Int => self.set_int_option(&name, value).map_err(|m| vec![m])?,
+            Kind::Mode => self.set_mode_option(&name, value).map_err(|m| vec![m])?,
             Kind::Bool => {
                 // `bool("off") is True` in Python, so the reference spells the
                 // falsey words out rather than casting (`MultiServer.py:2522`).
@@ -274,7 +279,8 @@ impl Room {
         tracing::info!(
             option = %name,
             value = %self.option_as_text(&name),
-            "room option changed through !admin"
+            source,
+            "room option changed"
         );
         out.journal_event(crate::effect::JournalEvent::option_changed(
             self.clock,
@@ -287,12 +293,11 @@ impl Room {
             self.clock,
             &self.options,
         ));
-        self.admin_out(
-            conn,
-            format!("Set option {name} to {}", self.option_as_text(&name)),
-            out,
-        );
         self.push_option_update(push, &name, out);
+        Ok(format!(
+            "Set option {name} to {}",
+            self.option_as_text(&name)
+        ))
     }
 
     fn set_int_option(&mut self, name: &str, value: &str) -> Result<Push, String> {

@@ -45,15 +45,66 @@ pub fn parse(body: &[u8]) -> Result<AdminCommand, String> {
             slot: slot(object)?,
             item: text(object, "item")?,
         }),
+        // A separate verb rather than a count on `send_item`, mirroring the
+        // reference's naming — and `send_item` stays the one-copy spelling so
+        // the common case needs no count at all.
+        "send_multiple" => Ok(AdminCommand::SendMultiple {
+            slot: slot(object)?,
+            item: text(object, "item")?,
+            amount: integer(object, "amount")?,
+        }),
         "hint" => Ok(AdminCommand::Hint {
             slot: slot(object)?,
             item: text(object, "item")?,
-            // Optional, defaulting to the safer behavior: a caller who does not
-            // say should not be silently overriding the hint economy.
-            force: object.get("force").map_or(Ok(false), |v| {
+            force: force(object)?,
+        }),
+        // A separate verb rather than a flag on `hint`, because the reference
+        // names it separately and an operator who knows `/hint_location` looks
+        // for that word.
+        "hint_location" => Ok(AdminCommand::HintLocation {
+            slot: slot(object)?,
+            location: text(object, "location")?,
+            force: force(object)?,
+        }),
+        "send_location" => Ok(AdminCommand::SendLocation {
+            slot: slot(object)?,
+            location: text(object, "location")?,
+        }),
+        // One verb with a boolean rather than the reference's two, because
+        // `forbid_release` does not forbid anything — it clears an exemption.
+        // A caller reading `{"allowed": false}` is far less likely to expect a
+        // denial than one reading `forbid_release`.
+        "allow_release" => Ok(AdminCommand::AllowRelease {
+            slot: slot(object)?,
+            allowed: object.get("allowed").map_or(Ok(true), |v| {
                 v.as_bool()
-                    .ok_or_else(|| "\"force\" must be true or false".to_string())
+                    .ok_or_else(|| "\"allowed\" must be true or false".to_string())
             })?,
+        }),
+        "alias" => Ok(AdminCommand::Alias {
+            slot: slot(object)?,
+            // Optional and empty-meaning-clear, matching `!alias` with no
+            // argument.
+            alias: match object.get("alias") {
+                None | Some(Value::Null) => String::new(),
+                Some(v) => v
+                    .as_str()
+                    .ok_or_else(|| "\"alias\" must be a string".to_string())?
+                    .to_string(),
+            },
+        }),
+        "option" => Ok(AdminCommand::Option {
+            name: text(object, "name")?,
+            // Numbers and booleans are accepted as themselves rather than
+            // insisting on a quoted string: `{"name":"hint_cost","value":20}`
+            // is what a caller building JSON will write, and the option layer
+            // parses from text anyway.
+            value: match object.get("value") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v @ (Value::Number(_) | Value::Bool(_))) => v.to_string(),
+                Some(_) => return Err("\"value\" must be a string, number or boolean".to_string()),
+                None => return Err("missing \"value\"".to_string()),
+            },
         }),
         "kick" => Ok(AdminCommand::Kick {
             slot: slot(object)?,
@@ -116,6 +167,15 @@ fn slot(object: &Object) -> Result<u32, String> {
     u32::try_from(raw).map_err(|_| format!("{raw} is not a slot number"))
 }
 
+/// Optional, defaulting to the safer behavior: a caller who does not say should
+/// not be silently overriding the hint economy.
+fn force(object: &Object) -> Result<bool, String> {
+    object.get("force").map_or(Ok(false), |v| {
+        v.as_bool()
+            .ok_or_else(|| "\"force\" must be true or false".to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +231,120 @@ mod tests {
                 reason: "afk".into()
             }
         );
+        assert_eq!(
+            parsed(r#"{"command":"send_multiple","slot":3,"item":"Rupee","amount":5}"#).unwrap(),
+            AdminCommand::SendMultiple {
+                slot: 3,
+                item: "Rupee".into(),
+                amount: 5
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"hint_location","slot":3,"location":"Attic","force":true}"#)
+                .unwrap(),
+            AdminCommand::HintLocation {
+                slot: 3,
+                location: "Attic".into(),
+                force: true
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"send_location","slot":3,"location":"Attic"}"#).unwrap(),
+            AdminCommand::SendLocation {
+                slot: 3,
+                location: "Attic".into()
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"alias","slot":3,"alias":"Organizer"}"#).unwrap(),
+            AdminCommand::Alias {
+                slot: 3,
+                alias: "Organizer".into()
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"option","name":"hint_cost","value":"20"}"#).unwrap(),
+            AdminCommand::Option {
+                name: "hint_cost".into(),
+                value: "20".into()
+            }
+        );
+    }
+
+    /// `amount` is required rather than defaulting to one — a caller reaching
+    /// for `send_multiple` means to send several, and a silent default of one
+    /// would look like a working command that did a fraction of the job.
+    #[test]
+    fn send_multiple_requires_an_amount() {
+        assert!(
+            parsed(r#"{"command":"send_multiple","slot":1,"item":"Rupee"}"#)
+                .is_err_and(|e| e.contains("amount"))
+        );
+    }
+
+    /// `hint` and `hint_location` name different fields, so a caller cannot
+    /// send one thinking it is the other and have it half-work.
+    #[test]
+    fn the_two_hint_verbs_want_different_fields() {
+        let wrong_field = parsed(r#"{"command":"hint_location","slot":1,"item":"Lamp"}"#);
+        assert!(
+            wrong_field.is_err_and(|e| e.contains("location")),
+            "a hint_location without a location should say which field it wants"
+        );
+    }
+
+    /// `allowed` defaults to *granting* the exemption, because `allow_release`
+    /// with no argument is the reference's `/allow_release`.
+    #[test]
+    fn allow_release_defaults_to_allowing() {
+        assert_eq!(
+            parsed(r#"{"command":"allow_release","slot":2}"#).unwrap(),
+            AdminCommand::AllowRelease {
+                slot: 2,
+                allowed: true
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"allow_release","slot":2,"allowed":false}"#).unwrap(),
+            AdminCommand::AllowRelease {
+                slot: 2,
+                allowed: false
+            }
+        );
+    }
+
+    /// An omitted alias clears it, matching `!alias` with no argument.
+    #[test]
+    fn an_omitted_alias_clears_it() {
+        assert_eq!(
+            parsed(r#"{"command":"alias","slot":2}"#).unwrap(),
+            AdminCommand::Alias {
+                slot: 2,
+                alias: String::new()
+            }
+        );
+    }
+
+    /// A caller building JSON writes `"value": 20`, not `"value": "20"`. The
+    /// option layer parses from text either way, so insisting on a quoted
+    /// number would be a papercut with nothing behind it.
+    #[test]
+    fn an_option_value_may_be_a_number_or_a_boolean() {
+        assert_eq!(
+            parsed(r#"{"command":"option","name":"hint_cost","value":20}"#).unwrap(),
+            AdminCommand::Option {
+                name: "hint_cost".into(),
+                value: "20".into()
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"option","name":"item_cheat","value":false}"#).unwrap(),
+            AdminCommand::Option {
+                name: "item_cheat".into(),
+                value: "false".into()
+            }
+        );
+        assert!(parsed(r#"{"command":"option","name":"hint_cost","value":[1]}"#).is_err());
     }
 
     /// `force` defaults to the behavior that respects the hint economy.

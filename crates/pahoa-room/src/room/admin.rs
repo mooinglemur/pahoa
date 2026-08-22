@@ -18,6 +18,14 @@
 
 use super::*;
 
+/// Most copies of one item `send_multiple` will grant at once.
+///
+/// The reference's number (`MultiServer.py:2383-2384`), and worth keeping
+/// rather than raising: every copy is queued on both of a slot's item streams
+/// and replayed from index zero on each reconnect, so a slip of the keyboard
+/// asking for a million is a room that never finishes sending them.
+pub const SEND_MULTIPLE_LIMIT: i64 = 100;
+
 /// A command with its target supplied rather than inferred from a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminCommand {
@@ -38,11 +46,52 @@ pub enum AdminCommand {
         slot: u32,
         item: String,
     },
+    /// [`AdminCommand::SendItem`] with a count, capped at
+    /// [`SEND_MULTIPLE_LIMIT`].
+    SendMultiple {
+        slot: u32,
+        item: String,
+        amount: i64,
+    },
     Hint {
         slot: u32,
         item: String,
         /// Grant the hint regardless of what the slot can afford.
         force: bool,
+    },
+    /// The location half of [`AdminCommand::Hint`], kept a separate verb rather
+    /// than a flag because the reference names it separately (`/hint_location`)
+    /// and an operator who knows the console looks for that word.
+    HintLocation {
+        slot: u32,
+        location: String,
+        force: bool,
+    },
+    /// Check a location on a slot's behalf, as though the player had.
+    SendLocation {
+        slot: u32,
+        location: String,
+    },
+    /// Exempt one slot from `release_mode`, or return it to the room's rule.
+    ///
+    /// Not a permission of its own: `allowed: false` clears the exemption
+    /// rather than denying a release the mode would otherwise permit. See
+    /// [`Room::admin_allow_release`].
+    AllowRelease {
+        slot: u32,
+        allowed: bool,
+    },
+    /// Set or clear a slot's display alias, which `!alias` only lets a player
+    /// do for themselves.
+    Alias {
+        slot: u32,
+        /// Empty clears it.
+        alias: String,
+    },
+    /// Change one of the room's rules, the same set `!admin` `/option` reaches.
+    Option {
+        name: String,
+        value: String,
     },
     Kick {
         slot: u32,
@@ -99,8 +148,26 @@ impl Room {
             AdminCommand::Countdown { seconds } => self.admin_countdown(seconds, out),
             AdminCommand::Release { slot } => self.admin_release(slot, out),
             AdminCommand::Collect { slot } => self.admin_collect(slot, out),
-            AdminCommand::SendItem { slot, item } => self.admin_send_item(slot, &item, out),
-            AdminCommand::Hint { slot, item, force } => self.admin_hint(slot, &item, force, out),
+            AdminCommand::SendItem { slot, item } => self.admin_send_item(slot, &item, 1, out),
+            AdminCommand::SendMultiple { slot, item, amount } => {
+                self.admin_send_item(slot, &item, amount, out)
+            }
+            AdminCommand::Hint { slot, item, force } => {
+                self.admin_hint(slot, &item, false, force, out)
+            }
+            AdminCommand::HintLocation {
+                slot,
+                location,
+                force,
+            } => self.admin_hint(slot, &location, true, force, out),
+            AdminCommand::SendLocation { slot, location } => {
+                self.admin_send_location(slot, &location, out)
+            }
+            AdminCommand::AllowRelease { slot, allowed } => {
+                self.admin_allow_release(slot, allowed, out)
+            }
+            AdminCommand::Alias { slot, alias } => self.admin_alias(slot, &alias, out),
+            AdminCommand::Option { name, value } => self.admin_option(&name, &value, out),
             AdminCommand::Kick { slot, reason } => self.admin_kick(slot, &reason, out),
         }
     }
@@ -214,18 +281,50 @@ impl Room {
     }
 
     /// The cheat console's effect, aimed at a slot rather than at the caller.
-    fn admin_send_item(&mut self, slot: u32, item: &str, out: &mut dyn EffectSink) -> AdminOutcome {
+    ///
+    /// One implementation for `send_item` and `send_multiple`, because that is
+    /// the reference's own arrangement: `_cmd_send` is `_cmd_send_multiple(1,
+    /// …)` (`MultiServer.py:2400-2402`).
+    fn admin_send_item(
+        &mut self,
+        slot: u32,
+        item: &str,
+        amount: i64,
+        out: &mut dyn EffectSink,
+    ) -> AdminOutcome {
         let Some(key) = self.admin_key(slot) else {
             return Self::unknown_slot(slot);
         };
+        if amount < 1 {
+            return AdminOutcome::refused(format!("{amount} is not a number of items to send."));
+        }
+        if amount > SEND_MULTIPLE_LIMIT {
+            return AdminOutcome::refused(format!(
+                "{amount} is too many; the most that may be sent at once is {SEND_MULTIPLE_LIMIT}."
+            ));
+        }
         // Deliberately not gated on `item_cheat`: that option decides whether
         // *players* may help themselves, and an administrator granting an item
         // is the sanctioned path it points people at.
-        match self.grant_item(key, item, out) {
+        // Plain text, not a typed `ItemCheat` — see `CheatAnnounce`. This is
+        // the console path, and the reference announces it without the type,
+        // the item or the receiving slot.
+        match self.grant_items(
+            key,
+            item,
+            amount as usize,
+            super::commands::CheatAnnounce::Plain,
+            out,
+        ) {
             Ok(name) => {
                 out.mark_dirty();
+                let who = self.slot_alias(key);
                 AdminOutcome::ok(
-                    format!("Sent \"{name}\" to {}.", self.slot_alias(key)),
+                    if amount == 1 {
+                        format!("Sent \"{name}\" to {who}.")
+                    } else {
+                        format!("Sent {amount} of \"{name}\" to {who}.")
+                    },
                     vec![slot],
                 )
             }
@@ -233,21 +332,60 @@ impl Room {
         }
     }
 
+    /// One implementation for `/hint` and `/hint_location`.
+    ///
+    /// `collect_hints_by_name` already takes the item/location distinction and
+    /// already resolves *name groups* on both sides, which is the part worth
+    /// not writing twice: `!hint_location` reaches it through the same call
+    /// with the same flag, so the two surfaces cannot disagree about what a
+    /// name means.
     fn admin_hint(
         &mut self,
         slot: u32,
-        item: &str,
+        name: &str,
+        for_location: bool,
         force: bool,
         out: &mut dyn EffectSink,
     ) -> AdminOutcome {
         let Some(key) = self.admin_key(slot) else {
             return Self::unknown_slot(slot);
         };
+        let noun = if for_location { "location" } else { "item" };
 
-        let hints = self.collect_hints_by_name(key, item, false);
+        // **Gate on the right pool before collecting**, which is what keeps
+        // the two verbs actually distinct. `collect_hints_by_name` falls
+        // through to a location lookup when an item lookup misses — faithfully,
+        // because the reference's `get_hints` ends its chain the same way — and
+        // the reference gets away with it by choosing the candidate pool
+        // *first* (`MultiServer.py:1728-1731`), so a location name never
+        // reaches the fallthrough on an item hint. The chat commands do the
+        // same through `fuzzy::intended`. Calling the collector directly, as
+        // this used to, skipped that gate: `hint` accepted location names and
+        // quietly produced location hints, which is precisely the confusion a
+        // separate `hint_location` exists to remove.
+        let hintable = self
+            .datapackage
+            .get(&self.slot_game(key.1))
+            .is_some_and(|names| {
+                let pool = if for_location {
+                    names.location_and_group_names()
+                } else {
+                    names.item_and_group_names()
+                };
+                pool.contains(&name)
+            });
+        // An id addresses its target directly, with no name to gate on — the
+        // reference accepts one here too (`MultiServer.py:2443`), and
+        // `send_location` already does, so refusing it only here would be an
+        // inconsistency a caller has to memorize.
+        let hints = match name.parse::<i64>() {
+            Ok(id) => self.collect_hints_by_id(key, id, for_location),
+            Err(_) if hintable => self.collect_hints_by_name(key, name, for_location),
+            Err(_) => Vec::new(),
+        };
         if hints.is_empty() {
             return AdminOutcome::refused(format!(
-                "Found no hintable item matching \"{item}\" for {}.",
+                "Found no hintable {noun} matching \"{name}\" for {}.",
                 self.slot_alias(key)
             ));
         }
@@ -275,11 +413,162 @@ impl Room {
             out.mark_dirty();
             AdminOutcome::ok(
                 format!(
-                    "Hinted {granted} item(s) for {}, at their own cost.",
+                    "Hinted {granted} {noun}(s) for {}, at their own cost.",
                     self.slot_alias(key)
                 ),
                 vec![slot],
             )
+        }
+    }
+
+    /// A location id, from either a numeric id or an exact location name.
+    ///
+    /// **Exact, not fuzzy**, unlike the chat commands. `!hint_location` runs
+    /// what a player typed through `fuzzy::intended` because a person guessing
+    /// at a name is the normal case there. This is a typed JSON API whose
+    /// caller is a program: a near-miss should be an error it can see, not a
+    /// silent decision to act on a different location — and `send_location`
+    /// hands out items, which is not something to do on a guess.
+    fn resolve_location(&self, key: SlotKey, input: &str) -> Option<i64> {
+        if let Ok(id) = input.parse::<i64>() {
+            return Some(id);
+        }
+        let names = self.datapackage.get(&self.slot_game(key.1))?;
+        names.location_id(input)
+    }
+
+    /// Check a location on a slot's behalf, as though the player had.
+    ///
+    /// Routed through `register_location_checks` rather than writing the set
+    /// directly, so the items that location holds are sent, the check is
+    /// announced, `activity_at` moves and the hint statuses update — all the
+    /// consequences a real check has. Writing to `location_checks` would look
+    /// identical in the tracker and quietly deliver nothing.
+    fn admin_send_location(
+        &mut self,
+        slot: u32,
+        location: &str,
+        out: &mut dyn EffectSink,
+    ) -> AdminOutcome {
+        let Some(key) = self.admin_key(slot) else {
+            return Self::unknown_slot(slot);
+        };
+        let Some(id) = self.resolve_location(key, location) else {
+            return AdminOutcome::refused(format!(
+                "Found no location matching \"{location}\" for {}.",
+                self.slot_alias(key)
+            ));
+        };
+
+        let before = self.checked_count(key);
+        self.register_location_checks(key, &[id], out);
+        let checked = self.checked_count(key).saturating_sub(before);
+        if checked == 0 {
+            // Either already checked or not this slot's location. Both are
+            // no-ops rather than errors, and an operator wants to know which.
+            return AdminOutcome::refused(format!(
+                "{} had nothing to check at \"{location}\"; it is already \
+                 checked or does not belong to that slot.",
+                self.slot_alias(key)
+            ));
+        }
+        out.mark_dirty();
+        AdminOutcome::ok(
+            format!("Checked \"{location}\" for {}.", self.slot_alias(key)),
+            vec![slot],
+        )
+    }
+
+    /// Exempt a slot from `release_mode`, or return it to the room's rule.
+    ///
+    /// **Not a third permission level.** `release_mode` is the room's policy;
+    /// this is a per-slot exemption checked *before* it, so `allowed: true`
+    /// lets that slot `!release` whatever the mode says. Clearing it does not
+    /// forbid releasing — it restores the mode, which may well still permit it.
+    /// The reference is the same shape and spells the clear case out as "has to
+    /// follow the server restrictions" (`MultiServer.py:2361-2371`); the
+    /// response here says so too, because "forbid" reads like a denial.
+    ///
+    /// There is deliberately no collect equivalent: the reference has none —
+    /// `!collect` consults `collect_mode` and nothing else.
+    fn admin_allow_release(
+        &mut self,
+        slot: u32,
+        allowed: bool,
+        out: &mut dyn EffectSink,
+    ) -> AdminOutcome {
+        let Some(key) = self.admin_key(slot) else {
+            return Self::unknown_slot(slot);
+        };
+        self.allow_release(key, allowed);
+        out.mark_dirty();
+
+        let who = self.slot_alias(key);
+        AdminOutcome::ok(
+            if allowed {
+                format!("{who} may now use !release at any time.")
+            } else {
+                format!(
+                    "{who} now follows the room's release_mode ({}), which may still allow it.",
+                    self.options.release_mode.as_text()
+                )
+            },
+            vec![slot],
+        )
+    }
+
+    /// Set or clear a slot's alias, which `!alias` only lets a player do for
+    /// themselves.
+    ///
+    /// Truncated the same way the chat command does — the reference takes the
+    /// first 16 *characters* and then strips, so a padded name ends up shorter
+    /// than 16 rather than being padded out to it.
+    fn admin_alias(&mut self, slot: u32, alias: &str, out: &mut dyn EffectSink) -> AdminOutcome {
+        let Some(key) = self.admin_key(slot) else {
+            return Self::unknown_slot(slot);
+        };
+        let trimmed: String = alias.chars().take(16).collect();
+        let trimmed = trimmed.trim().to_string();
+
+        let line = if trimmed.is_empty() {
+            if self.name_aliases.remove(&key).is_none() {
+                return AdminOutcome::refused(format!(
+                    "{} has no alias to clear.",
+                    self.slot_name(key)
+                ));
+            }
+            format!("Cleared the alias for {}.", self.slot_name(key))
+        } else {
+            self.name_aliases.insert(key, trimmed.clone());
+            format!("{} is now known as {trimmed}.", self.slot_name(key))
+        };
+
+        out.mark_dirty();
+        // Aliases ride in `NetworkPlayer`, so every client needs the new list —
+        // the same broadcast `!alias` makes, for the same reason.
+        out.broadcast(
+            Recipients::All,
+            &[ServerPacket::RoomUpdate(Box::new(RoomUpdate {
+                players: Some(self.players_package()),
+                ..Default::default()
+            }))],
+        );
+        AdminOutcome::ok(line, vec![slot])
+    }
+
+    /// Change one of the room's rules.
+    ///
+    /// Deliberately the *same* code path as `!admin` `/option` — see
+    /// [`Room::apply_option`]. The two surfaces differ only in who is trusted
+    /// to reach them and where the answer goes.
+    fn admin_option(&mut self, name: &str, value: &str, out: &mut dyn EffectSink) -> AdminOutcome {
+        match self.apply_option(name, value, "admin API", out) {
+            Ok(line) => AdminOutcome::ok(line, Vec::new()),
+            Err(lines) => AdminOutcome {
+                ok: false,
+                output: lines,
+                affected_slots: Vec::new(),
+            },
         }
     }
 

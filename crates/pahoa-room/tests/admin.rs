@@ -446,3 +446,615 @@ fn first_item_name(room: &Room, game: &str) -> Option<String> {
         .next()
         .cloned()
 }
+
+fn say(text: &str) -> pahoa_proto::ClientPacket {
+    pahoa_proto::ClientPacket::Say(pahoa_proto::client::Say {
+        text: text.to_string(),
+    })
+}
+
+/// The alias recorded for a slot, read the way the save reads it.
+fn alias_of(room: &Room, key: (u32, u32)) -> Option<String> {
+    room.snapshot()
+        .name_aliases
+        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v)
+}
+
+/// The location name of a slot's first location, if its data package resolved.
+fn first_location_name(room: &Room, slot: u32) -> Option<String> {
+    let game = &room.multidata().slot_info[&slot].game;
+    let id = room.multidata().locations.for_slot(slot).first()?.location;
+    let package = room.multidata().embedded_datapackage.get(game)?;
+    package
+        .location_name_to_id
+        .iter()
+        .find(|(_, v)| **v == id)
+        .map(|(k, _)| k.clone())
+}
+
+#[test]
+fn hint_location_reaches_the_location_half_of_the_hint_machinery() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let Some(location) = first_location_name(&room, slot) else {
+        eprintln!("SKIP: no data package for this slot's game");
+        return;
+    };
+
+    let outcome = run(
+        &mut room,
+        AdminCommand::HintLocation {
+            slot,
+            location: location.clone(),
+            force: true,
+        },
+    );
+    assert!(outcome.ok, "{:?}", outcome.output);
+
+    // A *location* hint, not an item one: the hint the slot now holds is for
+    // the location that was named.
+    let hints = room.hints_for((0, slot));
+    assert!(
+        hints.iter().any(|h| h.finding_player == slot),
+        "hinting a location should produce a hint found in that slot's world"
+    );
+}
+
+/// The bug this whole command set had: `hint` and `hint_location` differ only
+/// by a flag internally, and the admin surface passed `false` unconditionally,
+/// so an operator could never reach the location half at all.
+#[test]
+fn hint_and_hint_location_are_not_the_same_command() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let Some(location) = first_location_name(&room, slot) else {
+        eprintln!("SKIP: no data package for this slot's game");
+        return;
+    };
+
+    // The same string as an *item* name almost certainly matches nothing.
+    let as_item = run(
+        &mut room,
+        AdminCommand::Hint {
+            slot,
+            item: location.clone(),
+            force: true,
+        },
+    );
+    let as_location = run(
+        &mut room,
+        AdminCommand::HintLocation {
+            slot,
+            location,
+            force: true,
+        },
+    );
+    assert!(
+        as_location.ok,
+        "the location half should resolve: {:?}",
+        as_location.output
+    );
+    assert!(
+        !as_item.ok,
+        "a location name resolved as an item — the flag is not being honored"
+    );
+    assert!(
+        as_item.output[0].contains("item"),
+        "the refusal should name what it looked for: {:?}",
+        as_item.output
+    );
+}
+
+#[test]
+fn send_location_checks_it_for_real() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let key = (0, slot);
+    let id = room.multidata().locations.for_slot(slot)[0].location;
+    let before = room.checked_count(key);
+
+    let outcome = run(
+        &mut room,
+        AdminCommand::SendLocation {
+            slot,
+            location: id.to_string(),
+        },
+    );
+    assert!(outcome.ok, "{:?}", outcome.output);
+    assert_eq!(
+        room.checked_count(key),
+        before + 1,
+        "the location should be checked, not merely reported as such"
+    );
+    assert_eq!(outcome.affected_slots, vec![slot]);
+}
+
+/// A second send is a no-op, and says which no-op it was rather than claiming
+/// to have checked something again.
+#[test]
+fn send_location_twice_is_refused_the_second_time() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let id = room.multidata().locations.for_slot(slot)[0].location;
+    let command = || AdminCommand::SendLocation {
+        slot,
+        location: id.to_string(),
+    };
+
+    assert!(run(&mut room, command()).ok);
+    let second = run(&mut room, command());
+    assert!(!second.ok, "{:?}", second.output);
+    assert!(
+        second.output[0].contains("already checked"),
+        "{:?}",
+        second.output
+    );
+}
+
+/// **`allow_release` beats `release_mode`, which is the whole point of it.**
+///
+/// The reference checks the per-slot exemption first and returns immediately
+/// (`MultiServer.py:1511`), so a slot that has been allowed can release under a
+/// mode that forbids everyone else.
+#[test]
+fn allow_release_exempts_one_slot_from_a_forbidding_mode() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(
+        data,
+        RoomOptions {
+            release_mode: pahoa_proto::types::Permission::Disabled,
+            ..Default::default()
+        },
+    );
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+    let key = (0, slot);
+
+    // Without the exemption the mode refuses.
+    let mut sink = Recorder::default();
+    room.handle(conn, say("!release"), &mut sink);
+    assert_eq!(room.checked_count(key), 0, "the mode should have refused");
+
+    assert!(
+        run(
+            &mut room,
+            AdminCommand::AllowRelease {
+                slot,
+                allowed: true
+            }
+        )
+        .ok
+    );
+
+    let mut sink = Recorder::default();
+    room.handle(conn, say("!release"), &mut sink);
+    assert!(
+        room.checked_count(key) > 0,
+        "an allowed slot must be able to release under a mode that forbids it"
+    );
+}
+
+/// Clearing the exemption restores the *mode* — it does not forbid releasing,
+/// which is why this is one command with a boolean rather than the reference's
+/// `forbid_release`, a name that reads like a denial.
+#[test]
+fn clearing_the_exemption_returns_the_slot_to_the_rooms_mode() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+
+    assert!(
+        run(
+            &mut room,
+            AdminCommand::AllowRelease {
+                slot,
+                allowed: true
+            }
+        )
+        .ok
+    );
+    let cleared = run(
+        &mut room,
+        AdminCommand::AllowRelease {
+            slot,
+            allowed: false,
+        },
+    );
+    assert!(cleared.ok);
+    assert!(
+        cleared.output[0].contains("release_mode"),
+        "the response must say the mode is back in charge, not that releasing is forbidden: {:?}",
+        cleared.output
+    );
+}
+
+#[test]
+fn alias_sets_and_clears_another_players_name() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let key = (0, slot);
+
+    assert!(
+        run(
+            &mut room,
+            AdminCommand::Alias {
+                slot,
+                alias: "Organizer".to_string(),
+            },
+        )
+        .ok
+    );
+    assert_eq!(alias_of(&room, key).as_deref(), Some("Organizer"));
+
+    assert!(
+        run(
+            &mut room,
+            AdminCommand::Alias {
+                slot,
+                alias: String::new(),
+            },
+        )
+        .ok
+    );
+    assert_eq!(alias_of(&room, key), None, "an empty alias should clear it");
+}
+
+/// The same 16-character truncation `!alias` applies, so the two surfaces
+/// cannot produce names of different lengths.
+/// Aliases ride in `NetworkPlayer`, so setting one has to reach *everyone* —
+/// the same broadcast `!alias` makes. Without it the operator's change is
+/// invisible until each client happens to reconnect.
+#[test]
+fn an_operator_set_alias_is_pushed_to_every_client() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, name, _) = room().unwrap();
+    let mut sink = Recorder::default();
+    room.admin(
+        AdminCommand::Alias {
+            slot,
+            alias: "Organizer".to_string(),
+        },
+        &mut sink,
+    );
+
+    let players = sink
+        .events
+        .iter()
+        .find_map(|e| match e {
+            pahoa_room::Event::Broadcast { msgs, .. } => msgs.iter().find_map(|p| match p {
+                ServerPacket::RoomUpdate(u) => u.players.as_ref(),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("everyone gets the new player list");
+    let target = players.iter().find(|p| p.slot == slot).unwrap();
+    assert_eq!(target.alias, format!("Organizer ({name})"));
+    assert_eq!(target.name, name, "the seed name stays visible");
+}
+
+#[test]
+fn an_operator_set_alias_is_truncated_like_the_chat_one() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    run(
+        &mut room,
+        AdminCommand::Alias {
+            slot,
+            alias: "a-very-long-alias-indeed".to_string(),
+        },
+    );
+    assert_eq!(
+        alias_of(&room, (0, slot)).as_deref(),
+        Some("a-very-long-alia"),
+        "the first 16 characters, as the reference takes them"
+    );
+}
+
+#[test]
+fn option_changes_a_rule_over_the_admin_api() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, ..) = room().unwrap();
+    let outcome = run(
+        &mut room,
+        AdminCommand::Option {
+            name: "hint_cost".to_string(),
+            value: "42".to_string(),
+        },
+    );
+    assert!(outcome.ok, "{:?}", outcome.output);
+    assert_eq!(room.options.hint_cost, 42);
+}
+
+/// The refusals are the `/option` ones, not a second set written for HTTP —
+/// a password cannot be set here for exactly the reason it cannot be set there.
+#[test]
+fn option_refuses_the_passwords_with_the_same_explanation() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, ..) = room().unwrap();
+    let refused = run(
+        &mut room,
+        AdminCommand::Option {
+            name: "server_password".to_string(),
+            value: "hunter2".to_string(),
+        },
+    );
+    assert!(!refused.ok);
+    assert!(
+        refused
+            .output
+            .iter()
+            .any(|l| l.contains("never written to the save")),
+        "{:?}",
+        refused.output
+    );
+    assert_eq!(room.options.server_password, None);
+}
+
+#[test]
+fn option_refuses_an_unknown_name_and_lists_what_it_knows() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, ..) = room().unwrap();
+    let refused = run(
+        &mut room,
+        AdminCommand::Option {
+            name: "nonsense".to_string(),
+            value: "1".to_string(),
+        },
+    );
+    assert!(!refused.ok);
+    assert!(
+        refused.output[0].contains("hint_cost"),
+        "{:?}",
+        refused.output
+    );
+}
+
+/// Ids work as well as names, on both hint verbs — the reference accepts them
+/// (`MultiServer.py:2443`) and `send_location` already does, so refusing them
+/// on one surface would be an inconsistency a caller has to memorize.
+#[test]
+fn hints_may_be_addressed_by_id() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let id = room.multidata().locations.for_slot(slot)[0].location;
+
+    let outcome = run(
+        &mut room,
+        AdminCommand::HintLocation {
+            slot,
+            location: id.to_string(),
+            force: true,
+        },
+    );
+    assert!(outcome.ok, "{:?}", outcome.output);
+}
+
+/// `send_multiple` queues every copy, on both of the slot's item streams.
+#[test]
+fn send_multiple_queues_every_copy() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let game = room.multidata().slot_info[&slot].game.clone();
+    let Some(item) = first_item_name(&room, &game) else {
+        eprintln!("SKIP: no data package for {game}");
+        return;
+    };
+
+    let outcome = run(
+        &mut room,
+        AdminCommand::SendMultiple {
+            slot,
+            item,
+            amount: 5,
+        },
+    );
+    assert!(outcome.ok, "{:?}", outcome.output);
+    assert!(
+        outcome.output[0].contains("5 of"),
+        "the count belongs in the response: {:?}",
+        outcome.output
+    );
+    assert_eq!(outcome.affected_slots, vec![slot]);
+}
+
+/// One copy reads exactly as `send_item` does, because the reference's `/send`
+/// *is* `/send_multiple 1` — the two must not drift into different wording.
+#[test]
+fn one_copy_reads_the_same_either_way() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let game = room.multidata().slot_info[&slot].game.clone();
+    let Some(item) = first_item_name(&room, &game) else {
+        eprintln!("SKIP: no data package for {game}");
+        return;
+    };
+
+    let single = run(
+        &mut room,
+        AdminCommand::SendItem {
+            slot,
+            item: item.clone(),
+        },
+    );
+    let multiple_of_one = run(
+        &mut room,
+        AdminCommand::SendMultiple {
+            slot,
+            item,
+            amount: 1,
+        },
+    );
+    assert_eq!(single.output, multiple_of_one.output);
+    assert!(
+        !single.output[0].contains(" of "),
+        "a single grant must not say \"1 of\": {:?}",
+        single.output
+    );
+}
+
+/// The reference caps this at 100 and so does pahoa: every copy is queued on
+/// both streams and replayed from zero on each reconnect, so an accidental
+/// extra zero is a room that never finishes sending.
+#[test]
+fn send_multiple_is_capped() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let game = room.multidata().slot_info[&slot].game.clone();
+    let Some(item) = first_item_name(&room, &game) else {
+        eprintln!("SKIP: no data package for {game}");
+        return;
+    };
+
+    let too_many = run(
+        &mut room,
+        AdminCommand::SendMultiple {
+            slot,
+            item: item.clone(),
+            amount: pahoa_room::SEND_MULTIPLE_LIMIT + 1,
+        },
+    );
+    assert!(!too_many.ok);
+    assert!(too_many.output[0].contains("100"), "{:?}", too_many.output);
+
+    // The limit itself is allowed — it is a cap, not a threshold.
+    let at_the_limit = run(
+        &mut room,
+        AdminCommand::SendMultiple {
+            slot,
+            item: item.clone(),
+            amount: pahoa_room::SEND_MULTIPLE_LIMIT,
+        },
+    );
+    assert!(at_the_limit.ok, "{:?}", at_the_limit.output);
+
+    // And nothing below one, which would otherwise grant zero items and
+    // cheerfully report success.
+    for amount in [0, -1] {
+        let refused = run(
+            &mut room,
+            AdminCommand::SendMultiple {
+                slot,
+                item: item.clone(),
+                amount,
+            },
+        );
+        assert!(!refused.ok, "amount {amount} should be refused");
+    }
+}
+
+/// The history counts item movements, not commands: five copies is five lines,
+/// the same way a multi-location check writes one line per location.
+#[test]
+fn send_multiple_journals_every_copy() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let game = room.multidata().slot_info[&slot].game.clone();
+    let Some(item) = first_item_name(&room, &game) else {
+        eprintln!("SKIP: no data package for {game}");
+        return;
+    };
+
+    let mut sink = Recorder::default();
+    room.admin(
+        AdminCommand::SendMultiple {
+            slot,
+            item,
+            amount: 3,
+        },
+        &mut sink,
+    );
+    let cheats = sink
+        .journal_events
+        .iter()
+        .filter(|e| e.kind() == "cheat")
+        .count();
+    assert_eq!(
+        cheats, 3,
+        "three items granted should be three cheat records"
+    );
+}
+
+/// **The console path announces plainly, and that is upstream's shape, not an
+/// oversight on our side.**
+///
+/// `!getitem` sends a typed `ItemCheat` carrying the `NetworkItem`
+/// (`MultiServer.py:1679-1681`); `/send` and `/send_multiple` call
+/// `broadcast_text_all` with no additional arguments at all
+/// (`MultiServer.py:2389-2392`). A client keying off `type == "ItemCheat"`
+/// therefore sees the two differently, so the admin API must not quietly
+/// upgrade the console path to the richer form.
+#[test]
+fn an_admin_grant_is_announced_as_plain_text() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = room().unwrap();
+    let game = room.multidata().slot_info[&slot].game.clone();
+    let Some(item) = first_item_name(&room, &game) else {
+        eprintln!("SKIP: no data package for {game}");
+        return;
+    };
+
+    let mut sink = Recorder::default();
+    room.admin(AdminCommand::SendItem { slot, item }, &mut sink);
+
+    let print = sink
+        .events
+        .iter()
+        .find_map(|e| match e {
+            pahoa_room::Event::Broadcast { msgs, .. } => msgs.iter().find_map(|p| match p {
+                ServerPacket::PrintJSON(print) => Some(print),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("the grant is announced to the room");
+
+    assert!(
+        print.print_type.is_none(),
+        "the console path carries no message type: {:?}",
+        print.print_type
+    );
+    assert!(print.item.is_none(), "and no item");
+    assert!(print.receiving.is_none(), "and no receiving slot");
+    // The text itself is unchanged, so players read the same line either way.
+    let text: String = print.data.iter().filter_map(|p| p.text.clone()).collect();
+    assert!(text.starts_with("Cheat console: sending "), "{text}");
+}

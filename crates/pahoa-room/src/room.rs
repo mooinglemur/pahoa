@@ -8,7 +8,7 @@ mod admin;
 mod commands;
 mod server_commands;
 
-pub use admin::{AdminCommand, AdminOutcome};
+pub use admin::{AdminCommand, AdminOutcome, SEND_MULTIPLE_LIMIT};
 
 use crate::conn::{Client, ConnId, FeedPolicy, non_game_verb, python_list_repr};
 use crate::datapackage::DataPackageCache;
