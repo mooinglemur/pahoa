@@ -224,6 +224,14 @@ second `pahoa serve` pointed at it exits rather than silently overwriting. The
 save cadence is what bounds how much play an unclean stop can lose; the flush on
 shutdown is a nicety, since SIGKILL, node loss and OOM kills all skip it.
 
+**The save format is versioned, and a newer save is refused rather than
+half-read.** Version 2 added the per-slot lock state. A current server reads
+older saves fine, but rolling a room *back* to a binary that predates a field
+fails at startup with "save format version N is newer than this server
+understands" — which is the intended trade for a field carrying access control,
+since a lock that quietly stopped holding after a downgrade is worse than a room
+that will not start. Roll forward, or start the room on an empty directory.
+
 ### Passwords
 
 Paths and ports are argv; **secrets are read from the environment**, because
@@ -366,6 +374,7 @@ validate before sending.
 | `hint_location` | `{"command":"hint_location","slot":3,"location":"Attic","force":false}` |
 | `send_location` | `{"command":"send_location","slot":3,"location":"Attic"}` |
 | `allow_release` | `{"command":"allow_release","slot":3,"allowed":true}` |
+| `lock` | `{"command":"lock","slot":3,"locked":true}` |
 | `alias` | `{"command":"alias","slot":3,"alias":"Organizer"}` |
 | `option` | `{"command":"option","name":"hint_cost","value":20}` |
 | `kick` | `{"command":"kick","slot":3,"reason":"…"}` |
@@ -404,6 +413,34 @@ spells these as two commands, `/allow_release` and `/forbid_release`, and the
 second name is why this is one command with a boolean instead. There is no
 collect equivalent, in pahoa or in the reference — `!collect` consults
 `collect_mode` and nothing else.
+
+**`lock` bars a slot from connecting and does not disconnect anyone.** Those are
+separate decisions and separate commands: locking refuses the *next* login,
+`kick` ends the current session, and an administrator dealing with a griefer
+wants both in that order — kicking first leaves a window in which they simply
+reconnect. The response says so when a locked slot still has connections open,
+because the obvious reading of "locked" is that the room ejected them.
+
+A lock is **orthogonal to every password mode** rather than a fourth one. It
+applies to a room with no password, and it applies to somebody holding the
+correct one, which is what makes it the answer to "this person, specifically, is
+not to come back". It **persists in the save**, because the reason to set one
+outlives any single process and a room that quietly re-admits a locked player on
+its next deploy fails in exactly the moment it was set up for. It is reported per
+slot as `locked` in `/admin/v1/status`, and counted by `pahoa_slots_locked` —
+worth watching, since the failure mode of a temporary lock is nobody remembering
+to lift it.
+
+`{"command":"lock","slot":3}` locks; unlocking is the explicit
+`{"locked": false}`, which is the right way round for a command whose job is
+keeping somebody out.
+
+The protocol has no refusal reason for this — the list is closed — so a locked
+slot is refused with **`InvalidSlot` and `SlotLocked` together**. `InvalidSlot`
+is what makes stock clients stop cleanly instead of reconnecting on a doubling
+delay, and `SlotLocked` is what lets anything reading the raw list tell a lock
+from a typo. The cost, accepted deliberately, is that a stock client tells a
+locked player their slot name is invalid; the room's own log records the truth.
 
 `alias` sets or clears *another* player's alias, which `!alias` only lets a
 player do for themselves; an empty or omitted alias clears it, and the name is

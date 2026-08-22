@@ -13,7 +13,7 @@ use pahoa_room::{AdminCommand, AdminOutcome, ConnId, Recorder, Room, RoomOptions
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 /// A room, the first player slot, and its name.
-fn room() -> Option<(Room, u32, String, String)> {
+fn fresh_room() -> Option<(Room, u32, String, String)> {
     let data = load(FIXTURE)?;
     let (slot, name, game) = first_player(&data);
     Some((room_for(data, RoomOptions::default()), slot, name, game))
@@ -51,7 +51,7 @@ fn status_reports_every_slot_without_a_caller() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let outcome = run(&mut room, AdminCommand::Status);
 
     assert!(outcome.ok);
@@ -71,7 +71,7 @@ fn release_targets_the_named_slot() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     assert_eq!(room.checked_count((0, slot)), 0);
 
     let outcome = run(&mut room, AdminCommand::Release { slot });
@@ -116,7 +116,7 @@ fn an_unknown_slot_is_refused_rather_than_ignored() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     for command in [
         AdminCommand::Release { slot: 9999 },
         AdminCommand::Collect { slot: 9999 },
@@ -146,7 +146,7 @@ fn say_reaches_the_room() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let mut sink = Recorder::default();
     let outcome = room.admin(
         AdminCommand::Say {
@@ -176,7 +176,7 @@ fn say_is_attributed_to_the_server_and_typed_as_server_chat() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let mut sink = Recorder::default();
     room.admin(
         AdminCommand::Say {
@@ -224,7 +224,7 @@ fn say_refuses_what_clients_cannot_render() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let outcome = run(
         &mut room,
         AdminCommand::Say {
@@ -239,7 +239,7 @@ fn countdown_is_bounded() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     assert!(run(&mut room, AdminCommand::Countdown { seconds: 10 }).ok);
     assert!(!run(&mut room, AdminCommand::Countdown { seconds: -1 }).ok);
     assert!(!run(&mut room, AdminCommand::Countdown { seconds: 100_000 }).ok);
@@ -250,7 +250,7 @@ fn send_item_queues_a_real_item_for_the_named_slot() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, name, game) = room().unwrap();
+    let (mut room, slot, name, game) = fresh_room().unwrap();
     // A connected client, so the item has somewhere to be delivered.
     let conn = ConnId(1);
     let mut sink = Recorder::default();
@@ -288,7 +288,7 @@ fn send_item_refuses_a_name_that_matches_nothing() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let outcome = run(
         &mut room,
         AdminCommand::SendItem {
@@ -330,7 +330,7 @@ fn kick_disconnects_a_connected_slot_and_says_they_may_return() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, name, game) = room().unwrap();
+    let (mut room, slot, name, game) = fresh_room().unwrap();
     let conn = ConnId(1);
     let mut sink = Recorder::default();
     room.on_connect(conn, &mut sink);
@@ -373,7 +373,7 @@ fn kicking_nobody_is_refused() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let outcome = run(
         &mut room,
         AdminCommand::Kick {
@@ -396,7 +396,7 @@ fn a_forced_hint_costs_the_slot_nothing() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let key = (0, slot);
     let before = room.hints_used(key);
 
@@ -430,7 +430,7 @@ fn administering_a_slot_does_not_change_its_client_status() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     assert_eq!(room.status((0, slot)), ClientStatus::Unknown);
     run(&mut room, AdminCommand::Release { slot });
     assert_eq!(room.status((0, slot)), ClientStatus::Unknown);
@@ -479,7 +479,7 @@ fn hint_location_reaches_the_location_half_of_the_hint_machinery() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let Some(location) = first_location_name(&room, slot) else {
         eprintln!("SKIP: no data package for this slot's game");
         return;
@@ -512,7 +512,7 @@ fn hint_and_hint_location_are_not_the_same_command() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let Some(location) = first_location_name(&room, slot) else {
         eprintln!("SKIP: no data package for this slot's game");
         return;
@@ -556,7 +556,7 @@ fn send_location_checks_it_for_real() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let key = (0, slot);
     let id = room.multidata().locations.for_slot(slot)[0].location;
     let before = room.checked_count(key);
@@ -584,7 +584,7 @@ fn send_location_twice_is_refused_the_second_time() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let id = room.multidata().locations.for_slot(slot)[0].location;
     let command = || AdminCommand::SendLocation {
         slot,
@@ -655,7 +655,7 @@ fn clearing_the_exemption_returns_the_slot_to_the_rooms_mode() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
 
     assert!(
         run(
@@ -687,7 +687,7 @@ fn alias_sets_and_clears_another_players_name() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let key = (0, slot);
 
     assert!(
@@ -725,7 +725,7 @@ fn an_operator_set_alias_is_pushed_to_every_client() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, name, _) = room().unwrap();
+    let (mut room, slot, name, _) = fresh_room().unwrap();
     let mut sink = Recorder::default();
     room.admin(
         AdminCommand::Alias {
@@ -756,7 +756,7 @@ fn an_operator_set_alias_is_truncated_like_the_chat_one() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     run(
         &mut room,
         AdminCommand::Alias {
@@ -776,7 +776,7 @@ fn option_changes_a_rule_over_the_admin_api() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let outcome = run(
         &mut room,
         AdminCommand::Option {
@@ -795,7 +795,7 @@ fn option_refuses_the_passwords_with_the_same_explanation() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let refused = run(
         &mut room,
         AdminCommand::Option {
@@ -820,7 +820,7 @@ fn option_refuses_an_unknown_name_and_lists_what_it_knows() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, ..) = room().unwrap();
+    let (mut room, ..) = fresh_room().unwrap();
     let refused = run(
         &mut room,
         AdminCommand::Option {
@@ -844,7 +844,7 @@ fn hints_may_be_addressed_by_id() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let id = room.multidata().locations.for_slot(slot)[0].location;
 
     let outcome = run(
@@ -864,7 +864,7 @@ fn send_multiple_queues_every_copy() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let game = room.multidata().slot_info[&slot].game.clone();
     let Some(item) = first_item_name(&room, &game) else {
         eprintln!("SKIP: no data package for {game}");
@@ -895,7 +895,7 @@ fn one_copy_reads_the_same_either_way() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let game = room.multidata().slot_info[&slot].game.clone();
     let Some(item) = first_item_name(&room, &game) else {
         eprintln!("SKIP: no data package for {game}");
@@ -933,7 +933,7 @@ fn send_multiple_is_capped() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let game = room.multidata().slot_info[&slot].game.clone();
     let Some(item) = first_item_name(&room, &game) else {
         eprintln!("SKIP: no data package for {game}");
@@ -984,7 +984,7 @@ fn send_multiple_journals_every_copy() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let game = room.multidata().slot_info[&slot].game.clone();
     let Some(item) = first_item_name(&room, &game) else {
         eprintln!("SKIP: no data package for {game}");
@@ -1025,7 +1025,7 @@ fn an_admin_grant_is_announced_as_plain_text() {
     if skip_without(FIXTURE) {
         return;
     }
-    let (mut room, slot, ..) = room().unwrap();
+    let (mut room, slot, ..) = fresh_room().unwrap();
     let game = room.multidata().slot_info[&slot].game.clone();
     let Some(item) = first_item_name(&room, &game) else {
         eprintln!("SKIP: no data package for {game}");
@@ -1057,4 +1057,224 @@ fn an_admin_grant_is_announced_as_plain_text() {
     // The text itself is unchanged, so players read the same line either way.
     let text: String = print.data.iter().filter_map(|p| p.text.clone()).collect();
     assert!(text.starts_with("Cheat console: sending "), "{text}");
+}
+
+/// **A lock bars the next login and leaves the current session alone.**
+///
+/// The two halves are separate commands on purpose, and an administrator
+/// dealing with a griefer wants both in that order — kicking first leaves a
+/// window in which they simply reconnect.
+#[test]
+fn locking_a_slot_refuses_the_next_connection() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let key = (0, slot);
+
+    // Somebody is already playing.
+    let existing = join(&mut room, 1, &name, &game, 0b111);
+    assert_eq!(room.connections_for(key), 1);
+
+    let outcome = run(&mut room, AdminCommand::Lock { slot, locked: true });
+    assert!(outcome.ok, "{:?}", outcome.output);
+    assert!(room.slot_locked(key));
+
+    // The open connection is untouched.
+    assert_eq!(
+        room.connections_for(key),
+        1,
+        "locking must not disconnect anyone"
+    );
+    let mut sink = Recorder::default();
+    room.handle(existing, say("hello"), &mut sink);
+    assert!(
+        !broadcasts(&sink).is_empty(),
+        "the connected player should still be able to talk"
+    );
+
+    // A new login is refused.
+    let refused = join(&mut room, 2, &name, &game, 0b111);
+    assert_eq!(
+        room.connections_for(key),
+        1,
+        "a locked slot must not accept a new connection"
+    );
+    assert!(!room.all_conns().contains(&refused));
+}
+
+/// The response says the thing an administrator is most likely to assume
+/// wrongly, at the moment they would assume it.
+#[test]
+fn locking_says_it_did_not_disconnect_anyone() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    join(&mut room, 1, &name, &game, 0b111);
+
+    let outcome = run(&mut room, AdminCommand::Lock { slot, locked: true });
+    assert!(
+        outcome.output[0].contains("kick"),
+        "a lock with someone connected should point at the command that ejects them: {:?}",
+        outcome.output
+    );
+
+    // With nobody connected there is nothing to disclaim.
+    let (mut empty, other, ..) = fresh_room().unwrap();
+    let quiet = run(
+        &mut empty,
+        AdminCommand::Lock {
+            slot: other,
+            locked: true,
+        },
+    );
+    assert!(!quiet.output[0].contains("kick"), "{:?}", quiet.output);
+}
+
+/// **The refusal carries `SlotLocked` beside `InvalidSlot`.**
+///
+/// `InvalidSlot` is what makes stock clients stop cleanly rather than
+/// reconnect-loop (`CommonClient.py:981`); `SlotLocked` is what lets anything
+/// reading the raw list tell a lock from a typo. Alone, each fails one of those.
+#[test]
+fn a_locked_refusal_names_both_reasons() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    room.lock_slot((0, slot), true);
+
+    let conn = ConnId(7);
+    let mut sink = Recorder::default();
+    room.on_connect(conn, &mut sink);
+    room.handle(conn, connect(&name, &game, 0b111), &mut sink);
+
+    let refused = sink
+        .packets_for(conn, &room)
+        .into_iter()
+        .find_map(|p| match p {
+            ServerPacket::ConnectionRefused(r) => Some(r),
+            _ => None,
+        })
+        .expect("a locked slot is refused");
+
+    assert!(
+        refused
+            .errors
+            .contains(&pahoa_proto::server::ConnectionRefusedReason::SlotLocked),
+        "{:?}",
+        refused.errors
+    );
+    assert!(
+        refused
+            .errors
+            .contains(&pahoa_proto::server::ConnectionRefusedReason::InvalidSlot),
+        "without this a stock client reconnect-loops forever: {:?}",
+        refused.errors
+    );
+}
+
+/// A lock is not a password mode, so it holds when there is no password at all
+/// and it holds against somebody who has the right one.
+#[test]
+fn a_lock_holds_in_every_password_mode() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+
+    for options in [
+        RoomOptions::default(),
+        RoomOptions {
+            password: Some("open-sesame".to_string()),
+            ..Default::default()
+        },
+        RoomOptions {
+            slot_passwords: Some(std::collections::BTreeMap::from([(
+                slot,
+                "open-sesame".to_string(),
+            )])),
+            ..Default::default()
+        },
+    ] {
+        let mut room = room_for(std::sync::Arc::clone(&data), options);
+        room.lock_slot((0, slot), true);
+
+        let conn = ConnId(11);
+        let mut sink = Recorder::default();
+        room.on_connect(conn, &mut sink);
+        room.handle(conn, with_password(&name, &game, "open-sesame"), &mut sink);
+        assert_eq!(
+            room.connections_for((0, slot)),
+            0,
+            "the correct password must not open a locked slot"
+        );
+    }
+}
+
+#[test]
+fn unlocking_lets_the_slot_back_in() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+
+    run(&mut room, AdminCommand::Lock { slot, locked: true });
+    join(&mut room, 1, &name, &game, 0b111);
+    assert_eq!(room.connections_for((0, slot)), 0);
+
+    let outcome = run(
+        &mut room,
+        AdminCommand::Lock {
+            slot,
+            locked: false,
+        },
+    );
+    assert!(outcome.ok, "{:?}", outcome.output);
+    join(&mut room, 2, &name, &game, 0b111);
+    assert_eq!(room.connections_for((0, slot)), 1);
+}
+
+/// **A lock that a restart lifted would be worse than no lock at all**, since
+/// the reason to set one outlives any single process.
+#[test]
+fn a_lock_survives_a_save_and_restore() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = fresh_room().unwrap();
+    run(&mut room, AdminCommand::Lock { slot, locked: true });
+
+    let snapshot = room.snapshot();
+    let data = load(FIXTURE).unwrap();
+    let mut restored = room_for(data, RoomOptions::default());
+    restored
+        .restore(snapshot)
+        .expect("a snapshot this room just produced");
+
+    assert!(
+        restored.slot_locked((0, slot)),
+        "a restart must not quietly re-admit a locked slot"
+    );
+}
+
+/// `connect` with a password, for the cases where the password is the point.
+fn with_password(name: &str, game: &str, password: &str) -> pahoa_proto::ClientPacket {
+    match connect(name, game, 0b111) {
+        pahoa_proto::ClientPacket::Connect(mut c) => {
+            c.password = Some(password.to_string());
+            pahoa_proto::ClientPacket::Connect(c)
+        }
+        other => other,
+    }
 }

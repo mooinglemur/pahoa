@@ -60,6 +60,9 @@ pub struct SlotStatus {
     pub checks: usize,
     pub total_checks: usize,
     pub status: &'static str,
+    /// Barred from connecting by an administrator. Persisted, and independent
+    /// of every password mode.
+    pub locked: bool,
 }
 
 /// The JSON document.
@@ -134,6 +137,7 @@ pub fn document(
             "checks": s.checks,
             "total_checks": s.total_checks,
             "status": s.status,
+            "locked": s.locked,
         })).collect::<Vec<_>>(),
     })
 }
@@ -268,6 +272,14 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "Player slots with at least one open connection.",
         "gauge",
         live.slots.iter().filter(|s| s.connections > 0).count() as u64,
+    );
+    // Worth a gauge rather than only a status field: a lock is meant to be
+    // temporary, and the failure mode is nobody remembering to lift it.
+    metric(
+        "pahoa_slots_locked",
+        "Slots an administrator has barred from connecting.",
+        "gauge",
+        live.slots.iter().filter(|s| s.locked).count() as u64,
     );
     metric(
         "pahoa_checks_total",

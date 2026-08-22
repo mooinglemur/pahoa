@@ -522,3 +522,96 @@ fn a_corrupt_save_is_refused_rather_than_half_loaded() {
         Err(SaveError::TooNew { .. })
     ));
 }
+
+/// Header layout, which these tests have to rebuild by hand: magic, version,
+/// encoding, body length, body CRC.
+const HEADER: usize = 8 + 1 + 1 + 4 + 4;
+
+/// Restamp a body as a given format version, recomputing what the header
+/// carries about it. Anything less would produce a file the decoder rejects for
+/// the wrong reason.
+fn reheader(version: u8, body: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(body);
+    let mut out = Vec::with_capacity(HEADER + body.len());
+    out.extend_from_slice(b"PAHOASAV");
+    out.push(version);
+    out.push(0); // uncompressed
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&crc.sum().to_le_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// **A version-1 save still loads, with no locks.**
+///
+/// Version 2 appended `locked_slots`, and rooms saved before it must keep
+/// working — the absence has to read as "nothing was locked" rather than as a
+/// parse failure, so an operator upgrading mid-async notices nothing.
+#[test]
+fn a_version_one_save_loads_without_locks() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (room, ..) = played_room();
+    let snapshot = room.snapshot();
+
+    // A version-1 body is this one without its trailing `locked_slots` count,
+    // which for a room with no locks is the single byte `0`.
+    let v2 = snapshot.encode(false);
+    let body = &v2[HEADER..];
+    assert_eq!(body[body.len() - 1], 0, "no locks encodes as a zero count");
+    let v1 = reheader(1, &body[..body.len() - 1]);
+
+    let decoded = Snapshot::decode(&v1).expect("a version 1 save must still load");
+    assert!(
+        decoded.locked_slots.is_empty(),
+        "a format that predates locks has none, and that is not an error"
+    );
+    // And the rest survived, so this is a real save rather than a shape that
+    // happens to parse.
+    assert_eq!(decoded.seed_name, snapshot.seed_name);
+    assert_eq!(decoded.name_aliases, snapshot.name_aliases);
+    assert_eq!(
+        decoded.location_checks.len(),
+        snapshot.location_checks.len()
+    );
+}
+
+/// The trailing field is read on the **version**, not on whether bytes remain.
+///
+/// A v1 body with the v2 field's bytes appended must not pick them up: were the
+/// decoder inferring absence from the data, this would parse as a lock and the
+/// format would have no way to ever remove a field again.
+#[test]
+fn a_version_one_save_ignores_anything_after_its_last_field() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = played_room();
+    room.lock_slot((0, slot), true);
+    let v2 = room.snapshot().encode(false);
+    let body = &v2[HEADER..];
+
+    let decoded = Snapshot::decode(&reheader(1, body)).expect("still a valid v1 body");
+    assert!(
+        decoded.locked_slots.is_empty(),
+        "v1 must not read a field its format does not have"
+    );
+}
+
+/// Locks round-trip through the encoder like any other per-slot state.
+#[test]
+fn locked_slots_round_trip() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = played_room();
+    room.lock_slot((0, slot), true);
+    room.lock_slot((0, slot + 1), true);
+    room.lock_slot((0, slot + 1), false);
+
+    let bytes = room.snapshot().encode(true);
+    let decoded = Snapshot::decode(&bytes).expect("decodes");
+    assert_eq!(decoded.locked_slots, vec![(0, slot)]);
+}

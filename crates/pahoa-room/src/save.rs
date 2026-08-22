@@ -52,7 +52,23 @@ const MAGIC: &[u8; 8] = b"PAHOASAV";
 
 /// Bumped when the body layout changes incompatibly. A save from a *newer*
 /// version is refused; the reference does the same (`MultiServer.py:688-689`).
-pub const FORMAT_VERSION: u8 = 1;
+///
+/// **2 added `locked_slots`**, appended after the timers. Reading is gated on
+/// the version rather than on whether bytes remain, and that is deliberate: the
+/// body's length and CRC are both checked before any field is parsed, so
+/// "ran out of bytes" would be a sound test here — but it would also make every
+/// future trailing field silently optional, and a save that lost its tail to a
+/// bug rather than to truncation would then load with defaults instead of
+/// failing. Gating on the version keeps "this field is absent" a fact about the
+/// format rather than an inference from the data.
+///
+/// The cost is that a rolled-back server refuses a newer save outright. That is
+/// the intended trade for a field carrying access control: a lock that quietly
+/// stopped holding after a downgrade is worse than a room that will not start.
+pub const FORMAT_VERSION: u8 = 2;
+
+/// The first version carrying `locked_slots`.
+const VERSION_LOCKED_SLOTS: u8 = 2;
 
 const ENCODING_RAW: u8 = 0;
 const ENCODING_ZLIB: u8 = 1;
@@ -129,6 +145,16 @@ pub struct Snapshot {
     /// is what the tracker renders, has no room for anything finer.
     pub activity_at: Vec<(SlotKey, u64)>,
     pub connected_at: Vec<(SlotKey, u64)>,
+
+    /// Slots an administrator has barred from connecting.
+    ///
+    /// **Saved because a lock that a restart lifted would be worse than no
+    /// lock at all.** The reason to bar a slot — a griefer, a mistaken entry, a
+    /// player asked to stop until an organizer sorts something out — outlives
+    /// any one process, and a room that quietly re-admits them on its next
+    /// deploy fails in exactly the moment it was set up for. Added in format
+    /// version 2; see [`FORMAT_VERSION`].
+    pub locked_slots: Vec<SlotKey>,
 }
 
 impl Snapshot {
@@ -190,7 +216,7 @@ impl Snapshot {
             return Err(SaveError::Checksum);
         }
 
-        Self::decode_body(&mut Reader::new(&body))
+        Self::decode_body(&mut Reader::new(&body), version)
     }
 
     fn encode_body(&self) -> Vec<u8> {
@@ -342,10 +368,19 @@ impl Snapshot {
             }
         }
 
+        // Version 2. Sorted for a stable encoding, as everywhere else here — a
+        // save whose bytes change when nothing changed defeats the dirty check.
+        let mut locked = self.locked_slots.clone();
+        locked.sort_unstable();
+        w.uvar(locked.len() as u64);
+        for key in locked {
+            w.key(key);
+        }
+
         w.into_inner()
     }
 
-    fn decode_body(r: &mut Reader<'_>) -> Result<Self> {
+    fn decode_body(r: &mut Reader<'_>, version: u8) -> Result<Self> {
         let seed_name = r.str()?;
         let options = decode_options(r)?;
 
@@ -476,6 +511,15 @@ impl Snapshot {
         }
         let [activity_at, connected_at] = timers;
 
+        // Absent before version 2, and read on the version rather than on
+        // whether bytes remain. See [`FORMAT_VERSION`].
+        let mut locked_slots = Vec::new();
+        if version >= VERSION_LOCKED_SLOTS {
+            for _ in 0..r.count()? {
+                locked_slots.push(r.key()?);
+            }
+        }
+
         Ok(Self {
             seed_name,
             options,
@@ -491,6 +535,7 @@ impl Snapshot {
             stored_data,
             activity_at,
             connected_at,
+            locked_slots,
         })
     }
 }

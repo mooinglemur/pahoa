@@ -81,6 +81,14 @@ pub enum AdminCommand {
         slot: u32,
         allowed: bool,
     },
+    /// Bar a slot from connecting, or let it back in.
+    ///
+    /// Orthogonal to the password modes and to [`AdminCommand::Kick`]: locking
+    /// refuses the *next* login and leaves open connections alone.
+    Lock {
+        slot: u32,
+        locked: bool,
+    },
     /// Set or clear a slot's display alias, which `!alias` only lets a player
     /// do for themselves.
     Alias {
@@ -166,6 +174,7 @@ impl Room {
             AdminCommand::AllowRelease { slot, allowed } => {
                 self.admin_allow_release(slot, allowed, out)
             }
+            AdminCommand::Lock { slot, locked } => self.admin_lock(slot, locked, out),
             AdminCommand::Alias { slot, alias } => self.admin_alias(slot, &alias, out),
             AdminCommand::Option { name, value } => self.admin_option(&name, &value, out),
             AdminCommand::Kick { slot, reason } => self.admin_kick(slot, &reason, out),
@@ -515,6 +524,44 @@ impl Room {
             },
             vec![slot],
         )
+    }
+
+    /// Bar a slot from connecting, or let it back in.
+    ///
+    /// **Does not disconnect anyone**, and the response says so, because the
+    /// obvious reading of "locked" is that the room ejected them. Locking bars
+    /// the next login; `kick` ends the current session. An administrator
+    /// dealing with a griefer wants both, in that order — kicking first leaves
+    /// a window in which they simply reconnect.
+    ///
+    /// Independent of every password mode: it applies to a room with no
+    /// password and to somebody holding the correct one, which is what makes it
+    /// usable as the answer to "this person, specifically, is not to come back".
+    fn admin_lock(&mut self, slot: u32, locked: bool, out: &mut dyn EffectSink) -> AdminOutcome {
+        let Some(key) = self.admin_key(slot) else {
+            return Self::unknown_slot(slot);
+        };
+        self.lock_slot(key, locked);
+        out.mark_dirty();
+
+        let who = self.slot_alias(key);
+        let open = self.connections_for(key);
+        let line = if locked {
+            let mut line = format!("{who} is locked and cannot connect.");
+            if open > 0 {
+                // The one thing an administrator is most likely to assume
+                // wrongly, said at the moment they would assume it.
+                line.push_str(&format!(
+                    " {open} connection{} still open; locking does not disconnect anyone — use kick for that.",
+                    if open == 1 { " is" } else { "s are" }
+                ));
+            }
+            line
+        } else {
+            format!("{who} is unlocked and may connect again.")
+        };
+        tracing::info!(slot, locked, "slot lock changed");
+        AdminOutcome::ok(line, vec![slot])
     }
 
     /// Set or clear a slot's alias, which `!alias` only lets a player do for

@@ -489,6 +489,7 @@ pub async fn run_with_saves(
                                 checks: room.checked_count(key),
                                 total_checks: room.multidata().locations.count_for(*number),
                                 status: room.status(key).as_text(),
+                                locked: room.slot_locked(key),
                             }
                         })
                         .collect(),

@@ -42,6 +42,22 @@ pub enum ConnectionRefusedReason {
     IncompatibleVersion,
     InvalidPassword,
     InvalidItemsHandling,
+    /// **Not in the reference's set** — pahoa's own, for an administratively
+    /// locked slot.
+    ///
+    /// The protocol has no reason for this and the list is closed, so the
+    /// choice was between lying and inventing. It is always sent *alongside*
+    /// `InvalidSlot`, never alone, because of how clients read the list:
+    /// `CommonClient.py:981` matches `InvalidSlot` first and stops cleanly,
+    /// while an unrecognized reason on its own falls through to
+    /// `raise Exception("Unknown connection errors: …")` and then reconnects on
+    /// a doubling delay — so a locked player would retry forever.
+    ///
+    /// Ordering it first would be worse than useless for the same reason. The
+    /// cost of the pairing is that a stock client tells a locked player their
+    /// slot name is invalid; anything rendering the raw list sees the truth,
+    /// and so does the room's own log.
+    SlotLocked,
 }
 
 #[derive(Debug, Clone, Serialize)]

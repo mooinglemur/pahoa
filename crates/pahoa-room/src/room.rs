@@ -115,6 +115,15 @@ pub struct Room {
     /// Slots granted a one-off release by an administrator, over and above
     /// what `release_mode` allows.
     allow_releases: HashSet<SlotKey>,
+    /// Slots an administrator has barred from connecting.
+    ///
+    /// Orthogonal to every password mode rather than a fourth one: locking is
+    /// about *this slot* and takes effect whether the room has no password, a
+    /// room-wide one, or per-slot ones. It bars new logins only — connections
+    /// already open are untouched, because ejecting someone and refusing their
+    /// next attempt are different decisions and an administrator should be able
+    /// to make them separately. `kick` is the other half.
+    locked_slots: HashSet<SlotKey>,
     /// Which members of each item-link group have collected, so the group's own
     /// slot collects once they all have (`MultiServer.py:1113-1118`).
     group_collected: HashMap<u32, HashSet<u32>>,
@@ -198,6 +207,7 @@ impl Room {
             hints,
             rng,
             allow_releases: HashSet::new(),
+            locked_slots: HashSet::new(),
             group_collected: HashMap::new(),
             countdown: None,
             admin_conn: None,
@@ -384,7 +394,18 @@ impl Room {
 
         match resolved {
             None => errors.push(ConnectionRefusedReason::InvalidSlot),
-            Some((_team, slot)) => {
+            Some((team, slot)) => {
+                // A lock is not a password mode, so it is checked here rather
+                // than beside them: it applies with no password configured, and
+                // it applies to somebody holding the correct one. Paired with
+                // `InvalidSlot` because the protocol has no reason of its own —
+                // see `ConnectionRefusedReason::SlotLocked` for why that pairing
+                // and not the bare reason.
+                if self.locked_slots.contains(&(team, slot)) {
+                    errors.push(ConnectionRefusedReason::InvalidSlot);
+                    errors.push(ConnectionRefusedReason::SlotLocked);
+                }
+
                 // Now that the slot is known, its own password applies. A slot
                 // absent from the map has none. Pushed as the same
                 // `InvalidPassword` the room-wide check uses, so which of the
@@ -1326,6 +1347,24 @@ impl Room {
 
     pub(crate) fn release_allowed(&self, key: SlotKey) -> bool {
         self.allow_releases.contains(&key)
+    }
+
+    /// Bar a slot from connecting, or let it back in.
+    ///
+    /// Existing connections are deliberately left alone — see
+    /// [`Room::locked_slots`]. Locking a slot whose player is mid-session bars
+    /// their *next* attempt and nothing else, which is what makes "lock, then
+    /// kick" a sequence an administrator can reason about.
+    pub fn lock_slot(&mut self, key: SlotKey, locked: bool) {
+        if locked {
+            self.locked_slots.insert(key);
+        } else {
+            self.locked_slots.remove(&key);
+        }
+    }
+
+    pub fn slot_locked(&self, key: SlotKey) -> bool {
+        self.locked_slots.contains(&key)
     }
 
     // --- countdown -------------------------------------------------------
@@ -2406,6 +2445,7 @@ impl Room {
                 .map(|(k, v)| (*k, v.iter().copied().collect()))
                 .collect(),
             allow_releases: self.allow_releases.iter().copied().collect(),
+            locked_slots: self.locked_slots.iter().copied().collect(),
             stored_data: self
                 .stored_data
                 .iter()
@@ -2475,6 +2515,7 @@ impl Room {
             .map(|(group, members)| (group, members.into_iter().collect()))
             .collect();
         self.allow_releases = snapshot.allow_releases.into_iter().collect();
+        self.locked_slots = snapshot.locked_slots.into_iter().collect();
         self.stored_data = snapshot.stored_data.into_iter().collect();
 
         Ok(())

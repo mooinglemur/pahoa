@@ -81,6 +81,15 @@ pub fn parse(body: &[u8]) -> Result<AdminCommand, String> {
                     .ok_or_else(|| "\"allowed\" must be true or false".to_string())
             })?,
         }),
+        // Defaults to locking, so `{"command":"lock","slot":3}` reads the way
+        // it sounds; `{"locked": false}` is the release.
+        "lock" => Ok(AdminCommand::Lock {
+            slot: slot(object)?,
+            locked: object.get("locked").map_or(Ok(true), |v| {
+                v.as_bool()
+                    .ok_or_else(|| "\"locked\" must be true or false".to_string())
+            })?,
+        }),
         "alias" => Ok(AdminCommand::Alias {
             slot: slot(object)?,
             // Optional and empty-meaning-clear, matching `!alias` with no
@@ -256,6 +265,13 @@ mod tests {
             }
         );
         assert_eq!(
+            parsed(r#"{"command":"lock","slot":3,"locked":true}"#).unwrap(),
+            AdminCommand::Lock {
+                slot: 3,
+                locked: true
+            }
+        );
+        assert_eq!(
             parsed(r#"{"command":"alias","slot":3,"alias":"Organizer"}"#).unwrap(),
             AdminCommand::Alias {
                 slot: 3,
@@ -279,6 +295,27 @@ mod tests {
         assert!(
             parsed(r#"{"command":"send_multiple","slot":1,"item":"Rupee"}"#)
                 .is_err_and(|e| e.contains("amount"))
+        );
+    }
+
+    /// `lock` with no `locked` locks, so the command reads the way it sounds.
+    /// Unlocking is the explicit one, which is the right way round for a
+    /// command whose whole job is to keep somebody out.
+    #[test]
+    fn lock_defaults_to_locking() {
+        assert_eq!(
+            parsed(r#"{"command":"lock","slot":4}"#).unwrap(),
+            AdminCommand::Lock {
+                slot: 4,
+                locked: true
+            }
+        );
+        assert_eq!(
+            parsed(r#"{"command":"lock","slot":4,"locked":false}"#).unwrap(),
+            AdminCommand::Lock {
+                slot: 4,
+                locked: false
+            }
         );
     }
 
