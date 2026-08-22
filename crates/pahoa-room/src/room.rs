@@ -550,6 +550,27 @@ impl Room {
             }
         }
 
+        // **`Connected` goes out before the join announcement, and the
+        // reference's source order says the opposite.**
+        //
+        // `MultiServer.py:1936-1939` calls `on_client_joined` — which broadcasts
+        // the join and notifies the tutorial line — and only then
+        // `await ctx.send_msgs(client, reply)`. Copying that order verbatim is
+        // wrong, because it is not the order the reference *delivers* in. Both
+        // of those notifications go out through `async_start`, which is
+        // `asyncio.create_task`: fire-and-forget, and a created task cannot run
+        // until the current coroutine yields. The awaited `send_msgs` runs
+        // inline and reaches `socket.send` first, so `Connected` is on the wire
+        // before either task starts.
+        //
+        // pahoa's sink has no such asymmetry — everything it is handed is
+        // dispatched in the order it was handed over — so reproducing the
+        // source order reproduced the *opposite* wire order, and a client that
+        // requires `Connected` to answer `Connect` sees a `PrintJSON` instead
+        // and drops the connection. Most clients tolerate it; depending on the
+        // reference's behavior is not a bug on their side.
+        out.send(conn, &reply);
+
         if !was_authed {
             self.clients.get_mut(&conn).expect("registered").auth = true;
             // Before the announcement, not after: the transport filters
@@ -559,8 +580,6 @@ impl Room {
             out.membership_changed(conn, true, client.no_text, Some((client.team, client.slot)));
             self.announce_join(conn, out);
         }
-
-        out.send(conn, &reply);
     }
 
     fn announce_join(&self, conn: ConnId, out: &mut dyn EffectSink) {
@@ -1769,14 +1788,21 @@ impl Room {
             });
         }
 
-        self.notify_hints(team, hints, args.create_as_hint == 2, true, None, out);
-        if !locations.is_empty() && args.create_as_hint != 0 {
-            out.mark_dirty();
-        }
+        // The reply before the hint announcements, for the reason `handle_connect`
+        // gives at length: `MultiServer.py:2032-2035` calls `notify_hints` and
+        // *then* awaits the `LocationInfo` send, but `notify_hints` dispatches
+        // through `async_start`, so the awaited reply reaches the socket first.
+        // A scout that creates hints is a request with a defined answer, and the
+        // answer arrives first.
+        let created_hints = !locations.is_empty() && args.create_as_hint != 0;
         out.send(
             conn,
             &[ServerPacket::LocationInfo(LocationInfo { locations })],
         );
+        self.notify_hints(team, hints, args.create_as_hint == 2, true, None, out);
+        if created_hints {
+            out.mark_dirty();
+        }
     }
 
     /// `CreateHints` (`MultiServer.py:2037-2087`).

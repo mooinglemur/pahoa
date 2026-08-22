@@ -306,8 +306,17 @@ async fn the_item_feed_reaches_a_bystander() {
     a.send(json!([{"cmd": "LocationChecks", "locations": [location]}]))
         .await;
 
-    // The feed is a broadcast, so an uninvolved player still sees it.
-    let printed = b.wait_for("PrintJSON").await;
+    // The feed is a broadcast, so an uninvolved player still sees it. `b`'s own
+    // join and tutorial lines now arrive *after* its `Connected` — the reply to
+    // `Connect` comes first — so scan for the one this test is about rather
+    // than taking whichever PrintJSON lands next.
+    let mut printed = b.wait_for("PrintJSON").await;
+    for _ in 0..10 {
+        if printed["type"] == json!("ItemSend") {
+            break;
+        }
+        printed = b.wait_for("PrintJSON").await;
+    }
     assert_eq!(printed["type"], json!("ItemSend"));
 
     server.shutdown().await;
@@ -420,16 +429,26 @@ async fn many_clients_sustain_a_release_cascade() {
     server.shutdown().await;
 }
 
-/// A joining client must receive its *own* join announcement.
+/// A joining client must receive its *own* join announcement — **after** the
+/// `Connected` that answers its `Connect`.
+///
+/// Two bugs meet here, so the test asserts both.
 ///
 /// The shards filter `AllText` against their own copy of `auth`, and the room
 /// published that flag only after the whole handler returned — so the join
 /// broadcast went out while the shard still saw the joiner as unauthenticated,
-/// and everyone received the message except the client it was about.
-///
-/// This cannot be caught a level down: `Recorder` resolves recipients against
-/// the room itself, where the flag was already set, so the room-level tests all
+/// and everyone received the message except the client it was about. That
+/// cannot be caught a level down: `Recorder` resolves recipients against the
+/// room itself, where the flag was already set, so the room-level tests all
 /// passed. It only exists where two copies of the state do.
+///
+/// The order is the second. `Connected` is the reply to `Connect` and has to
+/// arrive first, even though `MultiServer.py:1936-1939` announces the join
+/// *before* sending it — the reference's announcements are `async_start`
+/// tasks that cannot run until the handler yields, so its wire order is the
+/// reverse of its source order. A client written against the reference is
+/// entitled to `Connected` first, and one of them refuses the connection
+/// outright when a `PrintJSON` arrives where `Connected` was expected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_joining_client_sees_its_own_join_announcement() {
     let Some(data) = load(FIXTURE) else {
@@ -444,10 +463,17 @@ async fn a_joining_client_sees_its_own_join_announcement() {
     client.send(connect_packet(&name, &game, 0b111)).await;
 
     let mut join_text = None;
+    let mut seen_connected = false;
     'scan: for _ in 0..50 {
         for packet in client.recv_frame().await {
             match packet["cmd"].as_str() {
+                Some("Connected") => seen_connected = true,
                 Some("PrintJSON") if packet["type"] == json!("Join") => {
+                    assert!(
+                        seen_connected,
+                        "the join announcement overtook the Connected that answers Connect; \
+                         a client that requires the reply first will drop the connection"
+                    );
                     join_text = Some(
                         packet["data"]
                             .as_array()
@@ -456,17 +482,63 @@ async fn a_joining_client_sees_its_own_join_announcement() {
                             .filter_map(|p| p["text"].as_str())
                             .collect::<String>(),
                     );
+                    break 'scan;
                 }
-                // Sent after the announcement, so its arrival bounds the scan.
-                Some("Connected") => break 'scan,
                 _ => {}
             }
         }
     }
 
+    assert!(seen_connected, "no Connected arrived at all");
     let text = join_text.expect("the joining client should receive its own Join");
     assert!(text.contains(&name), "{text}");
     assert!(text.contains("has joined."), "{text}");
+
+    server.shutdown().await;
+}
+
+/// **`Connected` is the first thing a client hears after `Connect`.**
+///
+/// A client is entitled to treat the reply to `Connect` as the next packet it
+/// receives — the protocol documents `Connected` as that reply — and at least
+/// one refuses the connection outright with
+/// `IllegalResponse { expected: "Connected", received: "PrintJSON" }` when
+/// anything else arrives first.
+///
+/// pahoa got this wrong by copying the reference's *source* order, where
+/// `on_client_joined` runs before `send_msgs`. That is not the reference's
+/// *wire* order: its announcements go out through `async_start`, so they are
+/// tasks that cannot run until the handler yields, and the awaited send reaches
+/// the socket first. Ordering here has to be asserted against the wire, which
+/// is why this test lives at the session level and not against `Recorder`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_precedes_every_other_packet() {
+    let Some(data) = load(FIXTURE) else {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    };
+    let (_, name, game) = first_player(&data);
+    let server = start(data, RoomOptions::default()).await;
+
+    let mut client = Client::connect(server.local_addr).await;
+    client.wait_for("RoomInfo").await;
+    client.send(connect_packet(&name, &game, 0b111)).await;
+
+    // The very first packet of the very first frame, whatever it is.
+    let mut first = None;
+    for _ in 0..50 {
+        if let Some(packet) = client.recv_frame().await.into_iter().next() {
+            first = packet["cmd"].as_str().map(str::to_string);
+            break;
+        }
+    }
+
+    assert_eq!(
+        first.as_deref(),
+        Some("Connected"),
+        "the first packet after Connect must be its reply, not a broadcast that \
+         happened to be queued first"
+    );
 
     server.shutdown().await;
 }
