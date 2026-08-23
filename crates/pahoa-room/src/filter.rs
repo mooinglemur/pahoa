@@ -32,10 +32,26 @@
 //!
 //! # Matching
 //!
-//! A rule's fields **and** together; the rules of a filter **or**. First match
-//! wins and decides. Nothing here is a boolean expression yet, and the shape is
-//! chosen so that it could become one — an `all`/`any` object would be another
-//! optional field rather than a new format.
+//! A filter is a **map from matcher to probability**, not an ordered list, and
+//! **the most specific match wins**: a rule naming a `tag` or a `subtype` beats
+//! one that names only a kind.
+//!
+//! Ordered rules were the first design and they made `PATCH` unanswerable. With
+//! first-match-wins, patching an exemption onto a blanket rule silently does
+//! nothing if it lands after it, and prepending is just as arbitrary in the
+//! other direction — so every possible placement is a guess about intent, and
+//! the wrong guess is a filter that looks configured and is dead. Keying on the
+//! matcher removes the question: a rule either replaces one with the same
+//! matcher or is a new entry, and the result is the same set either way.
+//!
+//! That also makes `PATCH` idempotent, which matters for a reconcile loop:
+//! re-applying the same rule must not grow the filter every pass.
+//!
+//! The trade is that rules can no longer be hand-ordered. Nothing today's
+//! matchers can express needs it — a qualified rule always wants to beat an
+//! unqualified one, which is exactly what specificity gives. A future matcher
+//! with a real predicate would have no obvious specificity and would need an
+//! explicit tiebreak; that is a field to add, not a format to replace.
 
 use pahoa_proto::ServerPacket;
 use serde_json::{Map, Value};
@@ -296,6 +312,25 @@ impl Rule {
         format!("unknown kind {name:?}, known: {}", known.join(", "))
     }
 
+    /// How narrowly this rule matches, for resolving overlaps: a rule naming a
+    /// tag or a subtype is more specific than one naming only a kind.
+    fn specificity(&self) -> u8 {
+        u8::from(self.tag.is_some() || self.subtype.is_some())
+    }
+
+    /// The matcher, which is this rule's **identity**.
+    ///
+    /// Two rules with the same matcher are one rule with different settings, so
+    /// a `PATCH` replaces rather than appends and a `DELETE` needs only this
+    /// much of a rule to name it.
+    pub fn matcher(&self) -> (Direction, Kind, Option<&str>, Option<&str>) {
+        (
+            self.direction,
+            self.kind,
+            self.tag.as_deref(),
+            self.subtype.as_deref(),
+        )
+    }
     /// Whether this rule's matcher covers a message. Does **not** consult the
     /// probability — see [`Filter::fires`].
     /// `labels` is what the message offers to narrow on — **all** of a bounce's
@@ -362,8 +397,9 @@ impl Filter {
 
     /// Whether a message should be dropped.
     ///
-    /// First matching rule decides, and `roll` supplies the randomness so the
-    /// caller owns the generator — deliberately, because the room's own PRNG is
+    /// **The most specific matching rule decides**, so a blanket rule and an
+    /// exemption for one tag can coexist in either written order. `roll`
+    /// supplies the randomness so the caller owns the generator — deliberately, because the room's own PRNG is
     /// the *hint* PRNG: it is saved, and it is pinned byte for byte against a
     /// real `MultiServer.Context` by `hint_vectors.jsonl`. Drawing sampling
     /// numbers from it would move hint selection and break that comparison.
@@ -374,14 +410,51 @@ impl Filter {
         labels: &[&str],
         roll: &mut impl FnMut() -> f64,
     ) -> bool {
-        for rule in &self.rules {
-            if rule.matches(direction, kind, labels) {
-                // `1.0` short-circuits, so an ordinary filter never touches the
-                // generator and a room with no sampling rules is deterministic.
-                return rule.probability >= 1.0 || roll() < rule.probability;
+        let winner = self
+            .rules
+            .iter()
+            .filter(|rule| rule.matches(direction, kind, labels))
+            .max_by_key(|rule| rule.specificity());
+        match winner {
+            // `1.0` short-circuits, so an ordinary filter never touches the
+            // generator and a room with no sampling rules is deterministic.
+            Some(rule) => rule.probability >= 1.0 || roll() < rule.probability,
+            None => false,
+        }
+    }
+
+    /// Merge rules in, replacing any with the same matcher.
+    ///
+    /// What `PATCH` does. Idempotent by construction: applying the same rule
+    /// twice leaves one entry, so a reconcile loop re-asserting its intent does
+    /// not grow the filter.
+    pub fn merge(&mut self, incoming: Vec<Rule>) -> Result<(), String> {
+        for rule in incoming {
+            match self
+                .rules
+                .iter_mut()
+                .find(|existing| existing.matcher() == rule.matcher())
+            {
+                Some(existing) => *existing = rule,
+                None => self.rules.push(rule),
             }
         }
-        false
+        if self.rules.len() > MAX_RULES {
+            return Err(format!(
+                "at most {MAX_RULES} rules, and this would make {}",
+                self.rules.len()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drop rules whose matcher appears in `matchers`. Returns how many went,
+    /// so a `DELETE` can report whether it did anything.
+    pub fn remove(&mut self, matchers: &[Rule]) -> usize {
+        let before = self.rules.len();
+        self.rules
+            .retain(|rule| !matchers.iter().any(|m| m.matcher() == rule.matcher()));
+        before - self.rules.len()
     }
 }
 
@@ -594,30 +667,108 @@ mod tests {
         assert!(!filter.drops(Direction::FromSlot, Kind::Bounce, &[], &mut always()));
     }
 
+    /// **The most specific rule wins, whichever order it is written in.**
+    ///
+    /// This is what makes `PATCH` answerable at all: an exemption merged onto a
+    /// blanket rule works without the caller reasoning about position, and the
+    /// same two rules behave identically read either way round. Under the
+    /// ordered model this test's second case silently did nothing.
     #[test]
-    fn first_match_wins() {
-        // A blanket thin, with an exemption ahead of it.
-        let filter = Filter::from_json(&json!([
-            {"direction": "from_slot", "kind": "bounce", "tag": "TrapLink", "p": 0.0},
-            {"direction": "from_slot", "kind": "bounce", "p": 1.0}
+    fn the_most_specific_rule_wins_in_either_order() {
+        let blanket = json!({"direction": "from_slot", "kind": "bounce", "p": 1.0});
+        let exemption =
+            json!({"direction": "from_slot", "kind": "bounce", "tag": "TrapLink", "p": 0.0});
+
+        for order in [json!([blanket, exemption]), json!([exemption, blanket])] {
+            let filter = Filter::from_json(&order).unwrap();
+            assert!(
+                !filter.drops(
+                    Direction::FromSlot,
+                    Kind::Bounce,
+                    &["TrapLink"],
+                    &mut always()
+                ),
+                "the tagged rule must win regardless of position: {order}"
+            );
+            assert!(
+                filter.drops(
+                    Direction::FromSlot,
+                    Kind::Bounce,
+                    &["DeathLink"],
+                    &mut always()
+                ),
+                "and the blanket rule still covers everything else: {order}"
+            );
+        }
+    }
+
+    /// `PATCH` semantics: the same matcher replaces, a new one appends, and
+    /// applying the same rule twice leaves one entry — which is what lets a
+    /// reconcile loop re-assert its intent without growing the filter.
+    #[test]
+    fn merging_upserts_on_the_matcher_and_is_idempotent() {
+        let rules = |v| Filter::from_json(&v).unwrap().rules;
+        let mut filter = Filter::from_json(&json!([
+            {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.5}
         ]))
         .unwrap();
 
-        assert!(
-            !filter.drops(
-                Direction::FromSlot,
-                Kind::Bounce,
-                &["TrapLink"],
-                &mut always()
-            ),
-            "the earlier rule decides, even though the later one would drop it"
+        let updated = rules(json!([
+            {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.1}
+        ]));
+        filter.merge(updated.clone()).unwrap();
+        assert_eq!(filter.rules.len(), 1, "same matcher must not duplicate");
+        assert_eq!(filter.rules[0].probability, 0.1);
+
+        filter.merge(updated).unwrap();
+        assert_eq!(filter.rules.len(), 1, "and re-applying changes nothing");
+
+        filter
+            .merge(rules(json!([
+                {"direction": "from_slot", "kind": "bounce", "tag": "TrapLink"}
+            ])))
+            .unwrap();
+        assert_eq!(filter.rules.len(), 2, "a different matcher is a new entry");
+    }
+
+    /// A `DELETE` names a rule by its matcher, so a caller need not know the
+    /// probability it is removing.
+    #[test]
+    fn removing_takes_the_matcher_not_the_whole_rule() {
+        let rules = |v| Filter::from_json(&v).unwrap().rules;
+        let mut filter = Filter::from_json(&json!([
+            {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.5},
+            {"direction": "from_slot", "kind": "bounce", "tag": "TrapLink"}
+        ]))
+        .unwrap();
+
+        let target = rules(json!([
+            {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.9}
+        ]));
+        assert_eq!(
+            filter.remove(&target),
+            1,
+            "the probability is not the identity"
         );
-        assert!(filter.drops(
-            Direction::FromSlot,
-            Kind::Bounce,
-            &["DeathLink"],
-            &mut always()
-        ));
+        assert_eq!(filter.rules.len(), 1);
+        assert_eq!(filter.remove(&target), 0, "and it says so the second time");
+    }
+
+    /// A merge cannot smuggle a filter past the bound the constructor enforces.
+    #[test]
+    fn merging_still_respects_the_bound() {
+        let mut filter = Filter::default();
+        let many: Vec<Rule> = (0..MAX_RULES + 1)
+            .map(|i| {
+                Rule::from_json(&json!({
+                    "direction": "from_slot",
+                    "kind": "bounce",
+                    "tag": format!("tag{i}")
+                }))
+                .unwrap()
+            })
+            .collect();
+        assert!(filter.merge(many).is_err());
     }
 
     /// **The absences are the feature.** Naming one of these is an error with a
