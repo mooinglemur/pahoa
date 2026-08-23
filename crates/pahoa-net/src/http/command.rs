@@ -90,6 +90,22 @@ pub fn parse(body: &[u8]) -> Result<AdminCommand, String> {
                     .ok_or_else(|| "\"locked\" must be true or false".to_string())
             })?,
         }),
+        // Named `set_status` rather than `status`, which is already the verb
+        // that *reports* the room. The value is the word rather than the wire's
+        // number: an operator types "goal", not 30.
+        "set_status" => Ok(AdminCommand::SetStatus {
+            slot: slot(object)?,
+            status: {
+                let name = text(object, "status")?;
+                pahoa_multidata::ClientStatus::from_text(&name).ok_or_else(|| {
+                    let known: Vec<&str> = pahoa_multidata::ClientStatus::ALL
+                        .iter()
+                        .map(|s| s.as_text())
+                        .collect();
+                    format!("unknown status {name:?}, known: {}", known.join(", "))
+                })?
+            },
+        }),
         "alias" => Ok(AdminCommand::Alias {
             slot: slot(object)?,
             // Optional and empty-meaning-clear, matching `!alias` with no
@@ -272,6 +288,13 @@ mod tests {
             }
         );
         assert_eq!(
+            parsed(r#"{"command":"set_status","slot":3,"status":"goal"}"#).unwrap(),
+            AdminCommand::SetStatus {
+                slot: 3,
+                status: pahoa_multidata::ClientStatus::Goal
+            }
+        );
+        assert_eq!(
             parsed(r#"{"command":"alias","slot":3,"alias":"Organizer"}"#).unwrap(),
             AdminCommand::Alias {
                 slot: 3,
@@ -296,6 +319,24 @@ mod tests {
             parsed(r#"{"command":"send_multiple","slot":1,"item":"Rupee"}"#)
                 .is_err_and(|e| e.contains("amount"))
         );
+    }
+
+    /// The status is the word, not the wire's number, and an unknown one lists
+    /// what is accepted rather than leaving the caller to guess.
+    #[test]
+    fn set_status_takes_a_name_and_names_the_alternatives() {
+        assert_eq!(
+            parsed(r#"{"command":"set_status","slot":1,"status":"PLAYING"}"#).unwrap(),
+            AdminCommand::SetStatus {
+                slot: 1,
+                status: pahoa_multidata::ClientStatus::Playing
+            },
+            "the name is matched case-insensitively"
+        );
+        let bad = parsed(r#"{"command":"set_status","slot":1,"status":"done"}"#);
+        assert!(bad.as_ref().is_err_and(|e| e.contains("goal")), "{bad:?}");
+        // The number is not accepted here; this surface speaks words.
+        assert!(parsed(r#"{"command":"set_status","slot":1,"status":30}"#).is_err());
     }
 
     /// `lock` with no `locked` locks, so the command reads the way it sounds.

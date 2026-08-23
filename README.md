@@ -395,6 +395,7 @@ validate before sending.
 | `send_location` | `{"command":"send_location","slot":3,"location":"Attic"}` |
 | `allow_release` | `{"command":"allow_release","slot":3,"allowed":true}` |
 | `lock` | `{"command":"lock","slot":3,"locked":true}` |
+| `set_status` | `{"command":"set_status","slot":3,"status":"goal"}` |
 | `alias` | `{"command":"alias","slot":3,"alias":"Organizer"}` |
 | `option` | `{"command":"option","name":"hint_cost","value":20}` |
 | `kick` | `{"command":"kick","slot":3,"reason":"…"}` |
@@ -433,6 +434,26 @@ spells these as two commands, `/allow_release` and `/forbid_release`, and the
 second name is why this is one command with a boolean instead. There is no
 collect equivalent, in pahoa or in the reference — `!collect` consults
 `collect_mode` and nothing else.
+
+**`set_status` declares a slot's completion state on its behalf**, which the
+protocol otherwise lets only that slot's own client do — `StatusUpdate` is
+upstream's single external writer of it, so a player who has finished but whose
+client cannot say so leaves an organizer with nothing to do about it. Statuses
+are named rather than numbered: `unknown`, `connected`, `ready`, `playing`,
+`goal`. `unknown` and `connected` are derived from the connection and will be
+rewritten the next time the slot connects or disconnects, and the response says
+so.
+
+Declaring a goal goes through the same path a client's own `StatusUpdate` takes,
+so the room announces it and the `collect_mode` / `release_mode` auto rules fire
+exactly as they would otherwise — the response names them, because a world
+quietly emptying out is the surprising part.
+
+**Goal cannot be undone, including from here.** Upstream guards every status
+change with `if current != CLIENT_GOAL` — not even the client that declared it
+may take it back — and pahoa keeps that invariant rather than carving out an
+operator exception, so anything downstream can treat goal as monotonic. Where
+the reference silently ignores the attempt, this refuses it and says why.
 
 **`lock` bars a slot from connecting and does not disconnect anyone.** Those are
 separate decisions and separate commands: locking refuses the *next* login,

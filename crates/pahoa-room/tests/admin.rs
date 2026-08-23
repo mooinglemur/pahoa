@@ -1278,3 +1278,129 @@ fn with_password(name: &str, game: &str, password: &str) -> pahoa_proto::ClientP
         other => other,
     }
 }
+
+/// Declaring a goal for a slot does what the slot declaring it would.
+///
+/// Routed through the same `set_status` a `StatusUpdate` reaches, so the room
+/// announces it and the auto rules fire. A bare write to the status map would
+/// look identical in every tracker and quietly skip both.
+#[test]
+fn set_status_goal_announces_and_fires_the_auto_rules() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, ..) = first_player(&data);
+    let mut room = room_for(
+        data,
+        RoomOptions {
+            release_mode: pahoa_proto::types::Permission::AutoEnabled,
+            ..Default::default()
+        },
+    );
+    let key = (0, slot);
+    assert_eq!(room.status(key), ClientStatus::Unknown);
+
+    let mut sink = Recorder::default();
+    let outcome = room.admin(
+        AdminCommand::SetStatus {
+            slot,
+            status: ClientStatus::Goal,
+        },
+        &mut sink,
+    );
+
+    assert!(outcome.ok, "{:?}", outcome.output);
+    assert_eq!(room.status(key), ClientStatus::Goal);
+    assert!(
+        broadcasts(&sink)
+            .iter()
+            .any(|l| l.contains("has completed their goal")),
+        "the room must hear about it: {:?}",
+        broadcasts(&sink)
+    );
+    assert!(
+        room.checked_count(key) > 0,
+        "release_mode auto should have released their world"
+    );
+    // And the response warns about that, since a world quietly emptying out is
+    // the surprising part.
+    assert!(
+        outcome.output[0].contains("released"),
+        "{:?}",
+        outcome.output
+    );
+}
+
+/// **Goal is a one-way door, from here too.**
+///
+/// `MultiServer.py:2208` guards every status change with
+/// `if current != CLIENT_GOAL`, so not even the client that declared it may
+/// take it back. pahoa keeps the invariant rather than carving out an operator
+/// exception — but says so rather than ignoring the request, which is what the
+/// reference does.
+#[test]
+fn a_goal_cannot_be_revoked_by_an_administrator() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = fresh_room().unwrap();
+    let goal = |status| AdminCommand::SetStatus { slot, status };
+
+    assert!(run(&mut room, goal(ClientStatus::Goal)).ok);
+    assert_eq!(room.status((0, slot)), ClientStatus::Goal);
+
+    let refused = run(&mut room, goal(ClientStatus::Playing));
+    assert!(!refused.ok, "{:?}", refused.output);
+    assert!(
+        refused.output[0].contains("cannot be undone"),
+        "the refusal must say why rather than reporting a change that did not happen: {:?}",
+        refused.output
+    );
+    assert_eq!(
+        room.status((0, slot)),
+        ClientStatus::Goal,
+        "the status must be untouched"
+    );
+
+    // Even re-declaring the same goal is refused, rather than replaying the
+    // announcement and the auto rules a second time.
+    assert!(!run(&mut room, goal(ClientStatus::Goal)).ok);
+}
+
+#[test]
+fn set_status_can_set_the_ordinary_statuses() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = fresh_room().unwrap();
+    for status in [ClientStatus::Ready, ClientStatus::Playing] {
+        let outcome = run(&mut room, AdminCommand::SetStatus { slot, status });
+        assert!(outcome.ok, "{:?}", outcome.output);
+        assert_eq!(room.status((0, slot)), status);
+    }
+}
+
+/// `unknown` and `connected` are derived from the connection, so setting one is
+/// almost never what somebody meant. Allowed, because a client may send them
+/// too, but said out loud.
+#[test]
+fn setting_a_connection_state_warns_that_it_will_not_stick() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, ..) = fresh_room().unwrap();
+    let outcome = run(
+        &mut room,
+        AdminCommand::SetStatus {
+            slot,
+            status: ClientStatus::Connected,
+        },
+    );
+    assert!(outcome.ok);
+    assert!(
+        outcome.output[0].contains("overwritten"),
+        "{:?}",
+        outcome.output
+    );
+}

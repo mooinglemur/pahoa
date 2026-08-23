@@ -89,6 +89,19 @@ pub enum AdminCommand {
         slot: u32,
         locked: bool,
     },
+    /// Set a slot's completion status on its behalf.
+    ///
+    /// No reference equivalent — upstream's only external writer of
+    /// `client_game_state` is the slot's own `StatusUpdate` packet. This exists
+    /// for the case that leaves no other way out: a player has finished but
+    /// their client cannot say so.
+    ///
+    /// **Goal is still a one-way door**, exactly as `MultiServer.py:2208`
+    /// makes it. An operator may declare a slot done; nobody may undeclare it.
+    SetStatus {
+        slot: u32,
+        status: ClientStatus,
+    },
     /// Set or clear a slot's display alias, which `!alias` only lets a player
     /// do for themselves.
     Alias {
@@ -175,6 +188,7 @@ impl Room {
                 self.admin_allow_release(slot, allowed, out)
             }
             AdminCommand::Lock { slot, locked } => self.admin_lock(slot, locked, out),
+            AdminCommand::SetStatus { slot, status } => self.admin_set_status(slot, status, out),
             AdminCommand::Alias { slot, alias } => self.admin_alias(slot, &alias, out),
             AdminCommand::Option { name, value } => self.admin_option(&name, &value, out),
             AdminCommand::Kick { slot, reason } => self.admin_kick(slot, &reason, out),
@@ -524,6 +538,66 @@ impl Room {
             },
             vec![slot],
         )
+    }
+
+    /// Set a slot's completion status on its behalf.
+    ///
+    /// Routed through the same `set_status` a `StatusUpdate` packet reaches, so
+    /// declaring a goal here does everything a client declaring it would: the
+    /// room announces it, and `collect_mode`/`release_mode` auto rules fire. A
+    /// bare write to `client_game_state` would show the right thing in every
+    /// tracker and quietly skip all of that.
+    ///
+    /// **Goal cannot be undone, including from here.** `MultiServer.py:2208`
+    /// guards every status change with `if current != CLIENT_GOAL`, so not even
+    /// the client that declared it may take it back, and pahoa keeps that
+    /// invariant rather than carving out an operator exception — anything
+    /// downstream is entitled to treat goal as monotonic. Where the reference
+    /// silently ignores the attempt, this refuses it and says why: an operator
+    /// who asked for a change is owed the news that it did not happen.
+    fn admin_set_status(
+        &mut self,
+        slot: u32,
+        status: ClientStatus,
+        out: &mut dyn EffectSink,
+    ) -> AdminOutcome {
+        let Some(key) = self.admin_key(slot) else {
+            return Self::unknown_slot(slot);
+        };
+        let who = self.slot_alias(key);
+
+        if self.status(key) == ClientStatus::Goal {
+            return AdminOutcome::refused(format!(
+                "{who} has already completed their goal, and that cannot be undone."
+            ));
+        }
+
+        self.set_status(key, status, out);
+
+        let mut line = format!("{who} is now {}.", status.as_text());
+        if status == ClientStatus::Goal {
+            // The auto rules are the surprising part, so name them rather than
+            // leaving an operator to notice a world emptied out afterwards.
+            let mut also = Vec::new();
+            if self.options.collect_mode.is_auto() {
+                also.push("collected");
+            }
+            if self.options.release_mode.is_auto() {
+                also.push("released");
+            }
+            if !also.is_empty() {
+                line.push_str(&format!(
+                    " Their world was automatically {}, as it would be for any goal.",
+                    also.join(" and ")
+                ));
+            }
+        } else if matches!(status, ClientStatus::Unknown | ClientStatus::Connected) {
+            // Both are connection-derived and will be rewritten by the next
+            // connect or disconnect, so setting one is almost never what
+            // somebody meant.
+            line.push_str(" This is a connection state, so it will be overwritten the next time they connect or disconnect.");
+        }
+        AdminOutcome::ok(line, vec![slot])
     }
 
     /// Bar a slot from connecting, or let it back in.

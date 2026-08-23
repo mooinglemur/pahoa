@@ -63,6 +63,33 @@ impl ClientStatus {
         }
     }
 
+    /// The inverse of [`Self::as_text`], for surfaces that take a name rather
+    /// than the wire's number — the admin API, where `"goal"` is what an
+    /// operator would type and `30` is what they would have to look up.
+    ///
+    /// Kept beside `as_text` so the two spellings cannot drift apart, with a
+    /// round-trip test holding them to it.
+    pub fn from_text(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "unknown" => Self::Unknown,
+            "connected" => Self::Connected,
+            "ready" => Self::Ready,
+            "playing" => Self::Playing,
+            "goal" => Self::Goal,
+            _ => return None,
+        })
+    }
+
+    /// Every status, so a caller listing what it accepts need not repeat the
+    /// table.
+    pub const ALL: [Self; 5] = [
+        Self::Unknown,
+        Self::Connected,
+        Self::Ready,
+        Self::Playing,
+        Self::Goal,
+    ];
+
     /// The one table. Callers that have a path to blame use [`Self::from_i64`].
     pub fn from_wire(v: i64) -> Option<Self> {
         Some(match v {
@@ -368,6 +395,24 @@ impl std::fmt::Display for Version {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `as_text` and `from_text` are two spellings of one table, and the admin
+    /// API reads a name back that a status document wrote. A variant added to
+    /// one and missed in the other would make that round trip fail for exactly
+    /// the new case.
+    #[test]
+    fn every_status_name_round_trips() {
+        for status in ClientStatus::ALL {
+            assert_eq!(
+                ClientStatus::from_text(status.as_text()),
+                Some(status),
+                "{} does not parse back",
+                status.as_text()
+            );
+        }
+        assert_eq!(ClientStatus::ALL.len(), 5, "a variant was added silently");
+        assert_eq!(ClientStatus::from_text("nonsense"), None);
+    }
 
     fn slot_py(name: &str, game: &str, ty: i64, members: Vec<PyObj>) -> PyObj {
         PyObj::Instance {
