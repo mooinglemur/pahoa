@@ -361,13 +361,9 @@ async fn serve_connection(
             ws::accept::reject(&mut stream, &e).await;
             Err(e.into())
         }
-        // Plaintext, with a certificate configured and no opt-in. RFC 2817's
-        // status for exactly this, so the refusal is legible to a person with
-        // curl rather than a bare disconnect.
+        // Plaintext, with a certificate configured and no opt-in.
         (false, Some(_)) if !config.allow_plaintext => {
-            let _ = stream.write_all(UPGRADE_TO_TLS).await;
-            let _ = stream.flush().await;
-            tracing::debug!(%conn, %peer, "refused a plaintext connection; TLS is configured");
+            refuse_plaintext(&mut stream, config, conn, peer).await;
             Err("plaintext refused: TLS is configured".into())
         }
         (false, _) => {
@@ -380,11 +376,81 @@ async fn serve_connection(
     }
 }
 
-/// What a plaintext client is told when the room is serving TLS.
+/// What a plaintext *HTTP* client is told when the room is serving TLS.
 const UPGRADE_TO_TLS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\n\
     Upgrade: TLS/1.3, HTTP/1.1\r\n\
     Connection: close\r\n\
     Content-Length: 0\r\n\r\n";
+
+/// Refuse a plaintext connection to a TLS room, differently depending on who is
+/// asking.
+///
+/// **A WebSocket client is closed on without a reply, and that is deliberate
+/// even though a `426` is the correct status.** Archipelago clients are given a
+/// bare `host:port` and try `ws://` first — `CommonClient.py:857` prepends it
+/// when the address carries no scheme. They recover through one specific
+/// heuristic: `websockets` raises `InvalidMessage` when the reply is not
+/// parseable HTTP, and `CommonClient.py:887-890` reads that as "probably
+/// encrypted" and retries the same address as `wss://`. Against a room behind
+/// an ordinary TLS terminator the plaintext attempt gets alert bytes, so the
+/// retry fires and the player never learns any of this happened.
+///
+/// A well-formed `426` breaks exactly that. `websockets` parses it fine and
+/// raises `InvalidStatusCode`, which is *not* the branch that retries — so the
+/// standards-correct answer is the one that strands a client the reference's
+/// accidental answer would have connected. Measured both ways rather than
+/// reasoned about.
+///
+/// Anything that is not an upgrade — `curl`, a browser, a health check — still
+/// gets the `426` with its `Upgrade` header, because for those the legible
+/// answer is also the useful one and no fallback is riding on it.
+async fn refuse_plaintext(
+    stream: &mut TcpStream,
+    config: &NetConfig,
+    conn: ConnId,
+    peer: SocketAddr,
+) {
+    let mut buf = Vec::with_capacity(1024);
+    let upgrade = read_head(stream, config, &mut buf).await;
+
+    if upgrade {
+        // No reply at all: an unparseable response is what the client is
+        // watching for, and closing is the cheapest way to produce one.
+        tracing::debug!(
+            %conn, %peer,
+            "refused a plaintext WebSocket upgrade; closing so the client retries over TLS"
+        );
+        return;
+    }
+
+    let _ = stream.write_all(UPGRADE_TO_TLS).await;
+    let _ = stream.flush().await;
+    tracing::debug!(%conn, %peer, "refused a plaintext request; TLS is configured");
+}
+
+/// Read the request head far enough to tell an upgrade from ordinary HTTP.
+///
+/// Bounded by the same limits the real handshake uses, and any failure to read
+/// or parse answers `false` — the `426` is the safer thing to send to something
+/// that did not manage to ask a question.
+async fn read_head(stream: &mut TcpStream, config: &NetConfig, buf: &mut Vec<u8>) -> bool {
+    let deadline = tokio::time::Instant::now() + config.handshake_timeout;
+    loop {
+        if ws::handshake::headers_complete(buf) {
+            break;
+        }
+        if buf.len() > config.max_header_bytes {
+            return false;
+        }
+        let read = tokio::time::timeout_at(deadline, stream.read_buf(buf)).await;
+        match read {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return false,
+            Ok(Ok(_)) => {}
+        }
+    }
+    ws::handshake::parse_request(buf, config.max_header_bytes)
+        .is_ok_and(|request| request.is_upgrade())
+}
 
 /// Look at the first byte without consuming it.
 ///

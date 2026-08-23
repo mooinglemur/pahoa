@@ -165,13 +165,33 @@ the first byte of each connection, which is what lets both schemes share it:
 a TLS ClientHello starts `0x16`, and no HTTP method can, since every one of
 those is uppercase ASCII.
 
-Once a certificate is configured, plaintext is **refused** with `426 Upgrade
-Required` unless `--allow-plaintext` is given. That default is deliberate: the
-admin API is mutating and internet-reachable, and serving its bearer token in
-the clear on the same port would undo the point of having it. With no
-certificate configured nothing changes — plaintext is served, and a TLS client
-gets an immediate `handshake_failure` alert so a client probing `wss://` before
-`ws://` falls back at once rather than hanging.
+Once a certificate is configured, plaintext is **refused** unless
+`--allow-plaintext` is given. That default is deliberate: the admin API is
+mutating and internet-reachable, and serving its bearer token in the clear on
+the same port would undo the point of having it.
+
+**How it is refused depends on what asked, and the difference is load-bearing.**
+An ordinary request — `curl`, a browser, a probe — gets RFC 2817's `426 Upgrade
+Required` naming `Upgrade: TLS/1.3, HTTP/1.1`, which is the legible answer. A
+**WebSocket upgrade is closed on without a reply**, which is not.
+
+Archipelago clients are handed a bare `host:port` and try `ws://` first, because
+`CommonClient.py:857` prepends it when the address carries no scheme. They
+recover through one narrow heuristic: `websockets` raises `InvalidMessage` when
+the reply is not parseable HTTP, and `CommonClient.py:887-890` reads that as
+"probably encrypted" and retries the same address as `wss://`. Against a room
+behind an ordinary TLS terminator the plaintext attempt gets alert bytes, the
+retry fires, and the player never learns it happened. A well-formed `426`
+defeats exactly that — the library parses it happily and raises
+`InvalidStatusCode`, which is *not* the branch that retries. So the
+standards-correct status is the one that strands clients the reference's
+accidental behavior would have connected, and the upgrade path deliberately
+gives them the unparseable answer they are watching for.
+
+With no certificate configured nothing changes — plaintext is served, and a TLS
+client gets an immediate `handshake_failure` alert so a client probing `wss://`
+before `ws://` falls back at once rather than hanging. The two directions are
+the same courtesy.
 
 **The certificate is reloaded in place.** Both files are checked every 30
 seconds and re-read when either changes, so a renewal needs no restart — which

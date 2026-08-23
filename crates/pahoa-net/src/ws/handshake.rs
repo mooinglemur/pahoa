@@ -197,7 +197,11 @@ impl HttpRequest {
     ///
     /// `Connection` is a comma-separated list and may carry other tokens, so a
     /// whole-value comparison would reject real clients.
-    fn is_upgrade(&self) -> bool {
+    /// Whether this is a WebSocket upgrade rather than an ordinary request.
+    ///
+    /// Public because the plaintext refusal needs it: what a `ws://` client and
+    /// a person with `curl` should be told differ, and this is the difference.
+    pub fn is_upgrade(&self) -> bool {
         let upgrading = self.header("Connection").is_some_and(|v| {
             v.split(',')
                 .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))

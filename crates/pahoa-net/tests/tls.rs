@@ -25,6 +25,10 @@ const UPGRADE: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket
 /// record length, then the handshake header.
 const CLIENT_HELLO: &[u8] = &[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc];
 
+/// An ordinary request — a person with `curl`, a probe, a browser — as opposed
+/// to [`UPGRADE`]. The two are refused differently and that is the point.
+const PLAIN_GET: &[u8] = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
 /// A room with nothing in it. Enough to accept connections and answer RoomInfo.
 fn empty_room() -> Room {
     let data = Arc::new(MultiData {
@@ -162,13 +166,15 @@ async fn a_wss_client_upgrades_and_is_greeted() {
     server.shutdown().await;
 }
 
+/// An ordinary plaintext request gets RFC 2817's status, which is the legible
+/// answer for the human or the probe that sent it.
 #[tokio::test]
-async fn plaintext_is_refused_once_a_certificate_is_configured() {
+async fn a_plaintext_http_request_is_refused_with_426() {
     let mount = Mount::new("refuse");
     let (paths, _) = mount.issue();
     let server = start(Some(paths), false).await;
 
-    let response = plaintext_exchange(server.local_addr, UPGRADE).await;
+    let response = plaintext_exchange(server.local_addr, PLAIN_GET).await;
     let response = String::from_utf8_lossy(&response);
     assert!(
         response.starts_with("HTTP/1.1 426 Upgrade Required"),
@@ -178,6 +184,40 @@ async fn plaintext_is_refused_once_a_certificate_is_configured() {
     assert!(
         response.contains("Upgrade: TLS/1.3, HTTP/1.1"),
         "got {response:?}"
+    );
+
+    server.shutdown().await;
+}
+
+/// **A plaintext WebSocket upgrade gets no reply at all, deliberately.**
+///
+/// Archipelago clients are handed a bare `host:port` and try `ws://` first
+/// (`CommonClient.py:857`). They recover through one narrow heuristic: the
+/// `websockets` library raises `InvalidMessage` when the reply is not parseable
+/// HTTP, and `CommonClient.py:887-890` reads that as "probably encrypted" and
+/// retries as `wss://`. A room behind an ordinary TLS terminator produces alert
+/// bytes, so the retry fires and the player never notices.
+///
+/// A well-formed `426` defeats it — `websockets` parses that happily and raises
+/// `InvalidStatusCode`, which is not the branch that retries. Sending the
+/// correct status therefore stranded clients that the reference's accidental
+/// behavior would have connected, which is how this was found: Universal
+/// Tracker reporting a 426 against a live room.
+///
+/// So the upgrade path closes without answering, and only the request path
+/// above gets the status.
+#[tokio::test]
+async fn a_plaintext_websocket_upgrade_is_closed_on_so_the_client_retries_over_tls() {
+    let mount = Mount::new("refuse-ws");
+    let (paths, _) = mount.issue();
+    let server = start(Some(paths), false).await;
+
+    let response = plaintext_exchange(server.local_addr, UPGRADE).await;
+    assert!(
+        response.is_empty(),
+        "a ws:// client must see an unparseable (empty) response so its \
+         wss:// retry fires; got {:?}",
+        String::from_utf8_lossy(&response)
     );
 
     server.shutdown().await;
