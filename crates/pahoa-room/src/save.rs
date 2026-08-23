@@ -65,10 +65,15 @@ const MAGIC: &[u8; 8] = b"PAHOASAV";
 /// The cost is that a rolled-back server refuses a newer save outright. That is
 /// the intended trade for a field carrying access control: a lock that quietly
 /// stopped holding after a downgrade is worse than a room that will not start.
-pub const FORMAT_VERSION: u8 = 2;
+/// **3 added `filters`**, as JSON rather than typed fields — see
+/// [`crate::filter`] for why that is the last bump this feature should need.
+pub const FORMAT_VERSION: u8 = 3;
 
 /// The first version carrying `locked_slots`.
 const VERSION_LOCKED_SLOTS: u8 = 2;
+
+/// The first version carrying per-slot and room-wide `filters`.
+const VERSION_FILTERS: u8 = 3;
 
 const ENCODING_RAW: u8 = 0;
 const ENCODING_ZLIB: u8 = 1;
@@ -155,6 +160,19 @@ pub struct Snapshot {
     /// deploy fails in exactly the moment it was set up for. Added in format
     /// version 2; see [`FORMAT_VERSION`].
     pub locked_slots: Vec<SlotKey>,
+
+    /// Send and receive filters: the room-wide default under the key `"*"`, and
+    /// each slot's own under its `team_slot` spelling.
+    ///
+    /// **Stored as the rules' JSON rather than as typed fields**, deliberately.
+    /// The matcher vocabulary is open-ended — bounce tags alone are a
+    /// convention rather than a schema, with `TrapLink` already the second
+    /// entry and not the last — so encoding it would mean a `FORMAT_VERSION`
+    /// bump, and a rollback boundary, every time a rule gained a field. The
+    /// datastore's values are carried the same way and for the same reason.
+    /// Validation therefore happens where the rules enter, in
+    /// [`crate::filter::Filter::from_json`]. Added in format version 3.
+    pub filters: Vec<(String, Arc<Value>)>,
 }
 
 impl Snapshot {
@@ -377,6 +395,17 @@ impl Snapshot {
             w.key(key);
         }
 
+        // Version 3. Sorted by key, like every other map here, so identical
+        // state encodes to identical bytes.
+        let mut filters: Vec<_> = self.filters.iter().collect();
+        filters.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        w.uvar(filters.len() as u64);
+        for (key, rules) in filters {
+            w.str(key);
+            let json = serde_json::to_vec(&**rules).expect("rules are already JSON");
+            w.bytes(&json);
+        }
+
         w.into_inner()
     }
 
@@ -520,6 +549,17 @@ impl Snapshot {
             }
         }
 
+        let mut filters = Vec::new();
+        if version >= VERSION_FILTERS {
+            for _ in 0..r.count()? {
+                let key = r.str()?;
+                let json = r.bytes()?;
+                let value: Value = serde_json::from_slice(json)
+                    .map_err(|_| SaveError::Malformed("a filter is not JSON"))?;
+                filters.push((key, Arc::new(value)));
+            }
+        }
+
         Ok(Self {
             seed_name,
             options,
@@ -536,6 +576,7 @@ impl Snapshot {
             activity_at,
             connected_at,
             locked_slots,
+            filters,
         })
     }
 }

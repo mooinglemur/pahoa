@@ -115,6 +115,18 @@ pub struct Room {
     /// Slots granted a one-off release by an administrator, over and above
     /// what `release_mode` allows.
     allow_releases: HashSet<SlotKey>,
+    /// Send and receive filters, per slot, plus the room-wide default under
+    /// [`Room::ROOM_FILTER`].
+    ///
+    /// A slot's own filter **replaces** the room's rather than adding to it, so
+    /// "everyone is thinned except this one slot" is expressible without a
+    /// negation in the rule language: give that slot a filter of its own. See
+    /// [`Room::filter_for`].
+    filters: HashMap<String, crate::filter::Filter>,
+    /// Randomness for sampling rules, kept away from [`Room::rng`] — that one
+    /// is the hint PRNG, is saved, and is pinned byte for byte against a real
+    /// `MultiServer.Context`. Drawing from it here would move hint selection.
+    sampler: crate::filter::Sampler,
     /// Slots an administrator has barred from connecting.
     ///
     /// Orthogonal to every password mode rather than a fourth one: locking is
@@ -208,6 +220,11 @@ impl Room {
             rng,
             allow_releases: HashSet::new(),
             locked_slots: HashSet::new(),
+            filters: HashMap::new(),
+            // Seeded from the room's start time: nothing differential depends
+            // on these draws, and a filter is statistical rather than
+            // reproducible, so this is not saved.
+            sampler: crate::filter::Sampler::new(start_time.to_bits()),
             group_collected: HashMap::new(),
             countdown: None,
             admin_conn: None,
@@ -335,6 +352,25 @@ impl Room {
         // Everything else falls through Python's `elif client.auth:` chain and
         // is silently ignored — not refused (`MultiServer.py:1963`).
         if !authed && !packet.allowed_before_auth() {
+            return;
+        }
+
+        // **Filtered before dispatch, so a dropped message never happened.**
+        // An out-of-spec packet that should not be relayed is one the room must
+        // not act on either, and anything downstream — the journal, the
+        // datastore, the bounce fan-out — sits behind this point. Only kinds a
+        // rule can name are consulted, so a room with no filters pays one
+        // lookup that misses.
+        if authed
+            && let Some(key) = self.clients.get(&conn).map(|c| (c.team, c.slot))
+            && let Some((kind, labels)) = from_slot_kind(&packet)
+            && self.filters_from_slot(
+                key,
+                kind,
+                &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        {
+            tracing::debug!(%conn, kind = kind.as_text(), ?labels, "filtered a message the slot sent");
             return;
         }
 
@@ -1384,6 +1420,70 @@ impl Room {
 
     pub fn slot_locked(&self, key: SlotKey) -> bool {
         self.locked_slots.contains(&key)
+    }
+
+    /// The key the room-wide default filter is stored under.
+    ///
+    /// A slot cannot collide with it: slot keys are spelled `team_slot`, all
+    /// digits and an underscore.
+    pub const ROOM_FILTER: &'static str = "*";
+
+    fn filter_key(key: SlotKey) -> String {
+        format!("{}_{}", key.0, key.1)
+    }
+
+    /// Replace a filter, or clear it when `filter` is empty.
+    ///
+    /// `slot` of `None` sets the room-wide default.
+    pub fn set_filter(&mut self, slot: Option<SlotKey>, filter: crate::filter::Filter) {
+        let key = slot.map_or_else(|| Self::ROOM_FILTER.to_string(), Self::filter_key);
+        if filter.is_empty() {
+            self.filters.remove(&key);
+        } else {
+            self.filters.insert(key, filter);
+        }
+    }
+
+    /// A filter as configured, without falling back to the room's.
+    pub fn filter(&self, slot: Option<SlotKey>) -> Option<&crate::filter::Filter> {
+        let key = slot.map_or_else(|| Self::ROOM_FILTER.to_string(), Self::filter_key);
+        self.filters.get(&key)
+    }
+
+    /// The filter that actually applies to a slot.
+    ///
+    /// A slot's own filter **replaces** the room's rather than combining with
+    /// it. Combining would make "thin everyone except this slot" require a
+    /// negation in the rule language; replacing makes it an empty filter on
+    /// that slot, which is the same answer with no new vocabulary.
+    fn filter_for(&self, key: SlotKey) -> Option<&crate::filter::Filter> {
+        self.filters
+            .get(&Self::filter_key(key))
+            .or_else(|| self.filters.get(Self::ROOM_FILTER))
+    }
+
+    /// Whether a message this slot **sent** should be dropped before the room
+    /// acts on it.
+    pub(crate) fn filters_from_slot(
+        &mut self,
+        key: SlotKey,
+        kind: crate::filter::Kind,
+        labels: &[&str],
+    ) -> bool {
+        // Cloned rather than borrowed because the sampler is `&mut self` and
+        // the filter is behind `&self`. Filters are tens of rules at most and
+        // this only runs for kinds a filter can name, so the copy is cheaper
+        // than restructuring the room around it.
+        let Some(filter) = self.filter_for(key).cloned() else {
+            return false;
+        };
+        let sampler = &mut self.sampler;
+        filter.drops(
+            crate::filter::Direction::FromSlot,
+            kind,
+            labels,
+            &mut || sampler.roll(),
+        )
     }
 
     // --- countdown -------------------------------------------------------
@@ -2472,6 +2572,12 @@ impl Room {
                 .collect(),
             allow_releases: self.allow_releases.iter().copied().collect(),
             locked_slots: self.locked_slots.iter().copied().collect(),
+            filters: self
+                .filters
+                .iter()
+                .filter(|(_, f)| !f.is_empty())
+                .map(|(key, f)| (key.clone(), Arc::new(f.to_json())))
+                .collect(),
             stored_data: self
                 .stored_data
                 .iter()
@@ -2542,6 +2648,23 @@ impl Room {
             .collect();
         self.allow_releases = snapshot.allow_releases.into_iter().collect();
         self.locked_slots = snapshot.locked_slots.into_iter().collect();
+        // A filter that fails to parse is dropped rather than refusing the
+        // whole save: the rules were validated when they were set, so this can
+        // only mean a downgrade in the vocabulary, and losing one filter is
+        // better than losing the room.
+        self.filters = snapshot
+            .filters
+            .into_iter()
+            .filter_map(|(key, rules)| {
+                match crate::filter::Filter::from_json(&rules) {
+                    Ok(filter) => Some((key, filter)),
+                    Err(e) => {
+                        tracing::warn!(%key, error = %e, "dropping a saved filter this build cannot read");
+                        None
+                    }
+                }
+            })
+            .collect();
         self.stored_data = snapshot.stored_data.into_iter().collect();
 
         Ok(())
@@ -2584,6 +2707,25 @@ fn float_seconds(timers: Vec<(SlotKey, u64)>) -> HashMap<SlotKey, f64> {
         .into_iter()
         .map(|(key, at)| (key, at as f64))
         .collect()
+}
+
+/// What a filter rule can name a packet the slot sent, if anything.
+///
+/// `None` means "not addressable by a filter", which is every packet carrying
+/// progression — see [`crate::filter`] for why that set is closed and why it is
+/// expressed as an absence here rather than as a check at the rule boundary
+/// only. The label is the qualifier a rule may narrow on: a bounce's tags, and
+/// nothing else so far.
+fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<String>)> {
+    use crate::filter::Kind;
+    match packet {
+        // Every tag, not the first: a bounce routinely carries `["AP",
+        // "DeathLink"]`, and a rule naming `DeathLink` must match it.
+        ClientPacket::Bounce(b, _) => Some((Kind::Bounce, b.tags.clone().unwrap_or_default())),
+        ClientPacket::Set(..) => Some((Kind::Set, Vec::new())),
+        ClientPacket::StatusUpdate(_) => Some((Kind::StatusUpdate, Vec::new())),
+        _ => None,
+    }
 }
 
 fn parse_team_slot(s: &str) -> Option<(u32, u32)> {

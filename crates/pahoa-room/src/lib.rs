@@ -10,6 +10,7 @@
 mod conn;
 mod datapackage;
 mod effect;
+pub mod filter;
 pub mod fuzzy;
 pub mod hints;
 mod options;
