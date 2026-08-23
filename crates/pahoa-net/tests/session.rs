@@ -53,7 +53,7 @@ async fn start_filtered(
         let mut sink = pahoa_room::Recorder::default();
         room.set_filter(
             None,
-            pahoa_room::filter::Filter::from_json(&rules).expect("valid rules"),
+            Some(pahoa_room::filter::Filter::from_json(&rules).expect("valid rules")),
             &mut sink,
         );
     }

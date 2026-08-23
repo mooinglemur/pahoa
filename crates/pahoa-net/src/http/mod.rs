@@ -24,7 +24,7 @@ pub use admin::Admin;
 pub use response::Response;
 pub use status::{Options, SlotStatus, Status};
 
-use crate::actor::ActorMsg;
+use crate::actor::{ActorMsg, FilterEdit, FilterReply};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, oneshot};
@@ -205,6 +205,37 @@ impl Router {
             };
         }
 
+        // The filter routes, room-wide and per slot. A resource rather than a
+        // command because a filter is *state*: it is read back, edited in
+        // place, and cleared, and modelling that as fire-and-forget verbs would
+        // make every read a separate surface.
+        if let Some(slot) = filter_path(path) {
+            return match method {
+                "GET" => self.filter(slot, FilterEdit::Read).await,
+                // Replace wholesale.
+                "PUT" => match parse_rules(body) {
+                    Ok(rules) => self.filter(slot, FilterEdit::Replace(rules)).await,
+                    Err(e) => bad_request(e),
+                },
+                // Merge, keyed on each rule's matcher. Idempotent, so a
+                // reconcile loop can re-assert the same rule every pass.
+                "PATCH" => match parse_rules(body) {
+                    Ok(rules) => self.filter(slot, FilterEdit::Merge(rules)).await,
+                    Err(e) => bad_request(e),
+                },
+                // With a body, remove the named matchers; without one, clear
+                // the filter. Deleting a resource with no argument meaning "all
+                // of it" is the ordinary reading, and naming rules is the
+                // narrower case that needs a body to express.
+                "DELETE" if body.is_empty() => self.filter(slot, FilterEdit::Clear).await,
+                "DELETE" => match parse_rules(body) {
+                    Ok(rules) => self.filter(slot, FilterEdit::Remove(rules)).await,
+                    Err(e) => bad_request(e),
+                },
+                _ => Response::status(405, "Method Not Allowed"),
+            };
+        }
+
         match (method, path) {
             ("GET", "/admin/v1/status") => self.status().await,
             ("GET", "/admin/v1/metrics") => self.metrics().await,
@@ -216,6 +247,50 @@ impl Router {
                 | "/admin/v1/shutdown",
             ) => Response::status(405, "Method Not Allowed"),
             _ => Response::not_found(),
+        }
+    }
+
+    /// Read or edit one filter.
+    async fn filter(&self, slot: Option<u32>, edit: FilterEdit) -> Response {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .0
+            .actor
+            .send(ActorMsg::Filter {
+                slot,
+                edit,
+                reply: tx,
+            })
+            .await
+            .is_err()
+        {
+            return stopping();
+        }
+        match rx.await {
+            Ok(FilterReply::Ok {
+                rules,
+                effective,
+                inherited,
+                removed,
+            }) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": true,
+                    "slot": slot,
+                    "rules": rules,
+                    "effective": effective,
+                    "inherited": inherited,
+                    "removed": removed,
+                }),
+            ),
+            Ok(FilterReply::UnknownSlot) => Response::json(
+                404,
+                &serde_json::json!({
+                    "error": format!("there is no slot {} in this seed", slot.unwrap_or(0))
+                }),
+            ),
+            Ok(FilterReply::Refused(detail)) => bad_request(detail),
+            Err(_) => stopping(),
         }
     }
 
@@ -435,6 +510,33 @@ impl Cached {
 /// read them.
 fn tracker_response(body: Arc<[u8]>) -> Response {
     Response::json_bytes(200, body.to_vec()).with_header("Access-Control-Allow-Origin", "*")
+}
+
+/// Match the filter routes, returning which filter is addressed.
+///
+/// `Some(None)` is the room-wide default at `/admin/v1/filter`; `Some(Some(n))`
+/// is one slot's. `None` is not a filter route at all.
+fn filter_path(path: &str) -> Option<Option<u32>> {
+    if path == "/admin/v1/filter" {
+        return Some(None);
+    }
+    let rest = path.strip_prefix("/admin/v1/slots/")?;
+    let slot = rest.strip_suffix("/filter")?;
+    Some(Some(slot.parse().ok()?))
+}
+
+/// An empty body is an empty rule set, so `PUT` with no body is a clear.
+fn parse_rules(body: &[u8]) -> Result<pahoa_room::filter::Filter, String> {
+    if body.is_empty() {
+        return Ok(pahoa_room::filter::Filter::default());
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the body is not JSON: {e}"))?;
+    pahoa_room::filter::Filter::from_json(&value)
+}
+
+fn bad_request(detail: String) -> Response {
+    Response::json(400, &serde_json::json!({"error": detail}))
 }
 
 /// Match `/admin/v1/slots/<n>/password`, returning the slot number.

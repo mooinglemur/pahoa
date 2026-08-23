@@ -1435,9 +1435,18 @@ impl Room {
         format!("{}_{}", key.0, key.1)
     }
 
-    /// Replace a filter, or clear it when `filter` is empty.
+    /// Set or unset a filter. `slot` of `None` addresses the room-wide default.
     ///
-    /// `slot` of `None` sets the room-wide default.
+    /// **`Some(empty)` and `None` are different things**, and the difference is
+    /// the only way to say "this slot is exempt from the room's filter". A slot
+    /// with no filter *inherits* the room's; a slot with an explicitly empty one
+    /// inherits nothing and is filtered not at all. Collapsing the two — which
+    /// this did at first, treating empty as "delete" — left full exemption
+    /// expressible only as an inert rule like `{"kind":"bounce","p":0}`, which
+    /// is a workaround wearing the clothes of a design.
+    ///
+    /// It also maps onto the verbs a caller already has: `PUT []` sets a
+    /// resource to empty, `DELETE` removes it.
     ///
     /// Pushes the result to the transport for every connection it now affects,
     /// because the send half is applied where broadcasts are expanded. Changing
@@ -1446,15 +1455,14 @@ impl Room {
     pub fn set_filter(
         &mut self,
         slot: Option<SlotKey>,
-        filter: crate::filter::Filter,
+        filter: Option<crate::filter::Filter>,
         out: &mut dyn EffectSink,
     ) {
         let key = slot.map_or_else(|| Self::ROOM_FILTER.to_string(), Self::filter_key);
-        if filter.is_empty() {
-            self.filters.remove(&key);
-        } else {
-            self.filters.insert(key, filter);
-        }
+        match filter {
+            Some(filter) => self.filters.insert(key, filter),
+            None => self.filters.remove(&key),
+        };
 
         let affected: Vec<ConnId> = match slot {
             Some(target) => self.by_slot.get(&target).cloned().unwrap_or_default(),
@@ -2617,10 +2625,12 @@ impl Room {
                 .collect(),
             allow_releases: self.allow_releases.iter().copied().collect(),
             locked_slots: self.locked_slots.iter().copied().collect(),
+            // Empty filters are kept, not skipped: an explicitly empty one is a
+            // slot opting out of the room's, and dropping it at save time would
+            // silently restore inheritance on the next restart.
             filters: self
                 .filters
                 .iter()
-                .filter(|(_, f)| !f.is_empty())
                 .map(|(key, f)| (key.clone(), Arc::new(f.to_json())))
                 .collect(),
             stored_data: self

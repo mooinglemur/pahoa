@@ -93,7 +93,65 @@ pub enum ActorMsg {
         password: Option<String>,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
+    /// Read or change a filter. `slot` of `None` is the room-wide default.
+    Filter {
+        slot: Option<u32>,
+        edit: FilterEdit,
+        reply: tokio::sync::oneshot::Sender<FilterReply>,
+    },
     Shutdown,
+}
+
+/// What a filter request wants done.
+///
+/// Mirrors the HTTP methods rather than being one "set" with flags, because the
+/// four differ in what a caller has to know: `Replace` needs the whole intended
+/// state, `Merge` needs only what changed, `Remove` needs only matchers, and
+/// `Read` needs nothing.
+#[derive(Debug)]
+pub enum FilterEdit {
+    Read,
+    Replace(pahoa_room::filter::Filter),
+    Merge(pahoa_room::filter::Filter),
+    /// Rules identified by matcher; their probabilities are ignored.
+    Remove(pahoa_room::filter::Filter),
+    Clear,
+}
+
+#[derive(Debug)]
+pub enum FilterReply {
+    Ok {
+        /// **This resource's own rules** — what `PUT`, `PATCH` and `DELETE`
+        /// operate on.
+        ///
+        /// `null` when there is no ruleset here at all, `[]` when there is one
+        /// and it is empty. Those are different states — for a slot, the first
+        /// inherits the room's filter and the second is an exemption from it —
+        /// and the field that a caller edits is the one that should say so.
+        /// [`FilterReply::Ok::inherited`] is a convenience derived from this,
+        /// not the other way round.
+        ///
+        /// Deliberately not the effective filter. If a `GET` returned the
+        /// inherited rules, a `PATCH` would either merge into them — silently
+        /// forking the room's filter down onto the slot, so later room changes
+        /// stopped reaching it — or ignore what it had just shown. Both are
+        /// surprising; showing what is actually being edited is not.
+        rules: serde_json::Value,
+        /// What actually applies to this slot, which is the room's when the
+        /// slot has no filter of its own.
+        effective: serde_json::Value,
+        /// Whether `effective` came from the room rather than from here.
+        ///
+        /// Derived — it is exactly `rules == null` on a slot — and kept because
+        /// it saves every caller encoding that rule for themselves.
+        inherited: bool,
+        /// How many rules a `DELETE` with a body took.
+        removed: usize,
+    },
+    /// The slot is not in this seed.
+    UnknownSlot,
+    /// The edit was refused, with the reason.
+    Refused(String),
 }
 
 /// Bridges the room's effects onto the shards.
@@ -550,6 +608,71 @@ pub async fn run_with_saves(
                     tracing::info!(slot, "slot password rotated through the admin API");
                 }
                 let _ = reply.send(known);
+            }
+            ActorMsg::Filter { slot, edit, reply } => {
+                let key = match slot {
+                    Some(n) if !room.multidata().slot_info.contains_key(&n) => {
+                        let _ = reply.send(FilterReply::UnknownSlot);
+                        continue;
+                    }
+                    Some(n) => Some((0, n)),
+                    None => None,
+                };
+
+                let mut removed = 0;
+                // What this filter is *now*, distinguishing "inherits" (`None`)
+                // from "explicitly empty" — the two differ, and the difference
+                // is what lets a slot opt out of the room's filter entirely.
+                let existing = room.filter(key).cloned();
+                let mut current = existing.clone().unwrap_or_default();
+                let next: Option<Option<pahoa_room::filter::Filter>> = match edit {
+                    FilterEdit::Read => None,
+                    // `PUT` sets the resource, even to empty.
+                    FilterEdit::Replace(rules) => {
+                        current = rules;
+                        Some(Some(current.clone()))
+                    }
+                    FilterEdit::Merge(rules) => {
+                        if let Err(e) = current.merge(rules.rules) {
+                            let _ = reply.send(FilterReply::Refused(e));
+                            continue;
+                        }
+                        Some(Some(current.clone()))
+                    }
+                    FilterEdit::Remove(matchers) => {
+                        removed = current.remove(&matchers.rules);
+                        Some(Some(current.clone()))
+                    }
+                    // `DELETE` removes the resource, so a slot inherits again.
+                    FilterEdit::Clear => {
+                        current = pahoa_room::filter::Filter::default();
+                        Some(None)
+                    }
+                };
+
+                let own = match &next {
+                    Some(value) => value.clone(),
+                    None => existing,
+                };
+                if let Some(value) = next {
+                    room.set_filter(key, value, &mut sink);
+                    saver.dirty = true;
+                }
+                // Recomputed after the edit, because a `DELETE` on a slot puts
+                // it back under the room's and the answer should say so.
+                let inherited = key.is_some() && own.is_none();
+                let effective = if inherited {
+                    room.filter(None).cloned().unwrap_or_default()
+                } else {
+                    own.clone().unwrap_or_default()
+                };
+                let _ = reply.send(FilterReply::Ok {
+                    // `null` for absent, `[]` for present-and-empty.
+                    rules: own.map_or(serde_json::Value::Null, |f| f.to_json()),
+                    effective: effective.to_json(),
+                    inherited,
+                    removed,
+                });
             }
             ActorMsg::Shutdown => {
                 room.shutdown(&mut sink);

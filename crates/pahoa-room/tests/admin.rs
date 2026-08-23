@@ -1446,9 +1446,9 @@ mod filters {
         let mut sink = Recorder::default();
         room.set_filter(
             Some((0, slot)),
-            rules(serde_json::json!([
+            Some(rules(serde_json::json!([
                 {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
-            ])),
+            ]))),
             &mut sink,
         );
         let mut sink = Recorder::default();
@@ -1479,9 +1479,9 @@ mod filters {
         let mut sink = Recorder::default();
         room.set_filter(
             Some((0, slot)),
-            rules(serde_json::json!([
+            Some(rules(serde_json::json!([
                 {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
-            ])),
+            ]))),
             &mut sink,
         );
         let mut sink = Recorder::default();
@@ -1508,9 +1508,9 @@ mod filters {
         let mut sink = Recorder::default();
         room.set_filter(
             None,
-            rules(serde_json::json!([
+            Some(rules(serde_json::json!([
                 {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
-            ])),
+            ]))),
             &mut sink,
         );
 
@@ -1527,9 +1527,9 @@ mod filters {
         let mut sink = Recorder::default();
         room.set_filter(
             Some((0, slot)),
-            rules(serde_json::json!([
+            Some(rules(serde_json::json!([
                 {"direction": "from_slot", "kind": "bounce", "tag": "TrapLink"}
-            ])),
+            ]))),
             &mut sink,
         );
         let mut sink = Recorder::default();
@@ -1550,12 +1550,12 @@ mod filters {
         let filter = rules(serde_json::json!([
             {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.25}
         ]));
-        room.set_filter(Some((0, slot)), filter.clone(), &mut sink);
+        room.set_filter(Some((0, slot)), Some(filter.clone()), &mut sink);
         room.set_filter(
             None,
-            rules(serde_json::json!([
+            Some(rules(serde_json::json!([
                 {"direction": "to_slot", "kind": "print_json", "subtype": "Chat"}
-            ])),
+            ]))),
             &mut sink,
         );
 
@@ -1566,5 +1566,94 @@ mod filters {
 
         assert_eq!(restored.filter(Some((0, slot))), Some(&filter));
         assert!(restored.filter(None).is_some(), "the room default too");
+    }
+
+    /// **An explicitly empty slot filter exempts that slot entirely.**
+    ///
+    /// The distinction between "has no filter" and "has an empty one" is the only
+    /// way to say this. While the two were collapsed, full exemption was reachable
+    /// only through an inert rule like `{"kind":"bounce","p":0}` — a workaround for
+    /// a gap rather than a design.
+    #[test]
+    fn an_empty_slot_filter_opts_out_of_the_rooms() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let (slot, name, game) = first_player(&data);
+        let mut room = room_for(data, RoomOptions::default());
+        let conn = join(&mut room, 1, &name, &game, 0b111);
+
+        let mut sink = Recorder::default();
+        room.set_filter(
+            None,
+            Some(rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
+            ]))),
+            &mut sink,
+        );
+
+        // Inheriting the room's filter.
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+        assert!(sink.events.is_empty(), "the room default should apply");
+
+        // An explicitly empty filter of its own: inherits nothing.
+        let mut sink = Recorder::default();
+        room.set_filter(
+            Some((0, slot)),
+            Some(pahoa_room::filter::Filter::default()),
+            &mut sink,
+        );
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+        assert!(
+            !sink.events.is_empty(),
+            "an empty filter must exempt the slot, not fall back to the room's"
+        );
+
+        // Removing it restores inheritance, which is the other half of the pair.
+        let mut sink = Recorder::default();
+        room.set_filter(Some((0, slot)), None, &mut sink);
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+        assert!(
+            sink.events.is_empty(),
+            "deleting the slot's filter must put it back under the room's"
+        );
+    }
+
+    /// And the exemption survives a restart — dropping empty filters at save time
+    /// would silently turn one back into inheritance.
+    #[test]
+    fn an_empty_slot_filter_survives_a_restart() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let (mut room, slot, ..) = fresh_room().unwrap();
+        let mut sink = Recorder::default();
+        room.set_filter(
+            None,
+            Some(rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "bounce"}
+            ]))),
+            &mut sink,
+        );
+        room.set_filter(
+            Some((0, slot)),
+            Some(pahoa_room::filter::Filter::default()),
+            &mut sink,
+        );
+
+        let snapshot = room.snapshot();
+        let data = load(FIXTURE).unwrap();
+        let mut restored = room_for(data, RoomOptions::default());
+        restored.restore(snapshot).expect("restores");
+
+        assert_eq!(
+            restored.filter(Some((0, slot))),
+            Some(&pahoa_room::filter::Filter::default()),
+            "the exemption must still be an exemption, not an absence"
+        );
     }
 }

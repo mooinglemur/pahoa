@@ -908,3 +908,253 @@ async fn the_websocket_still_upgrades_on_the_same_port() {
     drop(ws);
     server.shutdown().await;
 }
+
+/// Any method with a body, for the filter resource.
+async fn send_body(addr: SocketAddr, method: &str, path: &str, body: &str) -> String {
+    request(
+        addr,
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await
+}
+
+async fn filter_call(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> (String, serde_json::Value) {
+    let response = send_body(addr, method, path, body).await;
+    let (status, body) = split(&response);
+    let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    (status.to_string(), json)
+}
+
+/// The filter resource end to end: read, replace, merge, remove, clear.
+#[tokio::test]
+async fn filters_are_read_and_edited_as_a_resource() {
+    let server = start_with_admin().await;
+    let addr = server.local_addr;
+    let room = "/admin/v1/filter";
+
+    // `null` until something is set, rather than a 404: "this room filters
+    // nothing" is a real answer and a caller should not have to tell it apart
+    // from a missing route. `null` rather than `[]` because an absent ruleset
+    // and an empty one are different states.
+    let (status, json) = filter_call(addr, "GET", room, "").await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(json["rules"], serde_json::Value::Null);
+
+    // PUT replaces wholesale.
+    let (status, json) = filter_call(
+        addr,
+        "PUT",
+        room,
+        r#"[{"direction":"from_slot","kind":"bounce","tag":"DeathLink","p":0.25}]"#,
+    )
+    .await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(json["rules"].as_array().unwrap().len(), 1);
+
+    // PATCH upserts on the matcher, so this replaces rather than appends.
+    let (_, json) = filter_call(
+        addr,
+        "PATCH",
+        room,
+        r#"[{"direction":"from_slot","kind":"bounce","tag":"DeathLink","p":0.5}]"#,
+    )
+    .await;
+    assert_eq!(
+        json["rules"].as_array().unwrap().len(),
+        1,
+        "the same matcher must not duplicate"
+    );
+    assert_eq!(json["rules"][0]["p"], serde_json::json!(0.5));
+
+    // And re-sending it changes nothing, which is what a reconcile loop needs.
+    let (_, again) = filter_call(
+        addr,
+        "PATCH",
+        room,
+        r#"[{"direction":"from_slot","kind":"bounce","tag":"DeathLink","p":0.5}]"#,
+    )
+    .await;
+    assert_eq!(again["rules"], json["rules"]);
+
+    // A different matcher is a new rule.
+    let (_, json) = filter_call(
+        addr,
+        "PATCH",
+        room,
+        r#"[{"direction":"from_slot","kind":"bounce","tag":"TrapLink"}]"#,
+    )
+    .await;
+    assert_eq!(json["rules"].as_array().unwrap().len(), 2);
+
+    // DELETE with a body removes the named matcher; the probability in it is
+    // ignored, because the matcher is the identity.
+    let (_, json) = filter_call(
+        addr,
+        "DELETE",
+        room,
+        r#"[{"direction":"from_slot","kind":"bounce","tag":"TrapLink","p":0.9}]"#,
+    )
+    .await;
+    assert_eq!(json["removed"], serde_json::json!(1));
+    assert_eq!(json["rules"].as_array().unwrap().len(), 1);
+
+    // DELETE with no body removes the ruleset entirely, which is `null` again
+    // rather than an empty list.
+    let (_, json) = filter_call(addr, "DELETE", room, "").await;
+    assert_eq!(json["rules"], serde_json::Value::Null);
+
+    server.shutdown().await;
+}
+
+/// **`PUT []` and `DELETE` are different things on a slot**, and the difference
+/// is the only way to exempt one slot from the room's filter.
+///
+/// They were the same at first — empty meant delete — which left full exemption
+/// expressible only as an inert rule. `PUT []` now sets the resource to empty
+/// (inherit nothing); `DELETE` removes it (inherit again).
+#[tokio::test]
+async fn an_empty_slot_filter_differs_from_no_slot_filter() {
+    let server = start_with_admin().await;
+    let addr = server.local_addr;
+    let slot = "/admin/v1/slots/1/filter";
+
+    filter_call(
+        addr,
+        "PUT",
+        "/admin/v1/filter",
+        r#"[{"direction":"from_slot","kind":"bounce","tag":"DeathLink"}]"#,
+    )
+    .await;
+
+    // **The distinction lives in `rules` itself**, not in `inherited`: `null`
+    // is "no ruleset here", `[]` is "a ruleset, and it is empty". A caller
+    // should not have to infer one state from a different field.
+    let (_, json) = filter_call(addr, "GET", slot, "").await;
+    assert_eq!(
+        json["rules"],
+        serde_json::Value::Null,
+        "no ruleset of its own is null, not empty"
+    );
+    assert_eq!(json["effective"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["inherited"],
+        serde_json::json!(true),
+        "an inherited filter and an empty one look identical without this"
+    );
+
+    // An explicit empty one is the slot's own, and inherits nothing — so
+    // `effective` goes empty too, which is the exemption.
+    let (_, json) = filter_call(addr, "PUT", slot, "[]").await;
+    assert_eq!(json["inherited"], serde_json::json!(false));
+    let (_, json) = filter_call(addr, "GET", slot, "").await;
+    assert_eq!(
+        json["rules"],
+        serde_json::json!([]),
+        "an empty ruleset is an empty list, distinct from null"
+    );
+    assert_eq!(
+        json["effective"],
+        serde_json::json!([]),
+        "an explicitly empty filter must exempt the slot"
+    );
+    assert_eq!(json["inherited"], serde_json::json!(false));
+
+    // DELETE puts it back under the room's, and `rules` goes back to null.
+    filter_call(addr, "DELETE", slot, "").await;
+    let (_, json) = filter_call(addr, "GET", slot, "").await;
+    assert_eq!(json["rules"], serde_json::Value::Null);
+    assert_eq!(json["effective"].as_array().unwrap().len(), 1);
+    assert_eq!(json["inherited"], serde_json::json!(true));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_slot_filter_is_its_own_resource() {
+    let server = start_with_admin().await;
+    let addr = server.local_addr;
+
+    let (status, _) = filter_call(
+        addr,
+        "PUT",
+        "/admin/v1/slots/1/filter",
+        r#"[{"direction":"to_slot","kind":"print_json","subtype":"Chat"}]"#,
+    )
+    .await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+
+    // The room-wide default is untouched by a slot's own.
+    let (_, json) = filter_call(addr, "GET", "/admin/v1/filter", "").await;
+    assert_eq!(json["rules"], serde_json::Value::Null);
+
+    let (_, json) = filter_call(addr, "GET", "/admin/v1/slots/1/filter", "").await;
+    assert_eq!(json["rules"].as_array().unwrap().len(), 1);
+    assert_eq!(json["inherited"], serde_json::json!(false));
+
+    // A slot outside the seed is a 404, not a filter nobody can see.
+    let (status, _) = filter_call(addr, "GET", "/admin/v1/slots/99/filter", "").await;
+    assert_eq!(status, "HTTP/1.1 404 Not Found");
+
+    server.shutdown().await;
+}
+
+/// A rule the room will not accept is the caller's mistake, and the reason has
+/// to come back or there is no way to fix it.
+#[tokio::test]
+async fn an_invalid_rule_is_refused_with_its_reason() {
+    let server = start_with_admin().await;
+    let addr = server.local_addr;
+
+    // The one that matters most: asking to filter progression.
+    let (status, json) = filter_call(
+        addr,
+        "PUT",
+        "/admin/v1/filter",
+        r#"[{"direction":"to_slot","kind":"received_items"}]"#,
+    )
+    .await;
+    assert_eq!(status, "HTTP/1.1 400 Bad Request");
+    let error = json["error"].as_str().unwrap_or_default();
+    assert!(error.contains("desynchronizes"), "{error}");
+
+    for (body, expected) in [
+        (r#"[{"direction":"sideways","kind":"bounce"}]"#, "from_slot"),
+        (r#"[{"direction":"to_slot","kind":"set"}]"#, "cannot travel"),
+        (
+            r#"[{"direction":"from_slot","kind":"bounce","p":2}]"#,
+            "between 0 and 1",
+        ),
+        (r#"not json"#, "not JSON"),
+    ] {
+        let (status, json) = filter_call(addr, "PUT", "/admin/v1/filter", body).await;
+        assert_eq!(status, "HTTP/1.1 400 Bad Request", "for {body}");
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "expected {expected:?} in {error:?}"
+        );
+    }
+
+    // And nothing was stored by any of them.
+    let (_, json) = filter_call(addr, "GET", "/admin/v1/filter", "").await;
+    assert_eq!(json["rules"], serde_json::Value::Null);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_filter_resource_refuses_methods_it_does_not_have() {
+    let server = start_with_admin().await;
+    let response = send_body(server.local_addr, "POST", "/admin/v1/filter", "[]").await;
+    assert_eq!(split(&response).0, "HTTP/1.1 405 Method Not Allowed");
+    server.shutdown().await;
+}
