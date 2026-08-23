@@ -34,8 +34,29 @@ fn load(name: &str) -> Option<Arc<MultiData>> {
 }
 
 async fn start(data: Arc<MultiData>, options: RoomOptions) -> Server {
+    start_filtered(data, options, None).await
+}
+
+/// The same, with a room-wide send filter already in place.
+///
+/// Set before the server starts because the room pushes each connection's
+/// filter to the transport as it authenticates, so a filter configured up front
+/// is live for everyone who joins.
+async fn start_filtered(
+    data: Arc<MultiData>,
+    options: RoomOptions,
+    filter: Option<serde_json::Value>,
+) -> Server {
     let (names, _) = data.resolve_datapackage();
-    let room = Room::new(data, Arc::new(names), options, 1_700_000_000.0);
+    let mut room = Room::new(data, Arc::new(names), options, 1_700_000_000.0);
+    if let Some(rules) = filter {
+        let mut sink = pahoa_room::Recorder::default();
+        room.set_filter(
+            None,
+            pahoa_room::filter::Filter::from_json(&rules).expect("valid rules"),
+            &mut sink,
+        );
+    }
     Server::start(
         room,
         NetConfig {
@@ -538,6 +559,76 @@ async fn connected_precedes_every_other_packet() {
         Some("Connected"),
         "the first packet after Connect must be its reply, not a broadcast that \
          happened to be queued first"
+    );
+
+    server.shutdown().await;
+}
+
+/// **The send half, over a real socket** — the only place it can be tested.
+///
+/// A slot's *receive* filter runs in the room and a `Recorder` sees it, but the
+/// send half runs in the shard, where a broadcast's audience is expanded. The
+/// room never learns who a broadcast reached, so nothing below this level can
+/// tell whether a recipient was skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_filter_keeps_one_print_type_away_from_a_client() {
+    let Some(data) = load(FIXTURE) else {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    };
+    let (_, name, game) = first_player(&data);
+    let server = start_filtered(
+        data,
+        RoomOptions::default(),
+        Some(json!([{"direction": "to_slot", "kind": "print_json", "subtype": "Chat"}])),
+    )
+    .await;
+
+    let mut client = Client::connect(server.local_addr).await;
+    client.wait_for("RoomInfo").await;
+    client.send(connect_packet(&name, &game, 0b111)).await;
+    client.wait_for("Connected").await;
+
+    // Say something. The room broadcasts it as a Chat, which this slot filters.
+    client.send(json!([{"cmd": "Say", "text": "hello"}])).await;
+    // And run a command, whose reply is a different print type — the positive
+    // control, so a test that filtered *everything* could not pass.
+    client
+        .send(json!([{"cmd": "Say", "text": "!players"}]))
+        .await;
+
+    // The control has to be **ordered after** the chat, or the scan can finish
+    // before the chat would have arrived and pass without proving anything —
+    // which is exactly what an earlier version of this test did, happily
+    // filtering `Hint` and still reporting no chat. `!players` is a `Say`, so
+    // the room broadcasts its echo as Chat *before* replying with a
+    // CommandResult; seeing the reply therefore means every chat this test
+    // could produce has already been delivered or dropped.
+    let mut saw_chat = false;
+    let mut saw_control = false;
+    for _ in 0..30 {
+        for packet in client.recv_frame().await {
+            if packet["cmd"] != json!("PrintJSON") {
+                continue;
+            }
+            match packet["type"].as_str() {
+                Some("Chat") => saw_chat = true,
+                Some("CommandResult") => saw_control = true,
+                _ => {}
+            }
+        }
+        if saw_control {
+            break;
+        }
+    }
+
+    assert!(
+        saw_control,
+        "the control never arrived, so this test proves nothing"
+    );
+    assert!(
+        !saw_chat,
+        "a filtered print type reached the client it was filtered for"
     );
 
     server.shutdown().await;

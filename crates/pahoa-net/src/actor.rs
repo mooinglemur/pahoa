@@ -127,8 +127,11 @@ impl EffectSink for Dispatcher<'_> {
         if msgs.is_empty() {
             return;
         }
+        // Tagged from the packets, before they become bytes — the shard sees
+        // only a frame and cannot tell a chat line from an item delivery.
+        let tag = pahoa_room::filter::outbound_tag(msgs).map(std::sync::Arc::new);
         let msg = Outgoing::text(encode(msgs).as_bytes());
-        self.shards.tell(to, ShardMsg::Send { conn: to, msg });
+        self.shards.tell(to, ShardMsg::Send { conn: to, msg, tag });
     }
 
     fn broadcast(&mut self, to: Recipients, msgs: &[ServerPacket]) {
@@ -138,8 +141,9 @@ impl EffectSink for Dispatcher<'_> {
         // Encoded and framed once for every recipient across every shard.
         // Compression deliberately happens further out, in the shards — see
         // `Shards::broadcast`.
+        let tag = pahoa_room::filter::outbound_tag(msgs).map(std::sync::Arc::new);
         let msg = Outgoing::text(encode(msgs).as_bytes());
-        self.shards.broadcast(to, msg);
+        self.shards.broadcast(to, msg, tag);
     }
 
     fn membership_changed(
@@ -161,6 +165,14 @@ impl EffectSink for Dispatcher<'_> {
                 slot,
             },
         );
+    }
+
+    fn filter_changed(
+        &mut self,
+        conn: ConnId,
+        filter: Option<std::sync::Arc<pahoa_room::filter::Filter>>,
+    ) {
+        self.shards.tell(conn, ShardMsg::SetFilter { conn, filter });
     }
 
     fn close(&mut self, conn: ConnId, reason: CloseReason) {

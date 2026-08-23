@@ -614,6 +614,9 @@ impl Room {
             // joining client out of its own join message.
             let client = &self.clients[&conn];
             out.membership_changed(conn, true, client.no_text, Some((client.team, client.slot)));
+            // Before the announcement too: a slot filtering its own joins would
+            // otherwise receive the one for this connection.
+            self.push_filter(conn, out);
             self.announce_join(conn, out);
         }
     }
@@ -1435,13 +1438,55 @@ impl Room {
     /// Replace a filter, or clear it when `filter` is empty.
     ///
     /// `slot` of `None` sets the room-wide default.
-    pub fn set_filter(&mut self, slot: Option<SlotKey>, filter: crate::filter::Filter) {
+    ///
+    /// Pushes the result to the transport for every connection it now affects,
+    /// because the send half is applied where broadcasts are expanded. Changing
+    /// the room-wide default touches every connection *without* a filter of its
+    /// own; changing one slot's touches only that slot's.
+    pub fn set_filter(
+        &mut self,
+        slot: Option<SlotKey>,
+        filter: crate::filter::Filter,
+        out: &mut dyn EffectSink,
+    ) {
         let key = slot.map_or_else(|| Self::ROOM_FILTER.to_string(), Self::filter_key);
         if filter.is_empty() {
             self.filters.remove(&key);
         } else {
             self.filters.insert(key, filter);
         }
+
+        let affected: Vec<ConnId> = match slot {
+            Some(target) => self.by_slot.get(&target).cloned().unwrap_or_default(),
+            // The room default reaches a connection only if its slot has no
+            // filter of its own — a slot's filter replaces rather than adds.
+            None => self
+                .clients
+                .values()
+                .filter(|c| c.auth)
+                .filter(|c| {
+                    !self
+                        .filters
+                        .contains_key(&Self::filter_key((c.team, c.slot)))
+                })
+                .map(|c| c.id)
+                .collect(),
+        };
+        for conn in affected {
+            self.push_filter(conn, out);
+        }
+    }
+
+    /// Tell the transport which filter applies to one connection.
+    fn push_filter(&self, conn: ConnId, out: &mut dyn EffectSink) {
+        let Some(client) = self.clients.get(&conn) else {
+            return;
+        };
+        let filter = self
+            .filter_for((client.team, client.slot))
+            .cloned()
+            .map(Arc::new);
+        out.filter_changed(conn, filter);
     }
 
     /// A filter as configured, without falling back to the room's.

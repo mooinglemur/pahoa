@@ -34,6 +34,32 @@ pub enum PrintJsonType {
     Countdown,
 }
 
+impl PrintJsonType {
+    /// The wire spelling, which is also what a filter rule's `subtype` names.
+    ///
+    /// Serde derives the same strings for serialization; this exposes them to
+    /// code that needs the name without going through JSON.
+    pub fn as_text(self) -> &'static str {
+        match self {
+            Self::ItemSend => "ItemSend",
+            Self::ItemCheat => "ItemCheat",
+            Self::Hint => "Hint",
+            Self::Join => "Join",
+            Self::Part => "Part",
+            Self::Chat => "Chat",
+            Self::ServerChat => "ServerChat",
+            Self::Tutorial => "Tutorial",
+            Self::TagsChanged => "TagsChanged",
+            Self::CommandResult => "CommandResult",
+            Self::AdminCommandResult => "AdminCommandResult",
+            Self::Goal => "Goal",
+            Self::Release => "Release",
+            Self::Collect => "Collect",
+            Self::Countdown => "Countdown",
+        }
+    }
+}
+
 /// Reasons a `Connect` can be refused (`MultiServer.py:1876-1903`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ConnectionRefusedReason {

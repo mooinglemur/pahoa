@@ -37,6 +37,7 @@
 //! chosen so that it could become one — an `all`/`any` object would be another
 //! optional field rather than a new format.
 
+use pahoa_proto::ServerPacket;
 use serde_json::{Map, Value};
 
 /// Which way a message is travelling.
@@ -381,6 +382,66 @@ impl Filter {
             }
         }
         false
+    }
+}
+
+/// What a filter rule can name an outbound frame, if anything.
+///
+/// `None` means the frame is not addressable and will be delivered — which is
+/// the safe direction, and covers everything carrying progression as well as
+/// anything a rule has no vocabulary for.
+///
+/// **A frame carries several packets and is compressed once for everybody**, so
+/// the decision has to be whole-frame: there is no way to drop one packet out
+/// of a shared buffer without re-encoding it per recipient, which is the cost
+/// the shards exist to avoid. A batch therefore only becomes filterable when
+/// every packet in it says the same thing; a mixed frame is delivered intact.
+/// In practice the batches that matter are homogeneous — a run of hint
+/// notifications, a run of chat — so this is not the limitation it sounds like.
+pub fn outbound_tag(msgs: &[ServerPacket]) -> Option<(Kind, Vec<String>)> {
+    let mut tag: Option<(Kind, Vec<String>)> = None;
+    for msg in msgs {
+        let this = one_outbound_tag(msg)?;
+        match &tag {
+            None => tag = Some(this),
+            Some(first) if *first == this => {}
+            Some(_) => return None,
+        }
+    }
+    tag
+}
+
+fn one_outbound_tag(msg: &ServerPacket) -> Option<(Kind, Vec<String>)> {
+    match msg {
+        ServerPacket::PrintJSON(p) => Some((
+            Kind::PrintJson,
+            p.print_type
+                .map(|t| vec![t.as_text().to_string()])
+                .unwrap_or_default(),
+        )),
+        // `Retrieved`, `SetReply` and `Bounced` share one variant because the
+        // reference builds them by overwriting `cmd` in the client's own
+        // request, so the name lives in the map rather than in the type.
+        ServerPacket::Echo(map) => match map.get("cmd").and_then(Value::as_str)? {
+            "Bounced" => Some((
+                Kind::Bounce,
+                map.get("tags")
+                    .and_then(Value::as_array)
+                    .map(|tags| {
+                        tags.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )),
+            "SetReply" => Some((Kind::SetReply, Vec::new())),
+            "Retrieved" => Some((Kind::Retrieved, Vec::new())),
+            _ => None,
+        },
+        // Everything else is progression, a handshake, or a reply a client is
+        // blocking on. See the module docs.
+        _ => None,
     }
 }
 

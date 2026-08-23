@@ -117,6 +117,20 @@ pub trait EffectSink {
     ) {
     }
 
+    /// This connection's slot gained, lost or changed a send filter.
+    ///
+    /// A second copy of state the room owns, for the same reason
+    /// [`EffectSink::membership_changed`] is: what a slot *receives* is decided
+    /// where a broadcast's audience is expanded, which is the transport, not
+    /// the room. Defaulted to nothing so the synchronous `Recorder` need not
+    /// model it.
+    fn filter_changed(
+        &mut self,
+        _conn: ConnId,
+        _filter: Option<std::sync::Arc<crate::filter::Filter>>,
+    ) {
+    }
+
     /// One location was checked, for the room's durable history.
     ///
     /// An effect rather than something the room writes, for the usual reason —

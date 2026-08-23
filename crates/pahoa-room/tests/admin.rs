@@ -1404,3 +1404,167 @@ fn setting_a_connection_state_warns_that_it_will_not_stick() {
         outcome.output
     );
 }
+
+/// The receive half — what a slot **sends** — dropped before the room acts.
+mod filters {
+    use super::*;
+    use pahoa_room::filter::Filter;
+
+    fn bounce(tags: &[&str]) -> pahoa_proto::ClientPacket {
+        pahoa_proto::ClientPacket::Bounce(
+            pahoa_proto::client::Bounce {
+                games: None,
+                slots: Some(vec![]),
+                tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+                data: serde_json::json!({"time": 1.0, "cause": "test", "source": "test"}),
+            },
+            serde_json::Map::new(),
+        )
+    }
+
+    fn rules(v: serde_json::Value) -> Filter {
+        Filter::from_json(&v).expect("valid rules")
+    }
+
+    /// **Dropped before dispatch, so it never happened.** An out-of-spec packet
+    /// the room must not relay is one it must not journal or act on either.
+    #[test]
+    fn a_filtered_bounce_is_not_relayed() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let (slot, name, game) = first_player(&data);
+        let mut room = room_for(data, RoomOptions::default());
+        let conn = join(&mut room, 1, &name, &game, 0b111);
+
+        // A control: with no filter the bounce reaches the room's fan-out.
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+        let before = sink.events.len();
+
+        let mut sink = Recorder::default();
+        room.set_filter(
+            Some((0, slot)),
+            rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
+            ])),
+            &mut sink,
+        );
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+
+        assert!(
+            sink.events.is_empty(),
+            "a filtered bounce must produce no effects at all, got {:?}",
+            sink.events.len()
+        );
+        assert!(
+            before > 0,
+            "the control must actually have relayed something"
+        );
+    }
+
+    /// A rule names one tag; everything else this slot sends still goes.
+    #[test]
+    fn an_unmatched_tag_still_passes() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let (slot, name, game) = first_player(&data);
+        let mut room = room_for(data, RoomOptions::default());
+        let conn = join(&mut room, 1, &name, &game, 0b111);
+
+        let mut sink = Recorder::default();
+        room.set_filter(
+            Some((0, slot)),
+            rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
+            ])),
+            &mut sink,
+        );
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "TrapLink"]), &mut sink);
+        assert!(
+            !sink.events.is_empty(),
+            "a TrapLink must survive a DeathLink rule"
+        );
+    }
+
+    /// A slot's own filter **replaces** the room's rather than adding to it,
+    /// which is what makes "thin everyone except this slot" expressible without
+    /// a negation in the rule language.
+    #[test]
+    fn a_slot_filter_replaces_the_room_default() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let (slot, name, game) = first_player(&data);
+        let mut room = room_for(data, RoomOptions::default());
+        let conn = join(&mut room, 1, &name, &game, 0b111);
+
+        let mut sink = Recorder::default();
+        room.set_filter(
+            None,
+            rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink"}
+            ])),
+            &mut sink,
+        );
+
+        // `AP` is in the tag list on purpose: a bounce is routed to clients
+        // whose *own* tags match, and the joined client carries `AP`. Without
+        // it the bounce reaches nobody and produces no effects regardless of
+        // the filter, which would make both halves of this test pass for a
+        // reason that has nothing to do with filtering.
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+        assert!(sink.events.is_empty(), "the room default should apply");
+
+        // ...until the slot has one of its own, empty or otherwise.
+        let mut sink = Recorder::default();
+        room.set_filter(
+            Some((0, slot)),
+            rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "bounce", "tag": "TrapLink"}
+            ])),
+            &mut sink,
+        );
+        let mut sink = Recorder::default();
+        room.handle(conn, bounce(&["AP", "DeathLink"]), &mut sink);
+        assert!(
+            !sink.events.is_empty(),
+            "the slot's own filter replaces the room's, so DeathLink is no longer named"
+        );
+    }
+
+    #[test]
+    fn filters_survive_a_save_and_restore() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let (mut room, slot, ..) = fresh_room().unwrap();
+        let mut sink = Recorder::default();
+        let filter = rules(serde_json::json!([
+            {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.25}
+        ]));
+        room.set_filter(Some((0, slot)), filter.clone(), &mut sink);
+        room.set_filter(
+            None,
+            rules(serde_json::json!([
+                {"direction": "to_slot", "kind": "print_json", "subtype": "Chat"}
+            ])),
+            &mut sink,
+        );
+
+        let snapshot = room.snapshot();
+        let data = load(FIXTURE).unwrap();
+        let mut restored = room_for(data, RoomOptions::default());
+        restored.restore(snapshot).expect("restores");
+
+        assert_eq!(restored.filter(Some((0, slot))), Some(&filter));
+        assert!(restored.filter(None).is_some(), "the room default too");
+    }
+}

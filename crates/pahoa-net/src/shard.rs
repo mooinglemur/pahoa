@@ -18,6 +18,7 @@ use crate::ws::deflate::Deflater;
 use bytes::Bytes;
 use pahoa_room::{ConnId, Recipients, SlotKey};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// What the writer task for one connection accepts.
@@ -98,6 +99,14 @@ struct Member {
     budget: ConnHandle,
     /// Already dropped for falling behind; nothing more is queued for it.
     lagged: bool,
+    /// The slot's send filter, if it has one.
+    ///
+    /// Held per connection rather than looked up per slot because the shard has
+    /// no slot table beyond `by_slot` and the check runs once per recipient per
+    /// broadcast — a pointer compare and at most a few rule tests, on the path
+    /// a mass release walks. Shared behind an `Arc` so pushing a filter to a
+    /// slot's six connections copies nothing.
+    filter: Option<Arc<pahoa_room::filter::Filter>>,
     /// This connection arrived on the scoped port and receives only what
     /// concerns its own slot.
     ///
@@ -133,19 +142,39 @@ pub enum ShardMsg {
         no_text: bool,
         slot: Option<SlotKey>,
     },
+    /// Replace this connection's send filter. Separate from `Update` because a
+    /// filter changes for reasons that have nothing to do with membership — an
+    /// operator editing it mid-game — and because the room pushes it to every
+    /// connection of a slot at once.
+    SetFilter {
+        conn: ConnId,
+        filter: Option<Arc<pahoa_room::filter::Filter>>,
+    },
     Send {
         conn: ConnId,
         msg: Outgoing,
+        /// What a filter rule may name this frame, if anything. `None` is
+        /// unfilterable and always delivered — see
+        /// `pahoa_room::filter::outbound_tag`.
+        tag: Option<OutTag>,
     },
     Broadcast {
         to: Recipients,
         msg: Outgoing,
+        tag: Option<OutTag>,
     },
     Close {
         conn: ConnId,
         reason: &'static str,
     },
 }
+
+/// What a filter rule can match an outbound frame against.
+///
+/// Resolved once by the actor, from the packets, before they are encoded — the
+/// shard sees only bytes by then. `Arc` because one broadcast hands the same
+/// tag to every shard.
+pub type OutTag = Arc<(pahoa_room::filter::Kind, Vec<String>)>;
 
 /// Handles for the actor to talk to its shards.
 #[derive(Debug, Clone)]
@@ -200,11 +229,12 @@ impl Shards {
     /// compressions rather than O(connections), and it keeps the work off the
     /// actor — measured at ~175µs for a full 140-packet chunk, which across a
     /// mass release would be half a second of mailbox stall.
-    pub fn broadcast(&self, to: Recipients, msg: Outgoing) {
+    pub fn broadcast(&self, to: Recipients, msg: Outgoing, tag: Option<OutTag>) {
         for tx in &self.txs {
             let _ = tx.try_send(ShardMsg::Broadcast {
                 to: to.clone(),
                 msg: msg.clone(),
+                tag: tag.clone(),
             });
         }
     }
@@ -220,6 +250,10 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
     // capping our window below the default is rare — so the linear scan is
     // cheaper than hashing, and it is bounded at the seven legal sizes.
     let mut deflaters: Vec<(u8, Deflater)> = Vec::new();
+    // One generator per shard, seeded from the shard index so two shards do not
+    // draw the same sequence. Independent streams are fine: a sampling rule is
+    // a proportion over many messages, not a schedule.
+    let mut sampler = pahoa_room::filter::Sampler::new(0x9E37_79B9_7F4A_7C15 ^ index as u64);
 
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -242,6 +276,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                         deflate,
                         budget,
                         lagged: false,
+                        filter: None,
                         scoped,
                     },
                 );
@@ -281,11 +316,17 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                     m.no_text = no_text;
                 }
             }
-            ShardMsg::Send { conn, msg } => {
+            ShardMsg::SetFilter { conn, filter } => {
+                if let Some(m) = members.get_mut(&conn) {
+                    m.filter = filter;
+                }
+            }
+            ShardMsg::Send { conn, msg, tag } => {
                 let mut lagged = Vec::new();
                 let mut gone = Vec::new();
                 if let Some(m) = members.get(&conn)
                     && !m.lagged
+                    && !filtered(m, tag.as_deref(), &mut sampler)
                 {
                     let frame = variant(m, &msg, level, &mut deflaters, &mut Vec::new());
                     match deliver(m, frame, &budget) {
@@ -297,7 +338,7 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                 mark_lagged(&mut members, &lagged);
                 mark_gone(&mut members, &gone);
             }
-            ShardMsg::Broadcast { to, msg } => {
+            ShardMsg::Broadcast { to, msg, tag } => {
                 // Memoized across this whole broadcast, per window size, and
                 // never built at all unless a connection here wants it.
                 let mut deflated: Vec<(u8, Bytes)> = Vec::new();
@@ -361,6 +402,14 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                     if m.lagged {
                         continue;
                     }
+                    // **After the audience, before the frame.** A filtered
+                    // recipient costs a rule test and nothing else: the shared
+                    // buffer is still compressed once for everyone who takes
+                    // it, which is the property that makes filtering per
+                    // recipient affordable at all.
+                    if filtered(m, tag.as_deref(), &mut sampler) {
+                        continue;
+                    }
                     let frame = variant(m, &msg, level, &mut deflaters, &mut deflated);
                     match deliver(m, frame, &budget) {
                         Delivery::Sent => {}
@@ -383,6 +432,28 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
         }
     }
     tracing::debug!(shard = index, "shard stopped");
+}
+
+/// Whether this recipient's filter drops this frame.
+///
+/// `None` for either side means deliver: an untagged frame is one no rule can
+/// name — everything carrying progression, among others — and a member with no
+/// filter takes everything. Both are the common case and cost one comparison.
+fn filtered(
+    member: &Member,
+    tag: Option<&(pahoa_room::filter::Kind, Vec<String>)>,
+    sampler: &mut pahoa_room::filter::Sampler,
+) -> bool {
+    let (Some(filter), Some((kind, labels))) = (&member.filter, tag) else {
+        return false;
+    };
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    filter.drops(
+        pahoa_room::filter::Direction::ToSlot,
+        *kind,
+        &labels,
+        &mut || sampler.roll(),
+    )
 }
 
 /// Pick the frame this connection wants, compressing lazily.
@@ -532,6 +603,7 @@ mod tests {
             deflate: None,
             budget: ConnHandle::default(),
             lagged: false,
+            filter: None,
             scoped: false,
         };
         // `held` is *returned*, not merely bound: a receiver dropped here would
@@ -585,6 +657,7 @@ mod tests {
             deflate: None,
             budget: ConnHandle::default(),
             lagged: false,
+            filter: None,
             scoped: false,
         };
         let mut members = HashMap::from([(ConnId(1), member)]);
@@ -626,6 +699,7 @@ mod tests {
             deflate: None,
             budget: ConnHandle::default(),
             lagged: false,
+            filter: None,
             scoped: false,
         };
         let budget = Budget::new(1 << 20, 1 << 16);
@@ -695,6 +769,7 @@ mod tests {
             deflate: None,
             budget: ConnHandle::default(),
             lagged: false,
+            filter: None,
             scoped: false,
         };
 
