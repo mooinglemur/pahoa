@@ -321,6 +321,7 @@ async fn status_reports_the_room() {
     // Queryable, so an operator can find a lock they set days ago rather than
     // discovering it through a confused player.
     assert_eq!(slots[0]["locked"], false);
+    assert_eq!(slots[0]["filtered"], false);
 
     // Two activity questions, and an orchestrator needs both: "is this socket
     // set alive" and "is anyone still playing". A room nobody has played
@@ -417,6 +418,8 @@ async fn metrics_are_prometheus_text() {
         "# TYPE pahoa_check_idle_seconds gauge",
         "pahoa_check_idle_seconds 0",
         "pahoa_slots_locked 0",
+        "pahoa_slots_filtered 0",
+        "# TYPE pahoa_filtered_from_slots_total counter",
     ] {
         assert!(body.contains(expected), "missing {expected:?} in:\n{body}");
     }

@@ -1503,6 +1503,12 @@ impl Room {
         self.filters.get(&key)
     }
 
+    /// Whether anything actually filters this slot — its own rules, or the
+    /// room's when it has none of its own.
+    pub fn filters_slot(&self, key: SlotKey) -> bool {
+        self.filter_for(key).is_some_and(|f| !f.is_empty())
+    }
+
     /// The filter that actually applies to a slot.
     ///
     /// A slot's own filter **replaces** the room's rather than combining with

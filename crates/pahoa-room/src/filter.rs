@@ -55,6 +55,24 @@
 
 use pahoa_proto::ServerPacket;
 use serde_json::{Map, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DROPPED_FROM_SLOT: AtomicU64 = AtomicU64::new(0);
+static DROPPED_TO_SLOT: AtomicU64 = AtomicU64::new(0);
+
+/// Messages dropped because a slot's filter matched what it **sent**.
+pub fn dropped_from_slot() -> u64 {
+    DROPPED_FROM_SLOT.load(Ordering::Relaxed)
+}
+
+/// Messages dropped because a slot's filter matched what it would **receive**.
+///
+/// Counted per *recipient*, not per broadcast: one chat line filtered for forty
+/// slots is forty. That is the number worth watching, because it is what the
+/// filter actually spared those clients.
+pub fn dropped_to_slot() -> u64 {
+    DROPPED_TO_SLOT.load(Ordering::Relaxed)
+}
 
 /// Which way a message is travelling.
 ///
@@ -415,12 +433,24 @@ impl Filter {
             .iter()
             .filter(|rule| rule.matches(direction, kind, labels))
             .max_by_key(|rule| rule.specificity());
-        match winner {
+        let dropped = match winner {
             // `1.0` short-circuits, so an ordinary filter never touches the
             // generator and a room with no sampling rules is deterministic.
             Some(rule) => rule.probability >= 1.0 || roll() < rule.probability,
             None => false,
+        };
+        if dropped {
+            // Counted here rather than at the two call sites, because this is
+            // the one place both directions agree on what "dropped" means — and
+            // a filter that is quietly discarding more than an operator
+            // expected is the failure worth being able to see.
+            match direction {
+                Direction::FromSlot => &DROPPED_FROM_SLOT,
+                Direction::ToSlot => &DROPPED_TO_SLOT,
+            }
+            .fetch_add(1, Ordering::Relaxed);
         }
+        dropped
     }
 
     /// Merge rules in, replacing any with the same matcher.

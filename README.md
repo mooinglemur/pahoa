@@ -311,6 +311,8 @@ these are `https://`; without it, `http://`.
 | `GET /admin/v1/status` | bearer | Clients, save state, net counters, activity, per-slot progress, the room's effective options |
 | `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
 | `POST /admin/v1/command` | bearer | The typed command set below |
+| `GET PUT PATCH DELETE /admin/v1/filter` | bearer | The room-wide send and receive filter |
+| `GET PUT PATCH DELETE /admin/v1/slots/<n>/filter` | bearer | One slot's own |
 | `POST /admin/v1/slots/<n>/password` | bearer | Rotate one slot's password, live |
 | `POST /admin/v1/shutdown` | bearer | Quiesce, save, exit 0 |
 
@@ -503,6 +505,69 @@ the same event two ways depending on who asked — `!getitem` sends a typed
 a bare `PrintJSON` with only the text. A client keying off `type == "ItemCheat"`
 therefore treats the two differently, so pahoa matches upstream on both rather
 than quietly upgrading the console path to the richer form.
+
+### Send and receive filters
+
+A filter drops some of a slot's traffic. Two problems share the mechanism: a
+client that crashes on a particular message needs that message not to reach it,
+and a room drowning in DeathLinks needs fewer of them to go out. Both are "drop
+some of this for this slot", so every rule carries a probability and a plain
+filter is simply one that always fires.
+
+```jsonc
+{"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.25}
+// thin what this slot SENDS to a quarter
+
+{"direction": "to_slot", "kind": "print_json", "subtype": "Chat"}
+// drop chat before it REACHES this slot; `p` omitted means always
+```
+
+**`from_slot` and `to_slot`, never `in` and `out`.** Those are relative and
+nobody remembers to what — a server author reads "inbound" as arriving at the
+room, an organizer reads it as what a player is sending, and the two are
+opposites. A rule read backwards is a filter that silently does nothing.
+
+**Only advisory traffic can be filtered.** `kind` is one of `bounce`,
+`print_json`, `set`, `set_reply`, `retrieved`, `status_update`. Item deliveries,
+`Connected`, scout results and room updates are **recognized and refused** rather
+than quietly ignored, because dropping one desynchronizes the client — the room
+advances a slot's send index as it sends, so the client would never learn what it
+missed. If a client cannot survive one of those, no filter can save it, and the
+honest answer is that the client is broken.
+
+Rules are a **set keyed on the matcher**, not an ordered list, and **the most
+specific wins**: a rule naming a `tag` or `subtype` beats one naming only a
+kind. So a blanket thin and an exemption for one tag coexist in either written
+order, and `PATCH` never has to guess where a rule belongs.
+
+| method | effect |
+|---|---|
+| `GET` | Read. Never a `404` for an unset filter |
+| `PUT` | Replace the ruleset wholesale |
+| `PATCH` | Merge, keyed on each rule's matcher. **Idempotent** |
+| `DELETE` | With a body, remove the named matchers; with none, remove the ruleset |
+
+A slot's filter **replaces** the room's rather than adding to it, which is what
+makes "thin everyone except this slot" expressible without a negation. The reply
+keeps the three states apart:
+
+```jsonc
+{"rules": null, "effective": [...], "inherited": true}   // no ruleset of its own
+{"rules": [],   "effective": [],    "inherited": false}  // exempt from the room's
+{"rules": [...], "effective": [...], "inherited": false} // its own
+```
+
+`rules` is what `PUT`/`PATCH`/`DELETE` edit; `effective` is what actually
+applies. They are separate because a `GET` that returned the inherited rules
+would make `PATCH` either merge into them — silently forking the room's filter
+onto the slot, so later room changes stopped reaching it — or ignore what it had
+just shown.
+
+Filters **persist in the save**, and an explicitly empty one persists as an
+exemption rather than collapsing back into inheritance. `/admin/v1/status`
+reports `filtered` per slot and a `filters` block with how much has been dropped;
+`pahoa_filtered_from_slots_total` and `pahoa_filtered_to_slots_total` are the
+same numbers for a scraper, the second counted **per recipient**.
 
 ### Changing the rules on a live room
 

@@ -63,6 +63,13 @@ pub struct SlotStatus {
     /// Barred from connecting by an administrator. Persisted, and independent
     /// of every password mode.
     pub locked: bool,
+    /// Whether anything is filtering this slot's traffic, from its own rules or
+    /// the room's.
+    ///
+    /// A boolean rather than the rules themselves: a 2000-slot room would
+    /// otherwise repeat the room-wide filter two thousand times in a document
+    /// that is already 2.7 MB. `/admin/v1/slots/<n>/filter` has the detail.
+    pub filtered: bool,
 }
 
 /// The JSON document.
@@ -117,6 +124,12 @@ pub fn document(
             "check_idle_seconds": check_idle_seconds(live.last_check_at),
         },
 
+        "filters": {
+            "slots_filtered": live.slots.iter().filter(|s| s.filtered).count(),
+            "dropped_from_slots": pahoa_room::filter::dropped_from_slot(),
+            "dropped_to_slots": pahoa_room::filter::dropped_to_slot(),
+        },
+
         "options": {
             "hint_cost": live.options.hint_cost,
             "location_check_points": live.options.location_check_points,
@@ -138,6 +151,7 @@ pub fn document(
             "total_checks": s.total_checks,
             "status": s.status,
             "locked": s.locked,
+            "filtered": s.filtered,
         })).collect::<Vec<_>>(),
     })
 }
@@ -280,6 +294,25 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "Slots an administrator has barred from connecting.",
         "gauge",
         live.slots.iter().filter(|s| s.locked).count() as u64,
+    );
+    metric(
+        "pahoa_slots_filtered",
+        "Slots with something filtering their traffic, their own rules or the room's.",
+        "gauge",
+        live.slots.iter().filter(|s| s.filtered).count() as u64,
+    );
+    metric(
+        "pahoa_filtered_from_slots_total",
+        "Messages dropped because a slot's filter matched what it sent.",
+        "counter",
+        pahoa_room::filter::dropped_from_slot(),
+    );
+    metric(
+        "pahoa_filtered_to_slots_total",
+        "Messages dropped because a filter matched what a slot would receive. \
+         Counted per recipient, so one broadcast filtered for forty slots is forty.",
+        "counter",
+        pahoa_room::filter::dropped_to_slot(),
     );
     metric(
         "pahoa_checks_total",
