@@ -306,6 +306,173 @@ fn goal_status_is_irreversible() {
     assert_eq!(room.status((0, slot)), pahoa_proto::ClientStatus::Goal);
 }
 
+/// The message when the *last* slot on a team finishes
+/// (`MultiServer.py:2211-2215`).
+mod team_completion {
+    use super::*;
+
+    /// Goal one slot and return what the room broadcast.
+    ///
+    /// Driven through the admin command rather than a joined client's
+    /// `StatusUpdate`: both reach the same `set_status`, but a join has to
+    /// satisfy the slot's `min_client`, and this fixture has slots requiring
+    /// 0.7.0 — above what the test client claims. Those joins are refused, so a
+    /// client-driven version of this test could never goal every slot and would
+    /// look like a missing feature rather than a harness limit.
+    fn goal(room: &mut Room, slot: u32) -> Vec<String> {
+        let mut sink = Recorder::default();
+        room.admin(
+            pahoa_room::AdminCommand::SetStatus {
+                slot,
+                status: pahoa_proto::ClientStatus::Goal,
+            },
+            &mut sink,
+        );
+        sink.events
+            .iter()
+            .filter_map(|e| match e {
+                pahoa_room::Event::Broadcast { msgs, .. } => Some(msgs),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|p| match p {
+                ServerPacket::PrintJSON(print) => Some(
+                    print
+                        .data
+                        .iter()
+                        .filter_map(|d| d.text.clone())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const DONE: &str = "has completed all of their games! Congratulations!";
+
+    /// **Only when the last one finishes**, and not before.
+    #[test]
+    fn it_waits_for_every_slot_on_the_team() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        // Every slot, not only players: a spectator or group would also have to
+        // be goal, and they start that way.
+        let slots: Vec<u32> = data.slot_info.keys().copied().collect();
+        if slots.len() < 2 {
+            eprintln!("SKIP: fixture has fewer than two slots");
+            return;
+        }
+        let mut room = room_for(data, RoomOptions::default());
+
+        // Everyone but the last: no announcement yet.
+        for (i, slot) in slots.iter().enumerate().take(slots.len() - 1) {
+            let said = goal(&mut room, *slot);
+            assert!(
+                !said.iter().any(|line| line.contains(DONE)),
+                "announced after only {} of {} slots: {said:?}",
+                i + 1,
+                slots.len()
+            );
+        }
+
+        // The last one triggers it.
+        let said = goal(&mut room, *slots.last().unwrap());
+        let line = said
+            .iter()
+            .find(|line| line.contains(DONE))
+            .unwrap_or_else(|| panic!("no team completion in {said:?}"));
+        assert_eq!(
+            line, "Team #1 has completed all of their games! Congratulations!",
+            "the reference's wording, verbatim"
+        );
+    }
+
+    /// Spectators and item-link groups are seeded to goal at load, so they must
+    /// not hold the message back — upstream counts them too, and they satisfy
+    /// the condition for free.
+    #[test]
+    fn non_player_slots_do_not_hold_it_back() {
+        // A seed that actually has a spectator. `FIXTURE` has none, so running
+        // this against it would pass by skipping and prove nothing.
+        const WITH_SPECTATOR: &str = "AP_70327325896653383029.archipelago";
+        if skip_without(WITH_SPECTATOR) {
+            return;
+        }
+        let data = load(WITH_SPECTATOR).unwrap();
+        let non_player = data
+            .slot_info
+            .iter()
+            .filter(|(_, i)| i.slot_type != pahoa_multidata::SlotType::Player)
+            .count();
+        assert!(non_player > 0, "the whole point of this fixture");
+
+        let players: Vec<u32> = data.player_slots().map(|(s, _)| *s).collect();
+        let mut room = room_for(data, RoomOptions::default());
+
+        let mut said = Vec::new();
+        for slot in &players {
+            said = goal(&mut room, *slot);
+        }
+        assert!(
+            said.iter().any(|line| line.contains(DONE)),
+            "every *player* finishing is enough; non-player slots start goaled"
+        );
+    }
+
+    /// It carries no `type`, because `broadcast_text_all` is called with no
+    /// additional arguments — unlike the individual goal message, which is
+    /// typed. Upstream's shape, matched deliberately.
+    #[test]
+    fn it_is_an_untyped_print() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let slots: Vec<u32> = data.slot_info.keys().copied().collect();
+        let mut room = room_for(data, RoomOptions::default());
+
+        let mut sink = Recorder::default();
+        for slot in &slots {
+            sink = Recorder::default();
+            room.admin(
+                pahoa_room::AdminCommand::SetStatus {
+                    slot: *slot,
+                    status: pahoa_proto::ClientStatus::Goal,
+                },
+                &mut sink,
+            );
+        }
+
+        let print = sink
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                pahoa_room::Event::Broadcast { msgs, .. } => Some(msgs),
+                _ => None,
+            })
+            .flatten()
+            .find_map(|p| match p {
+                ServerPacket::PrintJSON(print)
+                    if print
+                        .data
+                        .iter()
+                        .any(|d| d.text.as_deref().is_some_and(|t| t.contains(DONE))) =>
+                {
+                    Some(print)
+                }
+                _ => None,
+            })
+            .expect("the team completion message");
+        assert!(
+            print.print_type.is_none(),
+            "upstream sends this untyped: {:?}",
+            print.print_type
+        );
+    }
+}
+
 #[test]
 fn spectators_and_groups_start_already_goaled() {
     if skip_without(FIXTURE) {

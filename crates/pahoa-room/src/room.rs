@@ -1052,7 +1052,49 @@ impl Room {
 
         if status == ClientStatus::Goal {
             self.on_goal_achieved(key, out);
+            self.announce_team_completion(key.0, out);
         }
+    }
+
+    /// The last slot on a team finishing (`MultiServer.py:2211-2215`).
+    ///
+    /// Emitted after the individual goal announcement and whatever auto-collect
+    /// and auto-release it triggered, which is the reference's order too.
+    ///
+    /// **Untyped, unlike the goal message.** `broadcast_text_all` is called with
+    /// no additional arguments, so this reaches clients as a bare `PrintJSON`
+    /// with only `text` — no `type`, nothing to key on. That is upstream's shape
+    /// and a client rendering milestones by type will show this as plain chat;
+    /// matching is the contract.
+    ///
+    /// The reference asks whether every *other* slot is already goal, because it
+    /// runs before writing this one. pahoa writes first, so the question here is
+    /// whether every slot is — the same set, asked after the fact.
+    ///
+    /// Every slot counts, not only players: `ctx.player_names` is built from all
+    /// of `slot_info`, and spectators and groups are seeded to goal at load, so
+    /// they satisfy it for free. A slot that has never connected is `Unknown`
+    /// and holds the message back, which is what upstream's `player in
+    /// ctx.client_game_state` guard does.
+    fn announce_team_completion(&self, team: u32, out: &mut dyn EffectSink) {
+        let finished = self
+            .data
+            .slot_info
+            .keys()
+            .all(|slot| self.status((team, *slot)) == ClientStatus::Goal);
+        if !finished {
+            return;
+        }
+        out.broadcast(
+            Recipients::AllText,
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(format!(
+                    "Team #{} has completed all of their games! Congratulations!",
+                    team + 1
+                ))],
+                ..Default::default()
+            })],
+        );
     }
 
     /// `on_goal_achieved` (`MultiServer.py:857-866`).
