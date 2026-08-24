@@ -516,11 +516,15 @@ filter is simply one that always fires.
 
 ```jsonc
 {"direction": "from_slot", "kind": "bounce", "tag": "DeathLink", "p": 0.25}
-// thin what this slot SENDS to a quarter
+// of the DeathLinks this slot SENDS, drop one in four and deliver three
 
 {"direction": "to_slot", "kind": "print_json", "subtype": "Chat"}
-// drop chat before it REACHES this slot; `p` omitted means always
+// drop chat before it REACHES this slot; `p` omitted means p = 1, drop all
 ```
+
+**`p` is the share dropped, not the share kept.** `p: 0.25` delivers 75% of what
+matches; `p: 1` is a plain filter and is what an omitted `p` means; `p: 0` never
+fires, which is how a more specific rule exempts itself from a blanket one.
 
 **`from_slot` and `to_slot`, never `in` and `out`.** Those are relative and
 nobody remembers to what — a server author reads "inbound" as arriving at the

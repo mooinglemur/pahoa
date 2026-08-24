@@ -6,6 +6,11 @@
 //! and the only difference is *how much* — which is why every rule carries a
 //! probability rather than DeathLink getting a special case.
 //!
+//! **`p` is the share dropped, not the share kept**: `p: 0.25` drops one
+//! message in four. See [`Rule::probability`], and mind the direction whenever
+//! writing about it — this is the one number here that reads plausibly
+//! backwards.
+//!
 //! # What may be filtered, and what may not
 //!
 //! **Only advisory traffic.** `send_new_items` advances a slot's `send_index`
@@ -219,12 +224,21 @@ pub struct Rule {
     /// A `PrintJSON` type, matched case-insensitively against the wire spelling
     /// (`Chat`, `ItemSend`, …). `None` matches any.
     pub subtype: Option<String>,
-    /// Probability this rule fires when it matches, `0.0..=1.0`.
+    /// **The probability a matching message is _dropped_**, `0.0..=1.0`.
+    ///
+    /// Spelled `p` on the wire, and the direction it runs is the thing to be
+    /// unambiguous about: `p: 0.25` **drops one message in four and delivers
+    /// three**. It is not the share that survives. The first draft of the
+    /// README got this backwards — "thin to a quarter", which reads as keeping
+    /// a quarter — and a filter dropping three times what was intended still
+    /// looks like it is working, so nothing would have caught it.
     ///
     /// **A plain filter is `1.0`**, which is what an absent field means, so the
     /// common case needs no probability at all. Anything below 1 turns the same
     /// rule into a thinning valve — which is all "scale DeathLinks down" ever
     /// was, and why it is a property of every rule rather than a feature of one.
+    /// `0.0` is the other end: a rule that never fires, which is how a more
+    /// specific matcher exempts itself from a blanket one.
     pub probability: f64,
 }
 
@@ -279,7 +293,10 @@ impl Rule {
                     .as_f64()
                     .ok_or_else(|| "\"p\" must be a number".to_string())?;
                 if !(0.0..=1.0).contains(&p) {
-                    return Err(format!("\"p\" must be between 0 and 1, got {p}"));
+                    return Err(format!(
+                        "\"p\" is the share of matching messages to drop and must be \
+                         between 0 and 1, got {p}"
+                    ));
                 }
                 p
             }
@@ -600,6 +617,54 @@ mod tests {
         let r = rule(json!({"direction": "from_slot", "kind": "bounce"})).unwrap();
         assert_eq!(r.probability, 1.0, "an absent p means always");
         assert!(r.tag.is_none(), "and matches every tag");
+    }
+
+    /// **`p` is the share dropped, not the share kept.**
+    ///
+    /// Pinned as behavior because it was documented backwards — "thin to a
+    /// quarter", which reads as keeping a quarter — and nothing at runtime
+    /// would have caught it: a filter dropping three times what an operator
+    /// intended still looks like it is working. Prose can drift back; this
+    /// cannot.
+    #[test]
+    fn p_is_the_share_dropped_not_the_share_kept() {
+        let filter =
+            Filter::from_json(&json!([{"direction": "from_slot", "kind": "bounce", "p": 0.25}]))
+                .unwrap();
+
+        // A quarter of the draws fall below 0.25, and those are the ones that
+        // go. Sampled rather than reasoned about, so an inverted comparison
+        // fails here rather than in a live room.
+        let mut sampler = Sampler::new(0xFACE_FEED);
+        let mut roll = || sampler.roll();
+        let dropped = (0..10_000)
+            .filter(|_| filter.drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll))
+            .count();
+
+        assert!(
+            (2200..2800).contains(&dropped),
+            "p = 0.25 must drop about a quarter and deliver about three quarters; \
+             dropped {dropped} of 10000"
+        );
+    }
+
+    /// The two ends, which are the ones written by hand most often.
+    #[test]
+    fn p_of_one_always_drops_and_p_of_zero_never_does() {
+        let at = |p| {
+            Filter::from_json(&json!([{"direction": "from_slot", "kind": "bounce", "p": p}]))
+                .unwrap()
+        };
+        let mut sampler = Sampler::new(1);
+        let mut roll = || sampler.roll();
+
+        assert!(at(1.0).drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll));
+        for _ in 0..100 {
+            assert!(
+                !at(0.0).drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll),
+                "p = 0 must never fire, which is how an exemption is written"
+            );
+        }
     }
 
     #[test]
