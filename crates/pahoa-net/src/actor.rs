@@ -185,6 +185,11 @@ impl EffectSink for Dispatcher<'_> {
         if msgs.is_empty() {
             return;
         }
+        // Counted here for the same reason the tag is built here: this is the
+        // last point at which these are packets rather than bytes.
+        for msg in msgs {
+            crate::metrics::record_packet_out(msg.cmd());
+        }
         // Tagged from the packets, before they become bytes — the shard sees
         // only a frame and cannot tell a chat line from an item delivery.
         let tag = pahoa_room::filter::outbound_tag(msgs).map(std::sync::Arc::new);
@@ -195,6 +200,12 @@ impl EffectSink for Dispatcher<'_> {
     fn broadcast(&mut self, to: Recipients, msgs: &[ServerPacket]) {
         if msgs.is_empty() {
             return;
+        }
+        // Once per message, not once per recipient: this counter is what the
+        // room produced, and `pahoa_frames_out_total` is what fan-out made of
+        // it. One chat line to two thousand slots is one here.
+        for msg in msgs {
+            crate::metrics::record_packet_out(msg.cmd());
         }
         // Encoded and framed once for every recipient across every shard.
         // Compression deliberately happens further out, in the shards — see

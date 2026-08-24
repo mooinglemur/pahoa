@@ -155,6 +155,105 @@ pub fn packets() -> Vec<(PacketKey, u64)> {
         .collect()
 }
 
+/// Packets the room **produced**, by command.
+///
+/// Counted once per message when the room decides to emit it, whatever its
+/// audience — so one chat line broadcast to two thousand slots is one. That is
+/// the opposite convention to [`deliveries`] below, and deliberately: this
+/// answers "what is the room generating", which is a property of the room, and
+/// the two together say whether a load problem is production or fan-out.
+///
+/// **No slot label, because there is no honest one.** A slot's connections do
+/// not receive the same stream — a `NoText` tracker is left out of chat, and a
+/// scoped connection takes items through a different route than a full-feed one
+/// — so "packets sent to slot 4" has no single value. Attributing per recipient
+/// would also mean expanding every broadcast's audience on the actor, which is
+/// the O(connections) walk the shards exist to avoid: a mass release is ~3,500
+/// broadcasts.
+///
+/// Keyed by `String` so [`pahoa_proto::ServerPacket::cmd`] can borrow from an
+/// `Echo`'s map. Only the first sighting of a command allocates.
+static PACKETS_OUT: LazyLock<RwLock<HashMap<String, AtomicU64>>> = LazyLock::new(RwLock::default);
+
+/// Count one packet the room is emitting.
+pub fn record_packet_out(cmd: &str) {
+    if let Some(count) = PACKETS_OUT.read().expect("not poisoned").get(cmd) {
+        count.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    PACKETS_OUT
+        .write()
+        .expect("not poisoned")
+        .entry(cmd.to_string())
+        .or_default()
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every command the room has emitted, with its count.
+pub fn packets_out() -> Vec<(String, u64)> {
+    PACKETS_OUT
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(cmd, count)| (cmd.clone(), count.load(Ordering::Relaxed)))
+        .collect()
+}
+
+/// Frames and bytes that actually reached a connection's writer, per slot.
+///
+/// **Per recipient connection**, so a slot with a game and two trackers counts
+/// three times for a broadcast all three receive. That is the right convention
+/// here even though it is the wrong one for [`PACKETS_OUT`]: these are bytes the
+/// room really queued, they are what fills the outbound budget and what a lag
+/// disconnect is downstream of, and dividing by connection count would not
+/// recover a per-slot stream anyway — the connections of one slot are not sent
+/// the same things.
+///
+/// Counted where the frame is handed over, so a delivery refused for lag or a
+/// closed writer is not counted as sent.
+static DELIVERED: LazyLock<RwLock<HashMap<Option<pahoa_room::SlotKey>, Delivered>>> =
+    LazyLock::new(RwLock::default);
+
+#[derive(Debug, Default)]
+struct Delivered {
+    frames: AtomicU64,
+    bytes: AtomicU64,
+}
+
+/// Count one frame handed to a connection's writer.
+///
+/// `slot` is `None` before the connection authenticates, which is not nothing:
+/// `RoomInfo` goes to every connection that opens, and a `DataPackage` answered
+/// pre-auth can run to megabytes.
+pub fn record_delivery(slot: Option<pahoa_room::SlotKey>, bytes: usize) {
+    let bytes = bytes as u64;
+    if let Some(d) = DELIVERED.read().expect("not poisoned").get(&slot) {
+        d.frames.fetch_add(1, Ordering::Relaxed);
+        d.bytes.fetch_add(bytes, Ordering::Relaxed);
+        return;
+    }
+    let mut table = DELIVERED.write().expect("not poisoned");
+    let d = table.entry(slot).or_default();
+    d.frames.fetch_add(1, Ordering::Relaxed);
+    d.bytes.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Every slot that has been sent anything, with its frame and byte totals.
+pub fn deliveries() -> Vec<(Option<pahoa_room::SlotKey>, u64, u64)> {
+    DELIVERED
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(slot, d)| {
+            (
+                *slot,
+                d.frames.load(Ordering::Relaxed),
+                d.bytes.load(Ordering::Relaxed),
+            )
+        })
+        .collect()
+}
+
 /// When a client last said anything, or `None` if none has since startup.
 pub fn last_client_message_at() -> Option<std::time::SystemTime> {
     match LAST_CLIENT_MESSAGE_AT.load(Ordering::Relaxed) {

@@ -102,15 +102,28 @@ pub fn drops_by_slot() -> Vec<(DropKey, u64)> {
 }
 
 /// Messages dropped because a slot's filter matched what it **sent**.
+///
+/// Counted **once per message**, because that is where the decision is: a slot
+/// sends one `Say` and the room drops it once, before anyone was going to
+/// receive it.
 pub fn dropped_from_slot() -> u64 {
     total(Direction::FromSlot)
 }
 
 /// Messages dropped because a slot's filter matched what it would **receive**.
 ///
-/// Counted per *recipient*, not per broadcast: one chat line filtered for forty
-/// slots is forty. That is the number worth watching, because it is what the
-/// filter actually spared those clients.
+/// Counted **once per recipient connection**, which is a different denominator
+/// from [`dropped_from_slot`] above and deliberately so: the test runs inside
+/// the shard's per-recipient loop, so one chat line filtered for forty slots is
+/// forty — and eighty if each of them also has a tracker attached. That is the
+/// number worth watching, because it is what the filter actually spared those
+/// clients, and it is the same convention `pahoa_frames_out_total` uses, which
+/// is what makes "what share of this slot's traffic is being filtered" a
+/// meaningful ratio of the two.
+///
+/// The asymmetry is not an accident of implementation. It is the same one
+/// `pahoa_packets_out_total` and `pahoa_frames_out_total` draw: what the room
+/// decided, and what fan-out made of it.
 pub fn dropped_to_slot() -> u64 {
     total(Direction::ToSlot)
 }

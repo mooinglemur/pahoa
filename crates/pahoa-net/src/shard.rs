@@ -524,7 +524,13 @@ fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> Delivery {
         return Delivery::Behind;
     }
     match member.tx.try_send(Outbound::Frame(frame)) {
-        Ok(()) => Delivery::Sent,
+        Ok(()) => {
+            // Counted only once the frame is the writer's problem. A delivery
+            // refused for lag or a closed writer never reached a socket and
+            // must not read as though it had.
+            crate::metrics::record_delivery(member.slot, size);
+            Delivery::Sent
+        }
         Err(e) => {
             // Hand the reservation back rather than leaking it, whichever of
             // the two this was.

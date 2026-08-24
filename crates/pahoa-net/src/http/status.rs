@@ -317,7 +317,9 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
     metric(
         "pahoa_filtered_to_slots_total",
         "Messages dropped because a filter matched what a slot would receive. \
-         Counted per recipient, so one broadcast filtered for forty slots is forty.",
+         Counted per recipient connection, so one broadcast filtered for forty slots is forty, \
+         and eighty if each also has a tracker attached. pahoa_filtered_from_slots_total is \
+         counted once per message instead, because that is where its decision is.",
         "counter",
         pahoa_room::filter::dropped_to_slot(),
     );
@@ -418,6 +420,71 @@ fn by_slot(out: &mut String, live: &Status) {
         }
     }
 
+    // What the room produced, once per message whatever its audience. No slot
+    // label: a slot's connections are not sent the same stream, so there is no
+    // honest one — see `crate::metrics::PACKETS_OUT`.
+    let mut produced = crate::metrics::packets_out();
+    if !produced.is_empty() {
+        produced.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        out.push_str(
+            "# HELP pahoa_packets_out_total Packets the room emitted, by command. Counted once \
+             per message whatever its audience, so one broadcast to two thousand slots is one; \
+             pahoa_frames_out_total is what fan-out made of it.\n\
+             # TYPE pahoa_packets_out_total counter\n",
+        );
+        for (cmd, count) in &produced {
+            out.push_str(&format!(
+                "pahoa_packets_out_total{{cmd=\"{}\"}} {count}\n",
+                label(cmd)
+            ));
+        }
+    }
+
+    let mut delivered = crate::metrics::deliveries();
+    delivered.sort_unstable_by_key(|(slot, _, _)| *slot);
+
+    if delivered.iter().any(|(slot, _, _)| slot.is_some()) {
+        for (name, help, pick) in [
+            (
+                "pahoa_frames_out_total",
+                "WebSocket frames handed to a slot's writers. Per recipient connection, so a \
+                 slot with a game and two trackers counts three for a broadcast all three \
+                 receive.",
+                0,
+            ),
+            (
+                "pahoa_bytes_out_total",
+                "Bytes handed to a slot's writers, after compression. Per recipient connection, \
+                 like pahoa_frames_out_total. This is what fills the outbound budget.",
+                1,
+            ),
+        ] {
+            out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+            for (slot, frames, bytes) in &delivered {
+                if let Some(key) = slot {
+                    let value = if pick == 0 { frames } else { bytes };
+                    out.push_str(&format!("{name}{{{}}} {value}\n", identify(*key)));
+                }
+            }
+        }
+    }
+
+    // Pre-auth is not nothing: every connection that opens is sent `RoomInfo`,
+    // and a `DataPackage` answered before a slot is known runs to megabytes.
+    if let Some((_, frames, bytes)) = delivered.iter().find(|(slot, _, _)| slot.is_none()) {
+        out.push_str(
+            "# HELP pahoa_frames_out_preauth_total Frames sent to connections that held no slot \
+             yet.\n# TYPE pahoa_frames_out_preauth_total counter\n",
+        );
+        out.push_str(&format!("pahoa_frames_out_preauth_total {frames}\n"));
+        out.push_str(
+            "# HELP pahoa_bytes_out_preauth_total Bytes sent to connections that held no slot \
+             yet. RoomInfo goes to every connection that opens, and a DataPackage answered here \
+             can be megabytes.\n# TYPE pahoa_bytes_out_preauth_total counter\n",
+        );
+        out.push_str(&format!("pahoa_bytes_out_preauth_total {bytes}\n"));
+    }
+
     let mut drops = pahoa_room::filter::drops_by_slot();
     if !drops.is_empty() {
         drops.sort_unstable_by_key(|(row, _)| {
@@ -426,8 +493,10 @@ fn by_slot(out: &mut String, live: &Status) {
         out.push_str(
             "# HELP pahoa_filtered_total Messages a filter dropped, by slot, direction and kind. \
              Sums to pahoa_filtered_from_slots_total and pahoa_filtered_to_slots_total, which are \
-             this same table added up. to_slot is counted per recipient, so one chat line \
-             filtered for forty slots is forty.\n\
+             this same table added up. The two directions have different denominators: from_slot \
+             is once per message, where the room makes the decision, and to_slot is once per \
+             recipient connection, matching pahoa_frames_out_total, so one chat line filtered for \
+             forty slots is forty and eighty if each also has a tracker.\n\
              # TYPE pahoa_filtered_total counter\n",
         );
         for (row, count) in &drops {

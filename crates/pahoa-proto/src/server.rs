@@ -287,6 +287,29 @@ pub struct InvalidPacket {
 }
 
 impl ServerPacket {
+    /// The command name, as it goes out on the wire.
+    ///
+    /// Borrowed rather than `&'static str` because of [`Self::Echo`], whose name
+    /// lives in the map: it is whatever `echo` wrote there, which the room only
+    /// ever spells `Retrieved`, `SetReply` or `Bounced` — but the map is the
+    /// authority, and reading it is what keeps this honest if that changes. An
+    /// echo missing its `cmd` is not something the room can construct; it
+    /// answers `Echo` rather than panicking on a map somebody else built.
+    pub fn cmd(&self) -> &str {
+        match self {
+            Self::RoomInfo(_) => "RoomInfo",
+            Self::ConnectionRefused(_) => "ConnectionRefused",
+            Self::Connected(_) => "Connected",
+            Self::ReceivedItems(_) => "ReceivedItems",
+            Self::LocationInfo(_) => "LocationInfo",
+            Self::RoomUpdate(_) => "RoomUpdate",
+            Self::PrintJSON(_) => "PrintJSON",
+            Self::DataPackage(_) => "DataPackage",
+            Self::InvalidPacket(_) => "InvalidPacket",
+            Self::Echo(map) => map.get("cmd").and_then(Value::as_str).unwrap_or("Echo"),
+        }
+    }
+
     /// Build a `Retrieved`/`SetReply`/`Bounced` from the request that caused it.
     ///
     /// Mirrors Python exactly: overwrite `cmd` in place so it keeps its original

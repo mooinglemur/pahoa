@@ -620,18 +620,37 @@ impl Room {
         // requires `Connected` to answer `Connect` sees a `PrintJSON` instead
         // and drops the connection. Most clients tolerate it; depending on the
         // reference's behavior is not a bug on their side.
+        // **Membership before the reply, and the reply before the
+        // announcement.** These are two different orderings because they are
+        // two different channels: `membership_changed` and the filter push are
+        // control messages to the transport and put nothing on the wire, while
+        // `announce_join` is a broadcast that does.
+        //
+        // Telling the transport first costs nothing on the wire and buys two
+        // things. The transport filters broadcasts on its own copy of `auth`,
+        // so a late update leaves the joining client out of its own join
+        // message; and until it knows the slot, everything it delivers is
+        // attributed to no slot at all — which would put `Connected`, the
+        // largest packet a slot ever receives, in the pre-auth bucket rather
+        // than the slot's. On a 2000-slot seed that packet carries every slot's
+        // info, so the misattribution is most of the traffic, not a rounding
+        // error.
+        //
+        // Nothing between here and the reply broadcasts, so moving this earlier
+        // cannot reach a connection that was not going to be reached.
+        if !was_authed {
+            self.clients.get_mut(&conn).expect("registered").auth = true;
+            let client = &self.clients[&conn];
+            out.membership_changed(conn, true, client.no_text, Some((client.team, client.slot)));
+            // A slot filtering its own joins should not receive the one for
+            // this connection. Safe ahead of the reply too: `Connected` and
+            // `ReceivedItems` are both unfilterable, so no rule can name them.
+            self.push_filter(conn, out);
+        }
+
         out.send(conn, &reply);
 
         if !was_authed {
-            self.clients.get_mut(&conn).expect("registered").auth = true;
-            // Before the announcement, not after: the transport filters
-            // broadcasts on its own copy of `auth`, so a late update leaves the
-            // joining client out of its own join message.
-            let client = &self.clients[&conn];
-            out.membership_changed(conn, true, client.no_text, Some((client.team, client.slot)));
-            // Before the announcement too: a slot filtering its own joins would
-            // otherwise receive the one for this connection.
-            self.push_filter(conn, out);
             self.announce_join(conn, out);
         }
     }

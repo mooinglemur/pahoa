@@ -391,13 +391,15 @@ this wants a floor on how long the room has been up before the number counts.
 
 #### The per-slot series
 
-`/admin/v1/metrics` carries two labeled counters alongside its fixed ones. They
-are the only metrics whose *number of series* depends on the room.
+`/admin/v1/metrics` carries labeled counters alongside its fixed ones. They are
+the only metrics whose *number of series* depends on the room.
 
 ```
 pahoa_packets_in_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice",cmd="LocationChecks"} 13512
 pahoa_packets_preauth_total{cmd="Connect"} 91
 pahoa_filtered_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice",direction="from_slot",kind="bounce"} 22
+pahoa_frames_out_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice"} 15
+pahoa_bytes_out_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice"} 3744
 ```
 
 **Labeled at the slot rather than pre-aggregated**, because the finest honest
@@ -418,6 +420,33 @@ mean different things on a dashboard.
 one, and a scraper that groups by it needs nothing rewritten if that ever
 changes, where one that assumed slot numbers were unique would silently add two
 teams together.
+
+**Outbound is two counters, not one, because there is no single number.** A
+slot's connections are not sent the same stream — a `NoText` tracker is left out
+of chat, and a scoped connection takes items by a different route than a
+full-feed one — so "packets sent to slot 4" has no honest value.
+
+- **`pahoa_packets_out_total{cmd}`** is what the room *produced*, once per
+  message whatever its audience. One chat line to two thousand slots is one. No
+  slot label, and none is possible: attributing per recipient would mean
+  expanding every broadcast's audience on the actor, which is the
+  O(connections) walk the shards exist to avoid.
+- **`pahoa_frames_out_total` / `pahoa_bytes_out_total`** are what fan-out made
+  of it, per *recipient connection*. Bytes are post-compression and are what
+  fills the outbound budget, so these are the pair to read next to
+  `pahoa_outbound_queued_bytes` and `pahoa_lag_disconnects_total`.
+
+Together they say whether a load problem is production or fan-out, which the
+room-wide gauges cannot. `pahoa_filtered_total{direction="to_slot"}` shares the
+per-connection denominator, so the share of a slot's traffic being filtered is a
+ratio of the two.
+
+Pre-auth deliveries have their own pair, `pahoa_frames_out_preauth_total` and
+`pahoa_bytes_out_preauth_total`: every connection is sent `RoomInfo` before it
+holds a slot, and a `DataPackage` answered there can run to megabytes.
+**`Connected` is not among them** — the transport is told a connection's
+membership before that reply is dispatched, precisely so the largest packet a
+slot receives lands on the slot.
 
 **Packets arriving before a connection holds a slot get their own metric.**
 `Connect` and `GetDataPackage` are the only two the room answers
@@ -682,7 +711,15 @@ Filters **persist in the save**, and an explicitly empty one persists as an
 exemption rather than collapsing back into inheritance. `/admin/v1/status`
 reports `filtered` per slot and a `filters` block with how much has been dropped;
 `pahoa_filtered_from_slots_total` and `pahoa_filtered_to_slots_total` are the
-same numbers for a scraper, the second counted **per recipient**.
+same numbers for a scraper.
+
+**The two directions count different things, and have to.** `from_slot` is once
+per *message* — a slot sends one `Say` and the room drops it once, before anyone
+was going to receive it. `to_slot` is once per *recipient connection*, because
+that test runs inside the shard's per-recipient loop: one chat line filtered for
+forty slots is forty, and eighty if each of them also has a tracker attached.
+That is the same denominator `pahoa_frames_out_total` uses, which is what makes
+"what share of this slot's traffic is being filtered" a ratio worth taking.
 
 Those two totals are **sums of `pahoa_filtered_total`**, not counters of their
 own, so "how much is being dropped" and "which kind is being dropped" cannot
