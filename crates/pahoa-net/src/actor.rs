@@ -497,6 +497,16 @@ pub async fn run_with_saves(
             ActorMsg::Packets { conn, packets } => {
                 crate::metrics::record_client_message();
                 for packet in packets {
+                    // Attributed to the slot as it stands *now*, before this
+                    // packet is handled: a `Connect` is what creates the slot,
+                    // and counting it against the slot it just made would put
+                    // pre-auth traffic somewhere it can never be seen for what
+                    // it is.
+                    let slot = room
+                        .client(conn)
+                        .filter(|c| c.auth)
+                        .map(|c| (c.team, c.slot));
+                    crate::metrics::record_packet(slot, packet.cmd());
                     room.handle(conn, packet, &mut sink);
                 }
                 push_membership(room, conn, &mut sink);
@@ -545,13 +555,19 @@ pub async fn run_with_saves(
                         compatibility: room.options.compatibility,
                     },
                     // The roster question, so spectators are included: an
-                    // organizer needs to see a connected spectator.
+                    // organizer needs to see a connected spectator. Walked as
+                    // `(team, slot)` — one team today, but a document listing
+                    // slots alone would silently show one team's worth of a
+                    // room that had more.
                     slots: room
                         .multidata()
-                        .connectable_slots()
-                        .map(|(number, info)| {
-                            let key = (0, *number);
+                        .team_slots()
+                        .map(|(team, number)| {
+                            let info = &room.multidata().slot_info[&number];
+                            let number = &number;
+                            let key = (team, *number);
                             crate::http::SlotStatus {
+                                team,
                                 slot: *number,
                                 name: info.name.clone(),
                                 game: info.game.clone(),
@@ -616,7 +632,10 @@ pub async fn run_with_saves(
                         let _ = reply.send(FilterReply::UnknownSlot);
                         continue;
                     }
-                    Some(n) => Some((0, n)),
+                    // A filter belongs to a `(team, slot)`; the path names only
+                    // the slot because there is one team to name. See
+                    // `pahoa_multidata::MultiData::teams`.
+                    Some(n) => Some((pahoa_multidata::ONLY_TEAM, n)),
                     None => None,
                 };
 

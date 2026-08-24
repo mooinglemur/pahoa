@@ -474,14 +474,19 @@ impl Room {
         let mut text = String::new();
         let mut total = 0;
         let mut current_team: i64 = -1;
-        // `slot_info` is a BTreeMap, so this is the sorted (team, slot) walk
-        // the reference does over its own key list.
-        for (slot, info) in &self.data.slot_info {
+        // `sorted(ctx.player_names.keys())` is a (team, slot) walk, and the
+        // team header exists because it can change part way through. `teams()`
+        // outside a `slot_info` BTreeMap walk is the same ordering.
+        for (team, (slot, info)) in self
+            .data
+            .teams()
+            .flat_map(|team| self.data.slot_info.iter().map(move |s| (team, s)))
+        {
             if info.slot_type != SlotType::Player {
                 continue;
             }
             total += 1;
-            let key = (0, *slot);
+            let key = (team, *slot);
             if current_team != key.0 as i64 {
                 text.push_str(&format!(":: Team #{}: ", key.0 + 1));
                 current_team = key.0 as i64;
@@ -502,7 +507,11 @@ impl Room {
 
     /// `get_status_string` (`MultiServer.py:1876-1891`).
     fn cmd_status(&self, conn: ConnId, tag: &str, out: &mut dyn EffectSink) {
-        let team = self.clients.get(&conn).map(|c| c.team).unwrap_or(0);
+        let team = self
+            .clients
+            .get(&conn)
+            .map(|c| c.team)
+            .unwrap_or(pahoa_multidata::ONLY_TEAM);
         let mut text = format!("Player Status on team {team}:");
         for slot in self.data.slot_info.keys() {
             let key = (team, *slot);

@@ -20,7 +20,9 @@
 //! - **save duration** — the last save's wall time, to confirm persistence stays
 //!   off the critical path.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{LazyLock, RwLock};
 
 static MAILBOX_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static MAILBOX_PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -89,6 +91,68 @@ pub fn last_save_at() -> Option<std::time::SystemTime> {
 /// a relaxed store cost nothing on the actor's hot path.
 pub fn record_client_message() {
     LAST_CLIENT_MESSAGE_AT.store(unix_now(), Ordering::Relaxed);
+}
+
+/// Packets in, by the slot that sent them and what they were.
+///
+/// **The finest honest granularity, because it aggregates upward for free and
+/// nothing recovers detail that was summed away.** `sum by (cmd)` is "incoming
+/// packets by command"; joined to a slot's game it is "by game"; and neither of
+/// those can answer the question a room actually gets asked, which is *which
+/// slot* is producing the Bounce storm.
+///
+/// Sparse on purpose. A pair is created the first time it is observed, so a
+/// slot that has never sent a `SetNotify` has no series rather than a zero —
+/// on a 2000-slot room that is the difference between ~28,000 series and
+/// something closer to a tenth of it, and a gap and a zero mean different
+/// things on a dashboard anyway.
+static PACKETS: LazyLock<RwLock<HashMap<PacketKey, AtomicU64>>> = LazyLock::new(RwLock::default);
+
+/// One row of the inbound packet table.
+///
+/// `key` is `None` for a packet that arrived before the connection had a slot —
+/// `Connect` and `GetDataPackage`, the only two the room answers unauthenticated
+/// — which is reported separately rather than under an empty slot label. A room
+/// being hammered by failed `Connect`s is a real thing to want to see, and the
+/// alternative was a series every per-slot aggregation had to remember to
+/// exclude.
+///
+/// A `(team, slot)` rather than a slot number, because that is what identifies
+/// a participant; see `pahoa_multidata::MultiData::teams` for why there is only
+/// ever one team behind it today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PacketKey {
+    pub key: Option<pahoa_room::SlotKey>,
+    pub cmd: &'static str,
+}
+
+/// Count one packet from a client.
+///
+/// Called on the actor, before the packet is handled — so a `Connect` is
+/// attributed to nobody even though handling it is what gives the connection a
+/// slot, which is the honest reading: it arrived before there was one.
+pub fn record_packet(slot: Option<pahoa_room::SlotKey>, cmd: &'static str) {
+    let key = PacketKey { key: slot, cmd };
+    if let Some(count) = PACKETS.read().expect("not poisoned").get(&key) {
+        count.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    PACKETS
+        .write()
+        .expect("not poisoned")
+        .entry(key)
+        .or_default()
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every observed (slot, command) pair with its count.
+pub fn packets() -> Vec<(PacketKey, u64)> {
+    PACKETS
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(key, count)| (*key, count.load(Ordering::Relaxed)))
+        .collect()
 }
 
 /// When a client last said anything, or `None` if none has since startup.

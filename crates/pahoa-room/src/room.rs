@@ -181,21 +181,36 @@ impl Room {
         options: RoomOptions,
         start_time: f64,
     ) -> Self {
+        let teams = data.teams();
+
         let mut client_game_state = HashMap::new();
         // Slots that are not exactly `player` — spectators and item-link groups
         // — count as finished the moment the room loads, so they never block a
-        // team-completion check (`MultiServer.py:551-555`).
+        // team-completion check (`MultiServer.py:551-555`). Per team, exactly as
+        // the reference's `for team in self.clients` does; its loop happens to
+        // have one iteration because its team set is hardcoded.
         for (slot, info) in &data.slot_info {
             if info.slot_type.always_goal() {
-                client_game_state.insert((0, *slot), ClientStatus::Goal);
+                for team in teams.clone() {
+                    client_game_state.insert((team, *slot), ClientStatus::Goal);
+                }
             }
         }
 
         // Hints baked into the seed — placed by the generator, not bought.
+        //
+        // **Given to every team**, where the reference writes only `self.hints[0,
+        // slot]` (`MultiServer.py:548`). That line is unreachable at team 1 for
+        // the same reason everything else here is, and the alternative reading —
+        // that a second team starts without the hints the generator placed —
+        // would make the seed play differently for them. Each team plays the
+        // same multiworld, so each team starts from the same hints.
         let mut hints = HintStore::default();
         for (slot, seeded) in &data.precollected_hints {
             for hint in seeded {
-                hints.upsert((0, *slot), hint.clone());
+                for team in teams.clone() {
+                    hints.upsert((team, *slot), hint.clone());
+                }
             }
         }
 
@@ -784,8 +799,8 @@ impl Room {
             });
         }
         if let Some(rest) = name.strip_prefix("client_status_") {
-            let (team, slot) = parse_team_slot(rest)?;
-            return Some(Value::from(self.status((team, slot)) as u8));
+            let key = self.read_key(rest)?;
+            return Some(Value::from(self.status(key) as u8));
         }
         if let Some(rest) = name.strip_prefix("item_name_groups_") {
             return Some(groups_to_json(
@@ -802,7 +817,7 @@ impl Room {
             ));
         }
         if let Some(rest) = name.strip_prefix("hints_") {
-            let key = parse_team_slot(rest)?;
+            let key = self.read_key(rest)?;
             return Some(self.hints_json(key));
         }
         None
@@ -1297,7 +1312,7 @@ impl Room {
 
         // Hints on the locations just checked become "found". Only hints this
         // slot *finds* can change, so the sweep is bounded by that.
-        for changed in self.recheck_hints(slot) {
+        for changed in self.recheck_hints(key) {
             self.on_changed_hints(changed, out);
         }
 
@@ -1311,17 +1326,19 @@ impl Room {
     /// (`MultiServer.py:758-760`). Doing it eagerly here instead is equivalent —
     /// registering checks is the only thing that can make a hint found — and it
     /// keeps a tracker polling that key off an O(all hints) path.
-    fn recheck_hints(&mut self, finder: u32) -> Vec<SlotKey> {
+    fn recheck_hints(&mut self, finder: SlotKey) -> Vec<SlotKey> {
         let Self {
             hints,
             location_checks,
             ..
         } = self;
-        // Team is 0 throughout; the reference indexes `location_checks` by the
-        // team of the hint list being rechecked, which is the same thing today.
-        hints.recheck(finder, &|slot, location| {
+        // Keyed on the *finder's* team, matching `Hint.re_check(ctx, team)`
+        // reading `ctx.location_checks[team, self.finding_player]`
+        // (`NetUtils.py:406`). One team makes this the same lookup either way;
+        // written this way it stays the right one.
+        hints.recheck(finder, &|key, location| {
             location_checks
-                .get(&(0, slot))
+                .get(&key)
                 .is_some_and(|c| c.contains(&location))
         })
     }
@@ -1580,6 +1597,7 @@ impl Room {
         };
         let sampler = &mut self.sampler;
         filter.drops(
+            key,
             crate::filter::Direction::FromSlot,
             kind,
             labels,
@@ -2323,14 +2341,18 @@ impl Room {
 
     fn players_package(&self) -> Vec<NetworkPlayer> {
         self.data
-            .slot_info
-            .iter()
-            .filter(|(_, info)| info.slot_type == SlotType::Player)
-            .map(|(slot, info)| NetworkPlayer {
-                team: 0,
-                slot: *slot,
-                alias: self.slot_alias((0, *slot)),
-                name: info.name.clone(),
+            .teams()
+            .flat_map(|team| {
+                self.data
+                    .slot_info
+                    .iter()
+                    .filter(|(_, info)| info.slot_type == SlotType::Player)
+                    .map(move |(slot, info)| NetworkPlayer {
+                        team,
+                        slot: *slot,
+                        alias: self.slot_alias((team, *slot)),
+                        name: info.name.clone(),
+                    })
             })
             .collect()
     }
@@ -2528,14 +2550,17 @@ impl Room {
         let empty_checks: Arc<HashSet<i64>> = Arc::new(HashSet::new());
         let empty_items: Arc<Vec<NetworkItem>> = Arc::new(Vec::new());
 
+        // Every `(team, slot)`, not every slot: the tracker document already
+        // carries a team per row, and one that walked slots alone would show a
+        // single team's progress under a field claiming to name which.
         let slots: Vec<TrackerSlot> = self
             .data
-            .slot_info
-            .iter()
-            .map(|(number, info)| {
-                let key = (0, *number);
+            .teams()
+            .flat_map(|team| self.data.slot_info.iter().map(move |s| (team, s)))
+            .map(|(team, (number, info))| {
+                let key = (team, *number);
                 TrackerSlot {
-                    team: key.0,
+                    team,
                     slot: *number,
                     game: info.game.clone(),
                     alias: self.name_aliases.get(&key).cloned(),
@@ -2837,6 +2862,24 @@ fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<Str
 fn parse_team_slot(s: &str) -> Option<(u32, u32)> {
     let (team, slot) = s.split_once('_')?;
     Some((team.parse().ok()?, slot.parse().ok()?))
+}
+
+impl Room {
+    /// The `(team, slot)` a `_read_hints_*` / `_read_client_status_*` key names,
+    /// if it names one that exists.
+    ///
+    /// **Existence is the whole job.** The reference does not parse these keys
+    /// at all — it registers one closure per real `(0, slot)` at load
+    /// (`MultiServer.py:530-533`), so `hints_9_999` is simply not a read key
+    /// and a `Get` for it falls through to ordinary datastorage and answers
+    /// null. Parsing without checking answered `[]` instead: a made-up team or
+    /// slot got a plausible empty hint list, which is a different value for a
+    /// key the reference says nothing about.
+    fn read_key(&self, s: &str) -> Option<SlotKey> {
+        let (team, slot) = parse_team_slot(s)?;
+        let known = self.data.teams().any(|t| t == team) && self.data.slot_info.contains_key(&slot);
+        known.then_some((team, slot))
+    }
 }
 
 /// Name groups as the `_read_*_name_groups_*` keys expose them.

@@ -7,6 +7,8 @@
 
 use super::rfc3339;
 use pahoa_multidata::MultiData;
+use pahoa_room::SlotKey;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 /// The half of a status document only the actor can see.
@@ -52,6 +54,10 @@ pub struct Options {
 
 #[derive(Debug, Clone)]
 pub struct SlotStatus {
+    /// Which team this row is. One team exists, so it is always the same value
+    /// — reported anyway, because a caller that reads it will not need changing
+    /// on the day there is more than one, and one that infers it will.
+    pub team: u32,
     pub slot: u32,
     pub name: String,
     pub game: String,
@@ -142,6 +148,7 @@ pub fn document(
         },
 
         "slots": live.slots.iter().map(|s| serde_json::json!({
+            "team": s.team,
             "slot": s.slot,
             "name": s.name,
             "game": s.game,
@@ -327,6 +334,141 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         live.slots.iter().map(|s| s.total_checks as u64).sum(),
     );
 
+    // The closure holds `out` mutably; nothing above needs it again.
+    let _ = metric;
+    by_slot(&mut out, live);
+    out
+}
+
+/// The labeled series: traffic and drops broken out per slot.
+///
+/// Kept apart from the fixed metrics above because these are the only ones
+/// whose *number of series* depends on the room. Sorted before rendering — the
+/// tables behind them are hash maps, and a scrape whose line order changed
+/// every tick would be unreadable in a diff and gratuitously hard to test.
+fn by_slot(out: &mut String, live: &Status) {
+    let named: HashMap<SlotKey, (&str, &str)> = live
+        .slots
+        .iter()
+        .map(|s| ((s.team, s.slot), (s.name.as_str(), s.game.as_str())))
+        .collect();
+
+    // `player` and `game` are functions of the key — one each — so all four
+    // together are one dimension of size "slots in this room" rather than the
+    // product four labels look like. They travel with the slot so a dashboard
+    // can group by game without joining against a roster.
+    //
+    // **`team` is here even though it is always `0`.** A room has one team and
+    // is refused if its seed says otherwise, so this label carries no
+    // information today — but a scraper that already groups by it needs nothing
+    // rewritten if that ever changes, and one that assumed slot numbers were
+    // unique would silently add two teams together. Cardinality is unaffected:
+    // it is a function of the key like the other two.
+    let identify = |key: SlotKey| {
+        let (name, game) = named.get(&key).copied().unwrap_or(("", ""));
+        // A spectator plays nothing, and `Archipelago` is what the datapackage
+        // already calls that — a value rather than a hole, so nothing has to
+        // special-case an empty label.
+        let game = if game.is_empty() { "Archipelago" } else { game };
+        format!(
+            "team=\"{}\",slot=\"{}\",player=\"{}\",game=\"{}\"",
+            key.0,
+            key.1,
+            label(name),
+            label(game)
+        )
+    };
+
+    let mut packets = crate::metrics::packets();
+    packets.sort_unstable_by_key(|(row, _)| (row.key, row.cmd));
+
+    if packets.iter().any(|(row, _)| row.key.is_some()) {
+        out.push_str(
+            "# HELP pahoa_packets_in_total Packets received from a slot, by command. \
+             Only pairs actually observed appear.\n\
+             # TYPE pahoa_packets_in_total counter\n",
+        );
+        for (row, count) in &packets {
+            if let Some(key) = row.key {
+                out.push_str(&format!(
+                    "pahoa_packets_in_total{{{},cmd=\"{}\"}} {count}\n",
+                    identify(key),
+                    label(row.cmd)
+                ));
+            }
+        }
+    }
+
+    // Separate rather than the same counter with the labels left empty: every
+    // per-slot aggregation would otherwise have to remember to exclude it.
+    if packets.iter().any(|(row, _)| row.key.is_none()) {
+        out.push_str(
+            "# HELP pahoa_packets_preauth_total Packets received before the connection held a \
+             slot, by command. Connect and GetDataPackage are the only two the room answers \
+             unauthenticated, so a climbing count here is failed logins.\n\
+             # TYPE pahoa_packets_preauth_total counter\n",
+        );
+        for (row, count) in &packets {
+            if row.key.is_none() {
+                out.push_str(&format!(
+                    "pahoa_packets_preauth_total{{cmd=\"{}\"}} {count}\n",
+                    label(row.cmd)
+                ));
+            }
+        }
+    }
+
+    let mut drops = pahoa_room::filter::drops_by_slot();
+    if !drops.is_empty() {
+        drops.sort_unstable_by_key(|(row, _)| {
+            (row.key, row.direction.as_text(), row.kind.as_text())
+        });
+        out.push_str(
+            "# HELP pahoa_filtered_total Messages a filter dropped, by slot, direction and kind. \
+             Sums to pahoa_filtered_from_slots_total and pahoa_filtered_to_slots_total, which are \
+             this same table added up. to_slot is counted per recipient, so one chat line \
+             filtered for forty slots is forty.\n\
+             # TYPE pahoa_filtered_total counter\n",
+        );
+        for (row, count) in &drops {
+            out.push_str(&format!(
+                "pahoa_filtered_total{{{},direction=\"{}\",kind=\"{}\"}} {count}\n",
+                identify(row.key),
+                row.direction.as_text(),
+                row.kind.as_text()
+            ));
+        }
+    }
+}
+
+/// How long a label value may be before it is cut.
+///
+/// Player names and games come out of an uploaded seed, so they are untrusted
+/// text of arbitrary length — a 4 KB name is expressible — and a label value
+/// that size is a problem for whoever stores the scrape rather than for the
+/// room. Generous enough that no real name reaches it.
+const MAX_LABEL: usize = 128;
+
+/// Escape a label value for the text exposition, and bound its length.
+///
+/// Backslash, double quote and newline are the three the format cannot carry
+/// raw. Everything here is attacker-supplied in the sense that matters: a seed
+/// is an uploaded zip, so a name containing a quote would otherwise end the
+/// label early and put arbitrary text where a metric name goes.
+fn label(value: &str) -> String {
+    let mut end = value.len().min(MAX_LABEL);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end);
+    for c in value[..end].chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
     out
 }
 

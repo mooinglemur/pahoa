@@ -344,7 +344,7 @@ async fn serve_connection(
     match (client_hello, &port.tls) {
         (true, Some(acceptor)) => {
             let mut stream = acceptor.accept(stream).await?;
-            let Some(upgraded) = handshake(&mut stream, config, &port.router).await? else {
+            let Some(upgraded) = handshake(&mut stream, config, &port.router, peer).await? else {
                 return Ok(());
             };
             // `TlsStream` has no `into_split`, so this pays for a `BiLock`. Only
@@ -367,7 +367,7 @@ async fn serve_connection(
             Err("plaintext refused: TLS is configured".into())
         }
         (false, _) => {
-            let Some(upgraded) = handshake(&mut stream, config, &port.router).await? else {
+            let Some(upgraded) = handshake(&mut stream, config, &port.router, peer).await? else {
                 return Ok(());
             };
             let (read_half, write_half) = stream.into_split();
@@ -477,6 +477,7 @@ async fn handshake<S>(
     stream: &mut S,
     config: &NetConfig,
     router: &crate::http::Router,
+    peer: SocketAddr,
 ) -> Result<Option<ws::accept::Upgraded>, ws::accept::AcceptError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -484,7 +485,7 @@ where
     match ws::accept::accept(stream, &config.accept_config()).await {
         Ok(ws::accept::Accepted::WebSocket(upgraded)) => Ok(Some(upgraded)),
         Ok(ws::accept::Accepted::Http(exchange)) => {
-            let response = router.route(&exchange).await;
+            let response = router.route(&exchange, peer.ip()).await;
             let _ = stream.write_all(&response.render()).await;
             let _ = stream.flush().await;
             Ok(None)

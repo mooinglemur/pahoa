@@ -44,6 +44,14 @@ pub struct LocationStore {
     /// `(start, count)` into `entries`, indexed by slot id. Index 0 is unused:
     /// slot 0 is the server itself and owns no locations.
     index: Box<[(u32, u32)]>,
+    /// How many slot ids the table **declares**, which is not how many have
+    /// locations.
+    ///
+    /// The distinction is a spectator: it is a key in the source mapping with
+    /// an empty dict behind it, so it counts toward the reference's
+    /// `len(self)` while contributing no entries. Losing it made every seed
+    /// with a spectator look like it had a hole in its slot ids.
+    slots: u32,
 }
 
 impl LocationStore {
@@ -58,8 +66,11 @@ impl LocationStore {
             .sum();
         let mut entries = Vec::with_capacity(total);
         let mut max_slot = 0u32;
+        // The key count, which is what the reference's `len(self)` is.
+        let mut slots = 0u32;
 
         for (slot_key, locs) in per_slot {
+            slots += 1;
             let slot_path = path.index(format_args!("{slot_key:?}"));
             let sender = slot_key.u32_(&slot_path)?;
             if sender == 0 {
@@ -83,16 +94,23 @@ impl LocationStore {
             }
         }
 
-        Ok(Self::from_entries(entries, max_slot))
+        let mut store = Self::from_entries(entries, max_slot);
+        store.slots = slots;
+        Ok(store)
     }
 
     /// Sorts and indexes a set of entries. Public so tests and the future
     /// fixture generator can build a store without going through pickle.
+    ///
+    /// Declares one slot per **distinct sender**, because entries are all there
+    /// is to go on here — a caller cannot express a slot that exists and owns
+    /// nothing. [`Self::from_py`] can and does; see `slots`.
     pub fn from_entries(mut entries: Vec<LocationEntry>, max_slot: u32) -> Self {
         entries.sort_unstable_by_key(|e| (e.sender, e.location));
 
         let mut index = vec![(0u32, 0u32); max_slot as usize + 1];
         let mut i = 0usize;
+        let mut slots = 0u32;
         while i < entries.len() {
             let sender = entries[i].sender;
             let start = i;
@@ -100,11 +118,13 @@ impl LocationStore {
                 i += 1;
             }
             index[sender as usize] = (start as u32, (i - start) as u32);
+            slots += 1;
         }
 
         Self {
             entries: entries.into_boxed_slice(),
             index: index.into_boxed_slice(),
+            slots,
         }
     }
 
@@ -159,13 +179,26 @@ impl LocationStore {
             return Err(Error::Locations("no locations at all".into()));
         }
         // Slot ids must be contiguous from 1: a gap means the multidata and the
-        // slot table disagree, and every downstream index would be off.
-        for slot in 1..=self.max_slot() {
-            if self.index[slot as usize].1 == 0 {
-                return Err(Error::Locations(format!(
-                    "slot {slot} has no locations, so slot ids are not contiguous"
-                )));
-            }
+        // slot table disagree, and every downstream index would be off. This is
+        // `len(self) != max(self)` (`NetUtils.py:456`), and it counts *declared*
+        // slots rather than slots with locations — **a spectator declares a slot
+        // and owns nothing**, so requiring entries for every id would refuse
+        // every seed that has one.
+        if self.slots != self.max_slot() {
+            // Name the hole when there is one to name, which there is for a
+            // genuine gap and is not for a table this store cannot represent.
+            let missing = (1..=self.max_slot()).find(|s| self.index[*s as usize].1 == 0);
+            return Err(Error::Locations(match missing {
+                Some(slot) => {
+                    format!("slot {slot} has no locations, so slot ids are not contiguous")
+                }
+                None => format!(
+                    "the locations table declares {} slot ids but the highest is {}, \
+                     so they are not contiguous",
+                    self.slots,
+                    self.max_slot()
+                ),
+            }));
         }
         // Duplicate locations within a slot would make `get` ambiguous.
         for slot in 1..=self.max_slot() {
@@ -237,6 +270,38 @@ mod tests {
         assert!(s.for_slot(0).is_empty());
         assert!(s.for_slot(500).is_empty());
         assert_eq!(s.count_for(500), 0);
+    }
+
+    /// **A spectator declares a slot and owns no locations**, which is a real
+    /// seed shape and not a gap.
+    ///
+    /// Built through `from_py` because that is the only path that can tell
+    /// "declared and empty" from "absent" — which is exactly the distinction
+    /// that was lost. This ran red against every seed in the corpus that has a
+    /// spectator in it, and the room refused to start.
+    #[test]
+    fn a_slot_that_owns_nothing_is_declared_not_missing() {
+        use pahoa_pickle::PyObj;
+
+        let entry = |location: i64| {
+            (
+                PyObj::Int(location),
+                PyObj::Tuple(vec![PyObj::Int(77), PyObj::Int(1), PyObj::Int(0)]),
+            )
+        };
+        // Slots 1 and 2 play; slot 3 is a spectator, present with an empty dict.
+        let table = PyObj::Dict(vec![
+            (PyObj::Int(1), PyObj::Dict(vec![entry(10), entry(11)])),
+            (PyObj::Int(2), PyObj::Dict(vec![entry(20)])),
+            (PyObj::Int(3), PyObj::Dict(vec![])),
+        ]);
+
+        let store = LocationStore::from_py(&table, &Path::root()).expect("parses");
+        assert_eq!(store.max_slot(), 3);
+        assert_eq!(store.count_for(3), 0, "the spectator owns nothing");
+        store
+            .validate()
+            .expect("a spectator is not a hole in the slot ids");
     }
 
     #[test]

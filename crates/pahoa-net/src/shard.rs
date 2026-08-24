@@ -436,19 +436,21 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
 
 /// Whether this recipient's filter drops this frame.
 ///
-/// `None` for either side means deliver: an untagged frame is one no rule can
-/// name — everything carrying progression, among others — and a member with no
-/// filter takes everything. Both are the common case and cost one comparison.
+/// `None` for any of the three means deliver: an untagged frame is one no rule
+/// can name — everything carrying progression, among others — a member with no
+/// filter takes everything, and a connection with no slot yet is nobody's
+/// filter to apply. All are the common case and cost one comparison.
 fn filtered(
     member: &Member,
     tag: Option<&(pahoa_room::filter::Kind, Vec<String>)>,
     sampler: &mut pahoa_room::filter::Sampler,
 ) -> bool {
-    let (Some(filter), Some((kind, labels))) = (&member.filter, tag) else {
+    let (Some(filter), Some((kind, labels)), Some(key)) = (&member.filter, tag, member.slot) else {
         return false;
     };
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     filter.drops(
+        key,
         pahoa_room::filter::Direction::ToSlot,
         *kind,
         &labels,

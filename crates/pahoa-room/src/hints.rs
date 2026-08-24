@@ -97,9 +97,23 @@ impl HintStore {
     /// Mark hints as found once their location is checked (`Hint.re_check`).
     ///
     /// Returns the slots whose hint lists changed, so only those need notifying.
-    pub fn recheck(&mut self, finder: u32, checked: &dyn Fn(u32, i64) -> bool) -> Vec<SlotKey> {
+    ///
+    /// **A check by one team cannot mark another team's hints found.** The same
+    /// hint is held in every team's list that cares about it, and each team
+    /// finds it on their own playthrough; the reference keeps them apart by
+    /// rechecking one `(team, slot)` list at a time (`MultiServer.py:740-742`).
+    /// Only one team exists, so `finder.0` is always the same value — but a
+    /// sweep that ignored it would be wrong rather than merely unexercised.
+    pub fn recheck(
+        &mut self,
+        finder: SlotKey,
+        checked: &dyn Fn(SlotKey, i64) -> bool,
+    ) -> Vec<SlotKey> {
         let mut changed = Vec::new();
         for (key, hints) in self.by_slot.iter_mut() {
+            if key.0 != finder.0 {
+                continue;
+            }
             // Which hints move is decided before touching the `Arc`, so a slot
             // with nothing to update is never cloned out from under a save in
             // flight. This runs on every check batch, so it matters.
@@ -107,9 +121,9 @@ impl HintStore {
                 .iter()
                 .enumerate()
                 .filter(|(_, h)| {
-                    h.finding_player == finder
+                    h.finding_player == finder.1
                         && !(h.found && h.status == HintStatus::Found)
-                        && checked(h.finding_player, h.location)
+                        && checked((finder.0, h.finding_player), h.location)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -381,7 +395,7 @@ mod tests {
         store.upsert((0, 1), hint(1, 5, 100));
         store.upsert((0, 1), hint(1, 5, 200));
 
-        let changed = store.recheck(5, &|_, loc| loc == 100);
+        let changed = store.recheck((0, 5), &|_, loc| loc == 100);
         assert_eq!(changed, [(0, 1)]);
 
         let found: Vec<bool> = store.get((0, 1)).iter().map(|h| h.found).collect();

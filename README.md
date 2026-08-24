@@ -309,7 +309,7 @@ these are `https://`; without it, `http://`.
 | `GET /api/tracker` | see below | The reference WebHost's tracker document |
 | `GET /api/static_tracker` | see below | The half that only changes with the seed |
 | `GET /admin/v1/status` | bearer | Clients, save state, net counters, activity, per-slot progress, the room's effective options |
-| `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text |
+| `GET /admin/v1/metrics` | bearer | The same numbers as Prometheus text, plus the per-slot series |
 | `POST /admin/v1/command` | bearer | The typed command set below |
 | `GET PUT PATCH DELETE /admin/v1/filter` | bearer | The room-wide send and receive filter |
 | `GET PUT PATCH DELETE /admin/v1/slots/<n>/filter` | bearer | One slot's own |
@@ -341,9 +341,21 @@ the CORS rules, and the live-tracker direction this is a stepping stone to.
 It is mutating and reachable from the internet by design — driving it with
 `curl` is a capability worth keeping — so three things follow. The token needs
 at least 32 bytes and pahoa refuses to start with a shorter one; comparison is
-constant-time; and failures are rate-limited, after which the surface stops
-answering for the rest of the window even to the correct token, so the limit
-cannot be used to test guesses.
+constant-time; and authentication *failures* are rate-limited, ten per source
+address per minute, past which that source is answered `429` with a
+`Retry-After` rather than `401`.
+
+**A request presenting the correct token is never refused.** The limit is
+checked after the token and keyed on the connection's peer address, both
+deliberately. Checking it first — one budget for the whole room, before looking
+at what was sent — meant anyone who could reach the port could take the admin
+surface down for everybody, orchestrator included, with eleven wrong guesses a
+minute and no credential. Keying on the source gives an attacker only their own
+budget to spend, and a room-wide ceiling of 500 failures a minute sits behind
+that as an anti-flood backstop, again on the failure path only. None of this is
+what protects the token: at 32 bytes minimum, guessing rate is not the threat.
+The peer address is the TCP one, never `X-Forwarded-For` — this port is reachable
+directly, so a forwarding header on it is attacker-controlled text.
 
 **With no token configured the admin routes return `404`, not `401`.** The
 surface is *absent* rather than locked, so a misconfiguration fails closed and
@@ -376,6 +388,93 @@ moment it comes back. That is the honest answer — the room genuinely was not
 played — but it means a freshly started room can be reap-eligible on arrival,
 which is the opposite of what "it just started" suggests. Anything reaping on
 this wants a floor on how long the room has been up before the number counts.
+
+#### The per-slot series
+
+`/admin/v1/metrics` carries two labeled counters alongside its fixed ones. They
+are the only metrics whose *number of series* depends on the room.
+
+```
+pahoa_packets_in_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice",cmd="LocationChecks"} 13512
+pahoa_packets_preauth_total{cmd="Connect"} 91
+pahoa_filtered_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice",direction="from_slot",kind="bounce"} 22
+```
+
+**Labeled at the slot rather than pre-aggregated**, because the finest honest
+granularity aggregates upward for free and nothing recovers detail that was
+summed away. `sum by (cmd)` is "incoming packets by command"; `sum by (game)` is
+"by game"; and neither of those can answer the question a struggling room
+actually raises, which is *which slot* is producing the Bounce storm.
+
+**`player` and `game` are functions of `(team, slot)`** — one each — so the four
+together are one dimension of size "slots in this room" rather than the product
+four labels look like. The real product is slots × commands, and it stays small
+because **only observed pairs are emitted**: a slot that has never sent a
+`SetNotify` has no series rather than a zero, which on a 2000-slot room is the
+difference between ~28,000 series and a fraction of that. A gap and a zero also
+mean different things on a dashboard.
+
+**`team` is always `0`**, and is a label anyway. See [Teams](#teams): a room has
+one, and a scraper that groups by it needs nothing rewritten if that ever
+changes, where one that assumed slot numbers were unique would silently add two
+teams together.
+
+**Packets arriving before a connection holds a slot get their own metric.**
+`Connect` and `GetDataPackage` are the only two the room answers
+unauthenticated, so a climbing `pahoa_packets_preauth_total{cmd="Connect"}` is
+failed logins — worth seeing, and worth *not* filing under an empty slot label
+that every per-slot query would have to remember to exclude. A `Connect` is
+never also counted against the slot it just created.
+
+`pahoa_filtered_total` is the same breakdown for drops, and
+`pahoa_filtered_from_slots_total` / `pahoa_filtered_to_slots_total` are it added
+up rather than counters of their own — so a drop path that forgot to attribute
+itself goes missing from both instead of showing up as a discrepancy nobody is
+watching for.
+
+Two things a scraper should know. **`player` and `game` come out of an uploaded
+seed**, so they are untrusted text: quotes and backslashes are escaped, and
+values are cut at 128 characters, well past any real name. And these counters
+are **per process** — cumulative, monotonic, and back to zero on a restart, with
+the whole endpoint absent on a room that predates them.
+
+#### Teams
+
+**A multiworld has exactly one team, and pahoa refuses a seed that says
+otherwise.**
+
+Archipelago's data model is team-aware from top to bottom: `(team, slot)` keys
+everything the server owns, `Connected` and `NetworkPlayer` carry a `team`
+field, and `MultiServer.py` threads a team through hints, item queues, status
+and chat. But nothing can produce a second one. Generation writes
+`{name: (0, player)}` unconditionally (`Main.py:337`), and the server seeds
+`self.clients = {0: {}}` at load and never grows it (`MultiServer.py:521`) — so
+a seed naming any other team raises inside `ctx.clients[team][slot]` on the
+connect that used the name, with the room already up and the traceback in a log.
+
+pahoa serves what the reference serves, so it serves one team, and says so at
+load instead:
+
+```
+connect_names["Troy"] is on team 1, and this server serves one team, as the reference does
+```
+
+Two consequences worth knowing.
+
+**Every surface carries the team even though it is always `0`** — the metric
+label above, the `team` on each `/admin/v1/status` and `/api/v1/room` slot row,
+the tracker's rows, the filter and password replies, and an optional `"team"` on
+every admin command that takes a slot. A caller that names team 1 is told it
+does not exist rather than having the field dropped and its command run against
+team 0. None of this is speculative generality: it is what stops a caller
+inferring that slot numbers are unique, which is the assumption that would need
+finding and fixing everywhere on the day upstream grows a second team.
+
+**Internally the walks are already right.** `teams()` yields the one team and
+callers iterate it rather than writing `0`, hint rechecks are keyed on the
+finding team, and precollected hints and always-goal slots are seeded per team.
+So the limit lives in two places — that accessor and the load-time check — and
+not in a literal scattered through every handler.
 
 #### Commands
 
@@ -585,6 +684,10 @@ reports `filtered` per slot and a `filters` block with how much has been dropped
 `pahoa_filtered_from_slots_total` and `pahoa_filtered_to_slots_total` are the
 same numbers for a scraper, the second counted **per recipient**.
 
+Those two totals are **sums of `pahoa_filtered_total`**, not counters of their
+own, so "how much is being dropped" and "which kind is being dropped" cannot
+disagree — see the next section.
+
 ### Changing the rules on a live room
 
 There are two ways in, for two different people holding two different
@@ -669,7 +772,11 @@ Deliberately absent so far, and reachable from no flag:
 
 - **The PROXY protocol.** With TLS terminated here there is less call for it,
   but a room behind a load balancer still sees the balancer's address rather
-  than the client's.
+  than the client's. That matters in one place: the admin limiter counts
+  authentication failures per source address, and behind a balancer that does
+  not preserve the client address every caller would share one budget — which
+  is the behavior the per-source keying replaced, wearing a better name. A room
+  logs the address it sees when a source trips the limit, which is how to check.
 - **Most of the `/` console command set.** `!admin` dispatches into `/option`,
   `/options` and `/help`; the commands that act on a player — `/release`,
   `/collect`, `/send`, `/kick` — are on the admin REST API instead, which

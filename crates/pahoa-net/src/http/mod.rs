@@ -80,7 +80,15 @@ impl Router {
     /// Takes the whole exchange rather than a path, because a route may want the
     /// method, a header or the body — and returns a [`Response`] rather than
     /// writing, so the routing is testable without a socket.
-    pub async fn route(&self, exchange: &crate::ws::accept::Exchange) -> Response {
+    ///
+    /// `source` is the connection's peer address, which only the admin gate
+    /// looks at: it keys authentication failures so that one guesser cannot
+    /// refuse everybody else's calls.
+    pub async fn route(
+        &self,
+        exchange: &crate::ws::accept::Exchange,
+        source: std::net::IpAddr,
+    ) -> Response {
         let request = &exchange.request;
         let method = request.method.as_str();
 
@@ -102,7 +110,9 @@ impl Router {
             let Some(admin) = &self.0.admin else {
                 return Response::not_found();
             };
-            if let admin::Auth::Refused(response) = admin.check(request.header("Authorization")) {
+            if let admin::Auth::Refused(response) =
+                admin.check(request.header("Authorization"), source)
+            {
                 return response;
             }
             return self.admin_route(method, path, &exchange.body).await;
@@ -111,8 +121,10 @@ impl Router {
         match (method, path) {
             ("GET", "/healthz") => Response::text(200, "ok\n"),
             ("GET", "/api/v1/room") => self.room().await,
-            ("GET", "/api/tracker") => self.gated_tracker(request, Which::Live).await,
-            ("GET", "/api/static_tracker") => self.gated_tracker(request, Which::Static).await,
+            ("GET", "/api/tracker") => self.gated_tracker(request, source, Which::Live).await,
+            ("GET", "/api/static_tracker") => {
+                self.gated_tracker(request, source, Which::Static).await
+            }
             // A path that exists but not for this verb is worth distinguishing
             // from one that does not exist at all.
             (_, "/healthz" | "/api/v1/room" | "/api/tracker" | "/api/static_tracker") => {
@@ -136,13 +148,16 @@ impl Router {
     async fn gated_tracker(
         &self,
         request: &crate::ws::handshake::HttpRequest,
+        source: std::net::IpAddr,
         which: Which,
     ) -> Response {
         if !self.0.open_tracker {
             let Some(admin) = &self.0.admin else {
                 return Response::not_found();
             };
-            if let admin::Auth::Refused(response) = admin.check(request.header("Authorization")) {
+            if let admin::Auth::Refused(response) =
+                admin.check(request.header("Authorization"), source)
+            {
                 return response;
             }
         }
@@ -276,6 +291,9 @@ impl Router {
                 200,
                 &serde_json::json!({
                     "ok": true,
+                    // `null` for the room-wide filter, which belongs to no
+                    // slot and so to no team either.
+                    "team": slot.map(|_| pahoa_multidata::ONLY_TEAM),
                     "slot": slot,
                     "rules": rules,
                     "effective": effective,
@@ -362,7 +380,14 @@ impl Router {
             return stopping();
         }
         match rx.await {
-            Ok(true) => Response::json(200, &serde_json::json!({"ok": true, "slot": slot})),
+            Ok(true) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": true,
+                    "team": pahoa_multidata::ONLY_TEAM,
+                    "slot": slot,
+                }),
+            ),
             Ok(false) => Response::json(
                 404,
                 &serde_json::json!({"error": format!("there is no slot {slot} in this seed")}),
@@ -421,15 +446,20 @@ impl Router {
         let seed = &self.0.seed;
         let live = self.live().await;
 
-        // The roster question: who may connect, which includes spectators.
+        // The roster question: who may connect, which includes spectators, and
+        // which is a `(team, slot)` question — one team today, so this is one
+        // row per slot, but a room page written against it does not have to
+        // learn a new shape if that changes.
         let slots: Vec<serde_json::Value> = seed
-            .connectable_slots()
-            .map(|(number, info)| {
+            .team_slots()
+            .map(|(team, number)| {
+                let info = &seed.slot_info[&number];
                 serde_json::json!({
+                    "team": team,
                     "slot": number,
                     "name": info.name,
                     "game": info.game,
-                    "total_checks": seed.locations.count_for(*number),
+                    "total_checks": seed.locations.count_for(number),
                 })
             })
             .collect();

@@ -50,6 +50,15 @@ impl From<pahoa_multidata::Version> for Version {
     }
 }
 
+/// The other way, for comparing this server's version against what a seed
+/// demands — the same three numbers, kept as two types because one is the wire
+/// shape and the other is what a pickle held.
+impl From<Version> for pahoa_multidata::Version {
+    fn from(v: Version) -> Self {
+        Self::new(v.major, v.minor, v.build)
+    }
+}
+
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.build)

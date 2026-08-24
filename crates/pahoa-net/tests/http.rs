@@ -285,10 +285,12 @@ async fn guessing_the_token_is_rate_limited() {
     }
     assert!(saw_429, "guessing should be cut off");
 
-    // And the cutoff is not an oracle: the right token is refused too, while
-    // the window is closed.
+    // And the cutoff does not reach the token holder. Over loopback the guesser
+    // above and this request share a source address, which is the hardest case
+    // for per-source keying and the one that has to work: it is checking the
+    // token before the limit that gets this through, not being somewhere else.
     let response = authed(server.local_addr, "GET", "/admin/v1/status", TOKEN).await;
-    assert_eq!(split(&response).0, "HTTP/1.1 429 Too Many Requests");
+    assert_eq!(split(&response).0, "HTTP/1.1 200 OK");
 
     server.shutdown().await;
 }
@@ -315,6 +317,13 @@ async fn status_reports_the_room() {
 
     let slots = json["slots"].as_array().expect("slots");
     assert_eq!(slots.len(), 2);
+    // Every row names its team. One team exists, so this is always 0 — reported
+    // anyway, because a caller that reads it needs no change on the day there
+    // is more than one, and a caller that infers it does.
+    assert_eq!(slots[0]["team"], 0);
+    assert_eq!(slots[0]["slot"], 1);
+    assert_eq!(slots[1]["team"], 0);
+    assert_eq!(slots[1]["slot"], 2);
     assert_eq!(slots[0]["connected"], false);
     assert_eq!(slots[0]["checks"], 0);
     assert_eq!(slots[0]["status"], "unknown");
@@ -424,14 +433,23 @@ async fn metrics_are_prometheus_text() {
         assert!(body.contains(expected), "missing {expected:?} in:\n{body}");
     }
 
-    // Every line is either a comment or `name value`.
+    // Every line is either a comment or `name[{labels}] value`. Split on the
+    // *last* space rather than every one: a label value is quoted text out of a
+    // seed and routinely contains spaces — "A Link to the Past" is a game name,
+    // not a malformed line.
     for line in body
         .lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
     {
-        let parts: Vec<&str> = line.split(' ').collect();
-        assert_eq!(parts.len(), 2, "malformed exposition line {line:?}");
-        assert!(parts[1].parse::<f64>().is_ok(), "not a number: {line:?}");
+        let (name, value) = line.rsplit_once(' ').expect("a name and a value");
+        assert!(value.parse::<f64>().is_ok(), "not a number: {line:?}");
+        // Escaped quotes are part of a value; only the delimiters count, and
+        // they have to pair up or something in a seed ended a label early.
+        assert_eq!(
+            name.replace(r#"\""#, "").matches('"').count() % 2,
+            0,
+            "unbalanced quotes, so a label value escaped: {line:?}"
+        );
     }
 
     server.shutdown().await;
@@ -1159,5 +1177,268 @@ async fn the_filter_resource_refuses_methods_it_does_not_have() {
     let server = start_with_admin().await;
     let response = send_body(server.local_addr, "POST", "/admin/v1/filter", "[]").await;
     assert_eq!(split(&response).0, "HTTP/1.1 405 Method Not Allowed");
+    server.shutdown().await;
+}
+
+// --- the labeled series ---------------------------------------------------
+//
+// Over a real socket, because the whole point of these is the attribution: a
+// counter that fires is worth nothing if it fires against the wrong slot, and
+// nothing below this level knows what slot a connection ended up holding.
+
+/// A client that speaks just enough of the protocol to be counted.
+struct Ws(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+);
+
+impl Ws {
+    async fn connect(addr: SocketAddr) -> Self {
+        let (ws, _) = tokio_tungstenite::connect_async(&format!("ws://{addr}"))
+            .await
+            .expect("connects");
+        let mut client = Self(ws);
+        client.wait_for("RoomInfo").await;
+        client
+    }
+
+    async fn send(&mut self, packets: serde_json::Value) {
+        use futures_util::SinkExt;
+        self.0
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::to_string(&packets).unwrap(),
+            ))
+            .await
+            .expect("sends");
+    }
+
+    async fn wait_for(&mut self, cmd: &str) -> serde_json::Value {
+        use futures_util::StreamExt;
+        for _ in 0..50 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), self.0.next())
+                .await
+                .expect("no timeout")
+                .expect("open")
+                .expect("readable");
+            let tokio_tungstenite::tungstenite::Message::Text(text) = msg else {
+                continue;
+            };
+            let packets: Vec<serde_json::Value> = serde_json::from_str(&text).expect("JSON");
+            for packet in packets {
+                let seen = packet.get("cmd").and_then(serde_json::Value::as_str);
+                if seen == Some("ConnectionRefused") && cmd != "ConnectionRefused" {
+                    panic!("refused: {packet}");
+                }
+                if seen == Some(cmd) {
+                    return packet;
+                }
+            }
+        }
+        panic!("never saw {cmd}");
+    }
+
+    async fn join(addr: SocketAddr, name: &str, game: &str) -> Self {
+        let mut client = Self::connect(addr).await;
+        client
+            .send(serde_json::json!([{
+                "cmd": "Connect",
+                "password": null,
+                "game": game,
+                "name": name,
+                "uuid": "metrics-test",
+                "version": {"major": 0, "minor": 9, "build": 0, "class": "Version"},
+                "items_handling": 0b111,
+                "tags": ["AP"],
+                "slot_data": false,
+            }]))
+            .await;
+        client.wait_for("Connected").await;
+        client
+    }
+
+    /// Send a `Sync` and wait for its answer.
+    ///
+    /// The marker these tests scan behind: `Sync` is one of the kinds a filter
+    /// may not name, so its reply arrives whatever else is being dropped, and
+    /// seeing it means everything sent before it has already been decided on.
+    /// A marker that a mute could swallow would make the whole test hang or,
+    /// worse, pass without the room having done anything.
+    async fn settle(&mut self) {
+        self.send(serde_json::json!([{"cmd": "Sync"}])).await;
+        self.wait_for("ReceivedItems").await;
+    }
+}
+
+/// Pull one metric line's value out of an exposition, by its full label set.
+fn series(body: &str, prefix: &str) -> Option<u64> {
+    body.lines()
+        .find(|line| line.starts_with(prefix))
+        .and_then(|line| line.rsplit(' ').next())
+        .and_then(|value| value.parse().ok())
+}
+
+/// The counter tables are process-wide, so tests in this binary run against a
+/// shared one even though each has its own server. Every test below therefore
+/// works on a slot number no other test touches, and asserts on rows rather
+/// than on room-wide totals.
+const TROY: &str = r#"team="0",slot="1",player="Troy",game="A Link to the Past""#;
+const KAI: &str = r#"team="0",slot="2",player="Kai",game="Super Metroid""#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn packets_are_counted_by_slot_and_command() {
+    let server = start_with_admin().await;
+    let mut client = Ws::join(server.local_addr, "Troy", "A Link to the Past").await;
+    client.settle().await;
+
+    let (_, body) = split(&authed(server.local_addr, "GET", "/admin/v1/metrics", TOKEN).await);
+
+    assert_eq!(
+        series(
+            &body,
+            &format!(r#"pahoa_packets_in_total{{{TROY},cmd="Sync"}}"#)
+        ),
+        Some(1),
+        "a Sync from slot 1 should be attributed to it:\n{body}"
+    );
+
+    // Connect arrives before the connection holds a slot, so it is counted
+    // where pre-auth traffic can be seen as such rather than under an empty
+    // slot label that every per-slot query has to remember to exclude.
+    assert!(
+        series(&body, r#"pahoa_packets_preauth_total{cmd="Connect"}"#).is_some_and(|n| n >= 1),
+        "the Connect itself belongs to nobody yet:\n{body}"
+    );
+    assert!(
+        !body.contains(&format!(
+            r#"pahoa_packets_in_total{{{TROY},cmd="Connect"}}"#
+        )),
+        "and must not also be attributed to the slot it created:\n{body}"
+    );
+
+    // A pair nobody has sent has no series at all — the sparseness that keeps a
+    // 2000-slot room's exposition from being mostly zeroes.
+    assert!(
+        !body.contains(r#"cmd="SetNotify""#),
+        "unobserved pairs must be absent, not zero:\n{body}"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drop_is_attributed_to_the_slot_and_the_kind() {
+    let server = start_with_admin().await;
+    let addr = server.local_addr;
+    let (status, _) = filter_call(
+        addr,
+        "PUT",
+        "/admin/v1/slots/2/filter",
+        r#"[{"direction":"from_slot","kind":"say"}]"#,
+    )
+    .await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+
+    let mut client = Ws::join(addr, "Kai", "Super Metroid").await;
+    for text in ["into the void", "and again"] {
+        client
+            .send(serde_json::json!([{"cmd": "Say", "text": text}]))
+            .await;
+    }
+    client.settle().await;
+
+    let (_, body) = split(&authed(addr, "GET", "/admin/v1/metrics", TOKEN).await);
+
+    assert_eq!(
+        series(
+            &body,
+            &format!(r#"pahoa_filtered_total{{{KAI},direction="from_slot",kind="say"}}"#)
+        ),
+        Some(2),
+        "both Says were muted and both belong to slot 2:\n{body}"
+    );
+
+    // The room-wide total is this table added up rather than a counter of its
+    // own, so a drop path that failed to attribute a slot would be missing from
+    // both instead of showing up as a discrepancy nobody is watching for. This
+    // sums the rows out of the exposition to check the rendering agrees too.
+    let from_rows: u64 = body
+        .lines()
+        .filter(|line| {
+            line.starts_with("pahoa_filtered_total{") && line.contains(r#"direction="from_slot""#)
+        })
+        .filter_map(|line| line.rsplit(' ').next()?.parse::<u64>().ok())
+        .sum();
+    assert_eq!(
+        series(&body, "pahoa_filtered_from_slots_total"),
+        Some(from_rows),
+        "the total must be the breakdown added up:\n{body}"
+    );
+    assert!(from_rows >= 2, "and there was something to add up:\n{body}");
+
+    server.shutdown().await;
+}
+
+/// A seed is an uploaded zip, so a slot name is arbitrary text arriving in a
+/// label value. A quote in one would end the label early and put the rest of
+/// the name where Prometheus expects a metric.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hostile_slot_name_cannot_break_out_of_its_label() {
+    let hostile = r#"a"} 999 pahoa_owned{x="#;
+    let mut slot_info = BTreeMap::new();
+    slot_info.insert(3, slot(hostile, "Super Metroid"));
+    let mut connect_names = HashMap::new();
+    connect_names.insert(hostile.to_string(), (0, 3));
+    let data = Arc::new(MultiData {
+        seed_name: "hostile".to_string(),
+        generator_version: Version::new(0, 6, 2),
+        minimum_server_version: Version::new(0, 1, 6),
+        minimum_client_versions: HashMap::new(),
+        slot_info,
+        connect_names,
+        locations: LocationStore::default(),
+        precollected_items: HashMap::new(),
+        precollected_hints: HashMap::new(),
+        er_hint_data: HashMap::new(),
+        spheres: Vec::new(),
+        race_mode: false,
+        slot_data: HashMap::new(),
+        server_options: None,
+        embedded_datapackage: BTreeMap::new(),
+    });
+    let (names, _) = data.resolve_datapackage();
+    let server = Server::start(
+        Room::new(
+            data,
+            Arc::new(names),
+            RoomOptions::default(),
+            1_700_000_000.0,
+        ),
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("binds");
+
+    // Sending anything at all is what makes the room render that name.
+    let mut client = Ws::join(server.local_addr, hostile, "Super Metroid").await;
+    client.settle().await;
+
+    let (_, body) = split(&authed(server.local_addr, "GET", "/admin/v1/metrics", TOKEN).await);
+    assert!(
+        body.contains(r#"slot="3""#),
+        "the row has to be rendered for this test to prove anything:\n{body}"
+    );
+    // The name still appears — inside its label, quote escaped, which is the
+    // point. What must not happen is any of it becoming a line of its own.
+    assert!(
+        body.contains(r#"player="a\"} 999 pahoa_owned{x=""#),
+        "the name should be escaped rather than mangled:\n{body}"
+    );
+    assert!(
+        !body.lines().any(|line| line.starts_with("pahoa_owned")),
+        "a slot name escaped its label and became a metric:\n{body}"
+    );
     server.shutdown().await;
 }

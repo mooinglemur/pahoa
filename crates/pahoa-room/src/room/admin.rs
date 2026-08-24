@@ -195,13 +195,18 @@ impl Room {
         }
     }
 
-    /// The slot key for a slot number on team 0.
+    /// The slot key a command targets.
     ///
-    /// Teams are not addressable over this API yet — nothing in the multiworlds
-    /// pahoa serves uses more than one — so this is where that assumption
-    /// lives, rather than spread across every handler.
+    /// The team is [`pahoa_multidata::ONLY_TEAM`] because there is only one and
+    /// a seed saying otherwise is refused at load; a caller that names a team
+    /// explicitly is checked against it by the command parser rather than
+    /// having it dropped. So this is where the assumption lives, once, instead
+    /// of a literal in sixteen handlers.
     fn admin_key(&self, slot: u32) -> Option<SlotKey> {
-        self.data.slot_info.contains_key(&slot).then_some((0, slot))
+        self.data
+            .slot_info
+            .contains_key(&slot)
+            .then_some((pahoa_multidata::ONLY_TEAM, slot))
     }
 
     fn unknown_slot(slot: u32) -> AdminOutcome {
@@ -211,19 +216,25 @@ impl Room {
     /// The same per-slot rendering `!status` produces, without a caller to send
     /// it to.
     fn admin_status(&self) -> Vec<String> {
-        let mut lines = Vec::with_capacity(self.data.slot_info.len() + 1);
+        // Every `(team, slot)`, so the counts stay right rather than reporting
+        // one team's worth of a room that has more.
+        let keys: Vec<SlotKey> = self
+            .data
+            .teams()
+            .flat_map(|team| self.data.slot_info.keys().map(move |slot| (team, *slot)))
+            .collect();
+
+        let mut lines = Vec::with_capacity(keys.len() + 1);
         lines.push(format!(
             "{} of {} slots connected.",
-            self.data
-                .slot_info
-                .keys()
-                .filter(|slot| self.connections_for((0, **slot)) > 0)
+            keys.iter()
+                .filter(|key| self.connections_for(**key) > 0)
                 .count(),
-            self.data.slot_info.len(),
+            keys.len(),
         ));
 
-        for slot in self.data.slot_info.keys() {
-            let key = (0, *slot);
+        for key in keys {
+            let slot = &key.1;
             let connected = self.connections_for(key);
             let status = match self.status(key) {
                 ClientStatus::Goal => " and has finished.",

@@ -60,14 +60,50 @@
 
 use pahoa_proto::ServerPacket;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, RwLock};
 
-static DROPPED_FROM_SLOT: AtomicU64 = AtomicU64::new(0);
-static DROPPED_TO_SLOT: AtomicU64 = AtomicU64::new(0);
+/// Every drop, broken out by the slot it happened to and what it was.
+///
+/// **The only tally there is.** The two room-wide totals below are sums of this
+/// table rather than counters of their own, so "which kind is being dropped"
+/// and "how much is being dropped" cannot disagree — a drop path that forgot to
+/// attribute itself would be missing from both rather than showing up as a
+/// discrepancy nobody notices. Walking it costs a scrape, once a tick.
+///
+/// Read-locked to increment and write-locked only to introduce a pair that has
+/// never been seen, which is what keeps the sparse-by-default property from
+/// costing anything: a slot that has never had a `bounce` dropped has no entry,
+/// and no series.
+static DROPS: LazyLock<RwLock<HashMap<DropKey, AtomicU64>>> = LazyLock::new(RwLock::default);
+
+/// One row of the drop table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DropKey {
+    /// `(team, slot)`, not a slot number: a filter belongs to a participant,
+    /// and slot numbers repeat across teams.
+    pub key: crate::SlotKey,
+    pub direction: Direction,
+    pub kind: Kind,
+}
+
+/// Every observed (slot, direction, kind) with its count.
+///
+/// Observed only: a pair that has never been dropped is absent rather than
+/// zero, because a gap and a zero say different things on a dashboard.
+pub fn drops_by_slot() -> Vec<(DropKey, u64)> {
+    DROPS
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(key, count)| (*key, count.load(Ordering::Relaxed)))
+        .collect()
+}
 
 /// Messages dropped because a slot's filter matched what it **sent**.
 pub fn dropped_from_slot() -> u64 {
-    DROPPED_FROM_SLOT.load(Ordering::Relaxed)
+    total(Direction::FromSlot)
 }
 
 /// Messages dropped because a slot's filter matched what it would **receive**.
@@ -76,7 +112,31 @@ pub fn dropped_from_slot() -> u64 {
 /// slots is forty. That is the number worth watching, because it is what the
 /// filter actually spared those clients.
 pub fn dropped_to_slot() -> u64 {
-    DROPPED_TO_SLOT.load(Ordering::Relaxed)
+    total(Direction::ToSlot)
+}
+
+fn total(direction: Direction) -> u64 {
+    DROPS
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .filter(|(key, _)| key.direction == direction)
+        .map(|(_, count)| count.load(Ordering::Relaxed))
+        .sum()
+}
+
+/// Count one drop against the slot it happened to.
+fn record_drop(key: DropKey) {
+    if let Some(count) = DROPS.read().expect("not poisoned").get(&key) {
+        count.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    DROPS
+        .write()
+        .expect("not poisoned")
+        .entry(key)
+        .or_default()
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 /// Which way a message is travelling.
@@ -89,7 +149,7 @@ pub fn dropped_to_slot() -> u64 {
 /// silently does nothing, written by hand, usually while a room is on fire.
 ///
 /// `FromSlot` and `ToSlot` cannot be read backwards from either chair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     /// What this slot **sends**: client to room. Where a chatty DeathLink
     /// source is thinned, and where an out-of-spec packet is dropped before the
@@ -121,7 +181,7 @@ impl Direction {
 ///
 /// Deliberately **not** every `ServerPacket` and `ClientPacket` variant: this is
 /// the closed set of things it is safe to drop, and the absences are the point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// A `Bounce` inbound, or a `Bounced` outbound. The relay in both
     /// directions, and where DeathLink, TrapLink and their successors live.
@@ -460,6 +520,7 @@ impl Filter {
     /// numbers from it would move hint selection and break that comparison.
     pub fn drops(
         &self,
+        key: crate::SlotKey,
         direction: Direction,
         kind: Kind,
         labels: &[&str],
@@ -480,12 +541,14 @@ impl Filter {
             // Counted here rather than at the two call sites, because this is
             // the one place both directions agree on what "dropped" means — and
             // a filter that is quietly discarding more than an operator
-            // expected is the failure worth being able to see.
-            match direction {
-                Direction::FromSlot => &DROPPED_FROM_SLOT,
-                Direction::ToSlot => &DROPPED_TO_SLOT,
-            }
-            .fetch_add(1, Ordering::Relaxed);
+            // expected is the failure worth being able to see. It is also why
+            // `key` is a parameter: attributing at the decision keeps the
+            // breakdown and the totals the same numbers.
+            record_drop(DropKey {
+                key,
+                direction,
+                kind,
+            });
         }
         dropped
     }
@@ -624,6 +687,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Whose drops these are. The counters are process-wide, so a test that
+    /// reads them back picks a slot number nothing else uses rather than
+    /// sharing this one.
+    const SLOT: crate::SlotKey = (0, 1);
+
     fn rule(v: serde_json::Value) -> Result<Rule, String> {
         Rule::from_json(&v)
     }
@@ -637,6 +705,64 @@ mod tests {
         let r = rule(json!({"direction": "from_slot", "kind": "bounce"})).unwrap();
         assert_eq!(r.probability, 1.0, "an absent p means always");
         assert!(r.tag.is_none(), "and matches every tag");
+    }
+
+    /// **Every drop lands in the table, whatever it was.**
+    ///
+    /// The room-wide totals are sums of this table, so a drop that failed to
+    /// attribute itself would not show up as a discrepancy between the two —
+    /// it would be missing from both, which is the silent version. What can be
+    /// checked is that no reachable (direction, kind) pairing escapes
+    /// attribution, and that each lands under its own labels rather than being
+    /// piled onto one.
+    #[test]
+    fn every_kind_and_direction_is_attributed() {
+        // A slot number no other test in this crate touches, because the table
+        // is process-wide.
+        const MINE: crate::SlotKey = (0, 41);
+
+        let mut expected = Vec::new();
+        for direction in [Direction::FromSlot, Direction::ToSlot] {
+            for kind in Kind::ALL {
+                if !kind.travels(direction) {
+                    continue;
+                }
+                let filter = Filter::from_json(&json!([{
+                    "direction": direction.as_text(),
+                    "kind": kind.as_text(),
+                }]))
+                .unwrap();
+                assert!(
+                    filter.drops(MINE, direction, kind, &[], &mut always()),
+                    "{} {} should have been dropped",
+                    direction.as_text(),
+                    kind.as_text()
+                );
+                expected.push(DropKey {
+                    key: MINE,
+                    direction,
+                    kind,
+                });
+            }
+        }
+        // A bounce both ways, three kinds a slot only sends, three it only
+        // receives. A new kind has to move this number, which is the point.
+        assert_eq!(expected.len(), 8, "the reachable pairings");
+
+        let mine: Vec<_> = drops_by_slot()
+            .into_iter()
+            .filter(|(row, _)| row.key == MINE)
+            .collect();
+        for key in expected {
+            let count = mine.iter().find(|(k, _)| *k == key).map(|(_, n)| *n);
+            assert_eq!(
+                count,
+                Some(1),
+                "{} {} was not attributed on its own",
+                key.direction.as_text(),
+                key.kind.as_text()
+            );
+        }
     }
 
     /// **`p` is the share dropped, not the share kept.**
@@ -658,7 +784,7 @@ mod tests {
         let mut sampler = Sampler::new(0xFACE_FEED);
         let mut roll = || sampler.roll();
         let dropped = (0..10_000)
-            .filter(|_| filter.drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll))
+            .filter(|_| filter.drops(SLOT, Direction::FromSlot, Kind::Bounce, &[], &mut roll))
             .count();
 
         assert!(
@@ -678,10 +804,10 @@ mod tests {
         let mut sampler = Sampler::new(1);
         let mut roll = || sampler.roll();
 
-        assert!(at(1.0).drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll));
+        assert!(at(1.0).drops(SLOT, Direction::FromSlot, Kind::Bounce, &[], &mut roll));
         for _ in 0..100 {
             assert!(
-                !at(0.0).drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll),
+                !at(0.0).drops(SLOT, Direction::FromSlot, Kind::Bounce, &[], &mut roll),
                 "p = 0 must never fire, which is how an exemption is written"
             );
         }
@@ -695,6 +821,7 @@ mod tests {
         .unwrap();
 
         assert!(filter.drops(
+            SLOT,
             Direction::FromSlot,
             Kind::Bounce,
             &["DeathLink"],
@@ -702,12 +829,14 @@ mod tests {
         ));
         // Case-insensitively, because tags are conventions rather than a schema.
         assert!(filter.drops(
+            SLOT,
             Direction::FromSlot,
             Kind::Bounce,
             &["deathlink"],
             &mut always()
         ));
         assert!(!filter.drops(
+            SLOT,
             Direction::FromSlot,
             Kind::Bounce,
             &["TrapLink"],
@@ -716,6 +845,7 @@ mod tests {
         // And the same tag going the other way is a different rule: thinning
         // what a slot sends says nothing about what it receives.
         assert!(!filter.drops(
+            SLOT,
             Direction::ToSlot,
             Kind::Bounce,
             &["DeathLink"],
@@ -734,8 +864,8 @@ mod tests {
             .unwrap();
             let mut low = || 0.25;
             let mut high = || 0.75;
-            assert!(filter.drops(Direction::FromSlot, Kind::Bounce, &[tag], &mut low));
-            assert!(!filter.drops(Direction::FromSlot, Kind::Bounce, &[tag], &mut high));
+            assert!(filter.drops(SLOT, Direction::FromSlot, Kind::Bounce, &[tag], &mut low));
+            assert!(!filter.drops(SLOT, Direction::FromSlot, Kind::Bounce, &[tag], &mut high));
         }
     }
 
@@ -750,7 +880,7 @@ mod tests {
             rolled = true;
             0.0
         };
-        assert!(filter.drops(Direction::FromSlot, Kind::Bounce, &[], &mut roll));
+        assert!(filter.drops(SLOT, Direction::FromSlot, Kind::Bounce, &[], &mut roll));
         assert!(!rolled, "p = 1 should short-circuit");
     }
 
@@ -767,19 +897,21 @@ mod tests {
         .unwrap();
 
         assert!(filter.drops(
+            SLOT,
             Direction::FromSlot,
             Kind::Bounce,
             &["AP", "DeathLink"],
             &mut always()
         ));
         assert!(!filter.drops(
+            SLOT,
             Direction::FromSlot,
             Kind::Bounce,
             &["AP", "TrapLink"],
             &mut always()
         ));
         // A bounce with no tags matches only an untagged rule.
-        assert!(!filter.drops(Direction::FromSlot, Kind::Bounce, &[], &mut always()));
+        assert!(!filter.drops(SLOT, Direction::FromSlot, Kind::Bounce, &[], &mut always()));
     }
 
     /// **The most specific rule wins, whichever order it is written in.**
@@ -798,6 +930,7 @@ mod tests {
             let filter = Filter::from_json(&order).unwrap();
             assert!(
                 !filter.drops(
+                    SLOT,
                     Direction::FromSlot,
                     Kind::Bounce,
                     &["TrapLink"],
@@ -807,6 +940,7 @@ mod tests {
             );
             assert!(
                 filter.drops(
+                    SLOT,
                     Direction::FromSlot,
                     Kind::Bounce,
                     &["DeathLink"],

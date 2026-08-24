@@ -276,6 +276,49 @@ fn read_only_keys_expose_room_state() {
     );
 }
 
+/// A read key naming a team or slot that does not exist is **not a read key**.
+///
+/// The reference never parses these: it registers one closure per real
+/// `(0, slot)` at load (`MultiServer.py:530-533`), so `hints_9_999` falls
+/// through to ordinary datastorage and answers null. Parsing the numbers
+/// without checking them answered a plausible empty hint list instead, which is
+/// a different value for a key upstream says nothing about.
+#[test]
+fn a_read_key_for_a_team_or_slot_that_does_not_exist_is_not_special() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b001);
+
+    let real = format!("_read_hints_0_{slot}");
+    let other_team = format!("_read_hints_1_{slot}");
+    let no_slot = "_read_hints_0_9999".to_string();
+    let other_team_status = format!("_read_client_status_1_{slot}");
+
+    let mut sink = Recorder::default();
+    room.handle(
+        conn,
+        get(&[&real, &other_team, &no_slot, &other_team_status]),
+        &mut sink,
+    );
+
+    let replies = echoes(&sink, conn, &room);
+    let keys = &replies[0]["keys"];
+    // The control: the key that does exist resolves, so a reply where
+    // everything is null cannot pass this test.
+    assert_eq!(keys[&real], json!([]), "the real key should resolve");
+    for absent in [&other_team, &no_slot, &other_team_status] {
+        assert_eq!(
+            keys[absent],
+            json!(null),
+            "{absent} should be an ordinary unset key"
+        );
+    }
+}
+
 #[test]
 fn a_bounce_reaches_everyone_carrying_the_tag_including_the_sender() {
     if skip_without(FIXTURE) {

@@ -25,6 +25,14 @@ pub const MAX_FORMAT_VERSION: u8 = 3;
 /// Minimum client version the reference server enforces (`MultiServer.py:51`).
 pub const MIN_CLIENT_VERSION: Version = Version::new(0, 5, 0);
 
+/// The one team a multiworld has.
+///
+/// Not a magic zero: see [`MultiData::teams`] for why there is exactly one and
+/// what would have to change for there to be more. Every `(team, slot)` key in
+/// this server carries a team because Archipelago's does; this is the value it
+/// carries.
+pub const ONLY_TEAM: u32 = 0;
+
 /// Generators older than this kept a much lower client floor
 /// (`MultiServer.py:509-514`).
 const LEGACY_GENERATOR_CUTOFF: Version = Version::new(0, 6, 2);
@@ -289,6 +297,38 @@ impl MultiData {
             .filter(|(_, s)| s.slot_type == SlotType::Player)
     }
 
+    /// Every team in this seed, ascending. **Always exactly one, team 0.**
+    ///
+    /// Archipelago's data model is team-aware throughout — `(team, slot)` keys
+    /// everything the server owns, the wire carries a `team` field, and
+    /// `MultiServer.py` threads a team through hints, item queues and status —
+    /// but **nothing can produce a second one**. Generation writes
+    /// `{name: (0, player)}` unconditionally (`Main.py:337`), and the server
+    /// seeds `self.clients = {0: {}}` at load and never grows it
+    /// (`MultiServer.py:521`), so a seed naming any other team raises inside
+    /// `ctx.clients[team][slot]` on the connect that used the name.
+    ///
+    /// pahoa serves what the reference serves, so this is one team, and
+    /// [`Self::validate`] refuses a seed that says otherwise rather than
+    /// half-serving it. What this accessor buys is that the limit is written
+    /// down **once**: callers walk teams instead of writing `0`, so the day
+    /// upstream can generate a second one, this and the validation move and the
+    /// walks already work.
+    pub fn teams(&self) -> impl Iterator<Item = u32> + Clone + use<> {
+        std::iter::once(ONLY_TEAM)
+    }
+
+    /// Every `(team, slot)` a client may connect as, ascending.
+    ///
+    /// The roster question. One team today, so this is `connectable_slots` with
+    /// a team on it — which is the point: a surface written against this keeps
+    /// working when there is more than one, where a surface walking slots alone
+    /// would show half the participants and look right.
+    pub fn team_slots(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.teams()
+            .flat_map(move |team| self.connectable_slots().map(move |(slot, _)| (team, *slot)))
+    }
+
     /// Slots a client may **connect as** — players and spectators, groups
     /// excluded.
     ///
@@ -330,10 +370,21 @@ impl MultiData {
 
         // Every connectable name must name a slot that exists, or a client
         // could authenticate into a slot with no world behind it.
-        for (name, (_, slot)) in &self.connect_names {
+        for (name, (team, slot)) in &self.connect_names {
             if !self.slot_info.contains_key(slot) {
                 return Err(Error::Locations(format!(
                     "connect_names[{name:?}] points at slot {slot}, which has no slot_info"
+                )));
+            }
+            // Refused rather than half-served. See `Self::teams`: the reference
+            // cannot run this seed either, but it fails at the connect that
+            // used the name, with a traceback, after the room is already up.
+            // Saying so at load is the same limit stated where it can be acted
+            // on.
+            if *team != ONLY_TEAM {
+                return Err(Error::Locations(format!(
+                    "connect_names[{name:?}] is on team {team}, and this server serves \
+                     one team, as the reference does"
                 )));
             }
         }

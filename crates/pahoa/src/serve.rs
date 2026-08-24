@@ -66,6 +66,14 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     let data =
         Arc::new(MultiData::parse(&raw).map_err(|e| format!("{}: {e}", args.multidata.display()))?);
 
+    // The consistency checks the reference runs at load, run at load. A seed
+    // that demands a newer server, points a connect name at a slot that does
+    // not exist, or names a team this server cannot serve is refused here —
+    // before the port binds, so an orchestrator sees a room that never came up
+    // rather than one that came up and then behaved oddly.
+    data.validate(pahoa_room::SERVER_VERSION.into())
+        .map_err(|e| format!("{}: {e}", args.multidata.display()))?;
+
     let (names, report) = data.resolve_datapackage();
     if !report.unresolved.is_empty() {
         // Not fatal — names degrade to "Unknown item (ID:n)" — but an operator

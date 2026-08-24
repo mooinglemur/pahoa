@@ -187,7 +187,26 @@ fn integer(object: &Object, field: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("{field:?} is required and must be a whole number"))
 }
 
+/// The target of a command, which is a `(team, slot)` even though the team can
+/// only be one value.
+///
+/// **`"team"` is accepted and checked rather than ignored.** A caller that
+/// sends one and has it silently dropped would be addressing team 0 while
+/// believing otherwise, which is the failure worth refusing; and a caller that
+/// starts sending it now needs no change on the day there is more than one to
+/// send. See `pahoa_multidata::MultiData::teams` for why there is not.
 fn slot(object: &Object) -> Result<u32, String> {
+    if let Some(team) = object.get("team") {
+        let team = team
+            .as_i64()
+            .ok_or_else(|| "\"team\" must be a number".to_string())?;
+        if team != i64::from(pahoa_multidata::ONLY_TEAM) {
+            return Err(format!(
+                "team {team} does not exist: this server serves one team, \
+                 as the reference does"
+            ));
+        }
+    }
     let raw = integer(object, "slot")?;
     u32::try_from(raw).map_err(|_| format!("{raw} is not a slot number"))
 }
@@ -481,6 +500,23 @@ mod tests {
     fn a_negative_slot_is_refused() {
         let e = parsed(r#"{"command":"release","slot":-1}"#).unwrap_err();
         assert!(e.contains("not a slot number"), "{e}");
+    }
+
+    /// A caller may name the team, and naming one that does not exist is an
+    /// error rather than a command that quietly ran against team 0.
+    #[test]
+    fn a_team_may_be_named_and_is_checked() {
+        assert!(parsed(r#"{"command":"release","slot":1,"team":0}"#).is_ok());
+        // Omitted is the same as naming the one that exists.
+        assert!(parsed(r#"{"command":"release","slot":1}"#).is_ok());
+
+        let e = parsed(r#"{"command":"release","slot":1,"team":1}"#).unwrap_err();
+        assert!(
+            e.contains("team 1") && e.contains("one team"),
+            "should name the team and the limit: {e}"
+        );
+        let e = parsed(r#"{"command":"release","slot":1,"team":"0"}"#).unwrap_err();
+        assert!(e.contains("must be a number"), "{e}");
     }
 
     #[test]
