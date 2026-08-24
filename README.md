@@ -531,13 +531,25 @@ nobody remembers to what — a server author reads "inbound" as arriving at the
 room, an organizer reads it as what a player is sending, and the two are
 opposites. A rule read backwards is a filter that silently does nothing.
 
-**Only advisory traffic can be filtered.** `kind` is one of `bounce`,
+**Only advisory traffic can be filtered.** `kind` is one of `bounce`, `say`,
 `print_json`, `set`, `set_reply`, `retrieved`, `status_update`. Item deliveries,
 `Connected`, scout results and room updates are **recognized and refused** rather
 than quietly ignored, because dropping one desynchronizes the client — the room
 advances a slot's send index as it sends, so the client would never learn what it
 missed. If a client cannot survive one of those, no filter can save it, and the
 honest answer is that the client is broken.
+
+**`say` mutes a slot; a `to_slot` `print_json`/`Chat` rule deafens one.** Chat
+crosses the room as two different kinds — `say` on the way in, `print_json` on
+the way out — so which one to name depends on whether the slot is the source or
+the audience. Naming the wrong one produces a filter that works perfectly on the
+wrong person.
+
+**Muting also disables that slot's `!` commands**, which is worth knowing before
+using it. Every `Say` is chat first and a command second — the room broadcasts
+the raw line before looking at whether it starts with `!` — so there is no point
+downstream where the two are still separable. A muted slot cannot `!hint` or
+`!release`.
 
 Rules are a **set keyed on the matcher**, not an ordered list, and **the most
 specific wins**: a rule naming a `tag` or `subtype` beats one naming only a

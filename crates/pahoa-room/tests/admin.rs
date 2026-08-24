@@ -1426,6 +1426,96 @@ mod filters {
         Filter::from_json(&v).expect("valid rules")
     }
 
+    /// **Muting a slot: `say` from_slot.**
+    ///
+    /// The mirror of a `to_slot` `print_json`/`Chat` rule — this stops what the
+    /// slot says reaching anyone, where that one stops other people's chat
+    /// reaching the slot.
+    #[test]
+    fn a_muted_slot_says_nothing_to_the_room() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let (slot, name, game) = first_player(&data);
+        let mut room = room_for(data, RoomOptions::default());
+        let conn = join(&mut room, 1, &name, &game, 0b111);
+
+        // Control: chat reaches the room before the filter exists.
+        let mut sink = Recorder::default();
+        room.handle(conn, say("hello"), &mut sink);
+        assert!(
+            broadcasts(&sink).iter().any(|l| l.contains("hello")),
+            "the control must actually have said something"
+        );
+
+        let mut sink = Recorder::default();
+        room.set_filter(
+            Some((0, slot)),
+            Some(rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "say"}
+            ]))),
+            &mut sink,
+        );
+        let mut sink = Recorder::default();
+        room.handle(conn, say("hello again"), &mut sink);
+        assert!(
+            sink.events.is_empty(),
+            "a muted slot must produce no effects at all: {:?}",
+            broadcasts(&sink)
+        );
+    }
+
+    /// **A mute also takes the slot's `!` commands**, because a `Say` *is* the
+    /// command — the room broadcasts the raw line before looking at whether it
+    /// starts with `!`, so the two are not separable at this point. Pinned
+    /// because it is surprising, not because it is desirable.
+    #[test]
+    fn a_mute_also_disables_that_slots_commands() {
+        if skip_without(FIXTURE) {
+            return;
+        }
+        let data = load(FIXTURE).unwrap();
+        let (slot, name, game) = first_player(&data);
+        let mut room = room_for(data, RoomOptions::default());
+        let conn = join(&mut room, 1, &name, &game, 0b111);
+
+        let mut sink = Recorder::default();
+        room.set_filter(
+            Some((0, slot)),
+            Some(rules(serde_json::json!([
+                {"direction": "from_slot", "kind": "say"}
+            ]))),
+            &mut sink,
+        );
+
+        let mut sink = Recorder::default();
+        room.handle(conn, say("!players"), &mut sink);
+        assert!(
+            sink.events.is_empty(),
+            "a command arrives as a Say, so a mute takes it too: {:?}",
+            broadcasts(&sink)
+        );
+    }
+
+    /// `say` only travels one way, and asking for the other is an error rather
+    /// than a rule that never fires.
+    #[test]
+    fn say_cannot_be_filtered_toward_a_slot() {
+        let e = Filter::from_json(&serde_json::json!([
+            {"direction": "to_slot", "kind": "say"}
+        ]))
+        .unwrap_err();
+        assert!(e.contains("cannot travel to_slot"), "{e}");
+        // The relay in that direction is a print_json, which is what to name.
+        assert!(
+            Filter::from_json(&serde_json::json!([
+                {"direction": "to_slot", "kind": "print_json", "subtype": "Chat"}
+            ]))
+            .is_ok()
+        );
+    }
+
     /// **Dropped before dispatch, so it never happened.** An out-of-spec packet
     /// the room must not relay is one it must not journal or act on either.
     #[test]

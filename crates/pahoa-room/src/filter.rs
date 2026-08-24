@@ -138,6 +138,21 @@ pub enum Kind {
     Retrieved,
     /// A `StatusUpdate`, inbound.
     StatusUpdate,
+    /// A `Say`, inbound: this slot is **muted**.
+    ///
+    /// The mirror of a `print_json`/`Chat` rule, and worth keeping straight:
+    /// muting a slot stops what it says reaching anyone, while
+    /// `{"direction":"to_slot","kind":"print_json","subtype":"Chat"}` stops
+    /// *other people's* chat reaching it. One is a gag, the other is earplugs.
+    ///
+    /// **It also disables that slot's `!` commands**, which is not obvious and
+    /// is not a bug. Every `Say` is chat first and a command second — the room
+    /// broadcasts the raw line before looking at whether it starts with `!` —
+    /// so there is no point downstream where the two are still separable
+    /// without reimplementing the command parser inside the filter. A muted
+    /// slot cannot `!hint` or `!release`. If those need to survive a mute, this
+    /// wants a narrowing field rather than a different drop point.
+    Say,
 }
 
 impl Kind {
@@ -149,6 +164,7 @@ impl Kind {
             Self::SetReply => "set_reply",
             Self::Retrieved => "retrieved",
             Self::StatusUpdate => "status_update",
+            Self::Say => "say",
         }
     }
 
@@ -160,19 +176,21 @@ impl Kind {
             "set_reply" => Self::SetReply,
             "retrieved" => Self::Retrieved,
             "status_update" => Self::StatusUpdate,
+            "say" => Self::Say,
             _ => return None,
         })
     }
 
     /// Every kind, so a refusal can list the alternatives without repeating the
     /// table.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Bounce,
         Self::PrintJson,
         Self::Set,
         Self::SetReply,
         Self::Retrieved,
         Self::StatusUpdate,
+        Self::Say,
     ];
 
     /// Whether this kind can travel this way at all.
@@ -183,7 +201,9 @@ impl Kind {
     pub fn travels(self, direction: Direction) -> bool {
         match self {
             Self::Bounce => true,
-            Self::Set | Self::StatusUpdate => direction == Direction::FromSlot,
+            // `say` is what a slot sends; the room relays it as a `print_json`,
+            // which is the other kind and the other direction.
+            Self::Set | Self::StatusUpdate | Self::Say => direction == Direction::FromSlot,
             Self::PrintJson | Self::SetReply | Self::Retrieved => direction == Direction::ToSlot,
         }
     }

@@ -2827,6 +2827,9 @@ fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<Str
         ClientPacket::Bounce(b, _) => Some((Kind::Bounce, b.tags.clone().unwrap_or_default())),
         ClientPacket::Set(..) => Some((Kind::Set, Vec::new())),
         ClientPacket::StatusUpdate(_) => Some((Kind::StatusUpdate, Vec::new())),
+        // Mutes the slot. Note this catches `!` commands too, because a `Say`
+        // *is* the command — see `filter::Kind::Say`.
+        ClientPacket::Say(_) => Some((Kind::Say, Vec::new())),
         _ => None,
     }
 }
