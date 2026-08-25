@@ -155,6 +155,50 @@ pub fn packets() -> Vec<(PacketKey, u64)> {
         .collect()
 }
 
+/// Wire bytes of the protocol messages a slot **sent**.
+///
+/// Frame bytes off the socket — header, mask and compressed payload — so this
+/// is comparable with [`DELIVERED`]'s outbound bytes rather than with the
+/// inflated text the room parses. A `Set` from a tracker that arrives
+/// compressed counts what it cost to carry, not what it expanded to.
+///
+/// **Only messages carrying client packets.** Pings, pongs, binary frames and
+/// anything that fails to decode are excluded, because the reader task that
+/// sees those bytes does not know which slot to charge them to and the actor
+/// never learns they happened. That makes this exactly the byte counterpart of
+/// [`PACKETS`], with the same attribution and the same pre-auth split, and the
+/// help text says so rather than implying it covers the socket.
+static BYTES_IN: LazyLock<RwLock<HashMap<Option<pahoa_room::SlotKey>, AtomicU64>>> =
+    LazyLock::new(RwLock::default);
+
+/// Count one message read from a client.
+///
+/// `slot` is resolved when the message arrives, before any of its packets are
+/// handled — so a frame carrying `Connect` is pre-auth even though handling it
+/// is what creates the slot, matching [`record_packet`].
+pub fn record_bytes_in(slot: Option<pahoa_room::SlotKey>, bytes: usize) {
+    if let Some(count) = BYTES_IN.read().expect("not poisoned").get(&slot) {
+        count.fetch_add(bytes as u64, Ordering::Relaxed);
+        return;
+    }
+    BYTES_IN
+        .write()
+        .expect("not poisoned")
+        .entry(slot)
+        .or_default()
+        .fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+/// Every slot that has sent anything, with its byte total.
+pub fn bytes_in() -> Vec<(Option<pahoa_room::SlotKey>, u64)> {
+    BYTES_IN
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(slot, count)| (*slot, count.load(Ordering::Relaxed)))
+        .collect()
+}
+
 /// Packets the room **produced**, by command.
 ///
 /// Counted once per message when the room decides to emit it, whatever its
@@ -267,6 +311,177 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Connections that authenticated, by whether they negotiated
+/// permessage-deflate.
+///
+/// **The question is which games' clients support compression**, and answering
+/// it needs two facts that are settled in different places: the extension is
+/// negotiated during the WebSocket handshake, before `Connect`, so no game is
+/// known yet; and the game arrives with `Connect`, known only to the room. They
+/// meet on the shard's `Member`, which is where this is counted.
+///
+/// **Per connection, not per slot.** A slot's clients can differ — a game
+/// client may compress while a tracker on the same slot does not — so the
+/// connection is the honest unit, and `sum by (game, deflate)` is the panel.
+///
+/// A counter rather than a gauge: cumulative survives churn and answers the
+/// question over a room's life, where a gauge of currently-connected would
+/// need decrementing on every disconnect to say anything at all.
+static DEFLATE: LazyLock<RwLock<HashMap<(pahoa_room::SlotKey, bool), AtomicU64>>> =
+    LazyLock::new(RwLock::default);
+
+/// Count one connection reaching a slot, and whether it compresses.
+pub fn record_client_deflate(key: pahoa_room::SlotKey, deflate: bool) {
+    if let Some(count) = DEFLATE.read().expect("not poisoned").get(&(key, deflate)) {
+        count.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    DEFLATE
+        .write()
+        .expect("not poisoned")
+        .entry((key, deflate))
+        .or_default()
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every observed (slot, deflate) pair with its count.
+pub fn client_deflate() -> Vec<((pahoa_room::SlotKey, bool), u64)> {
+    DEFLATE
+        .read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(key, count)| (*key, count.load(Ordering::Relaxed)))
+        .collect()
+}
+
+/// The HTTP surface, counted apart from the game.
+///
+/// **Deliberately separate from the WebSocket traffic above**, even though both
+/// arrive on the same port and through the same accept path. They are different
+/// workloads with different operators: one is players, the other is an
+/// orchestrator polling on a reconcile loop, plus whatever the internet points
+/// at a public port. Summing them would hide a scraper behind a busy room, and
+/// hide a busy room behind a scraper.
+///
+/// A WebSocket upgrade is *not* counted here. It is an HTTP request in form
+/// only, and everything it goes on to carry is already the game's.
+static HTTP: LazyLock<RwLock<HashMap<HttpKey, Exchange>>> = LazyLock::new(RwLock::default);
+
+/// One row of the HTTP table.
+///
+/// `route` is a **template**, not the path as sent: `/admin/v1/slots/7/filter`
+/// counts under `/admin/v1/slots/{slot}/filter`, and anything unrecognized
+/// under `other`. A public port gets scanned, and a label taken from the
+/// request line would let a scanner mint series until the scrape fell over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HttpKey {
+    pub route: &'static str,
+    pub method: &'static str,
+    pub status: u16,
+}
+
+#[derive(Debug, Default)]
+struct Exchange {
+    count: AtomicU64,
+    request_bytes: AtomicU64,
+    response_bytes: AtomicU64,
+}
+
+/// The methods worth a label, mapped to `'static` so the table cannot be grown
+/// by inventing verbs.
+fn known_method(method: &str) -> &'static str {
+    match method {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "PATCH" => "PATCH",
+        "DELETE" => "DELETE",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        _ => "other",
+    }
+}
+
+/// Count one HTTP request and its answer.
+pub fn record_http(
+    route: &'static str,
+    method: &str,
+    status: u16,
+    request_bytes: usize,
+    response_bytes: usize,
+) {
+    let key = HttpKey {
+        route,
+        method: known_method(method),
+        status,
+    };
+    let bump = |e: &Exchange| {
+        e.count.fetch_add(1, Ordering::Relaxed);
+        e.request_bytes
+            .fetch_add(request_bytes as u64, Ordering::Relaxed);
+        e.response_bytes
+            .fetch_add(response_bytes as u64, Ordering::Relaxed);
+    };
+    if let Some(e) = HTTP.read().expect("not poisoned").get(&key) {
+        bump(e);
+        return;
+    }
+    bump(HTTP.write().expect("not poisoned").entry(key).or_default());
+}
+
+/// Every observed (route, method, status) with its count and byte totals.
+pub fn http() -> Vec<(HttpKey, u64, u64, u64)> {
+    HTTP.read()
+        .expect("not poisoned")
+        .iter()
+        .map(|(key, e)| {
+            (
+                *key,
+                e.count.load(Ordering::Relaxed),
+                e.request_bytes.load(Ordering::Relaxed),
+                e.response_bytes.load(Ordering::Relaxed),
+            )
+        })
+        .collect()
+}
+
+/// Requests that never parsed into anything, so they have no route to file
+/// under. A port scan looks like this.
+static HTTP_MALFORMED: AtomicU64 = AtomicU64::new(0);
+/// Admin credentials that were wrong or missing.
+static AUTH_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Requests refused because the source had already failed too often.
+static AUTH_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_http_malformed() {
+    HTTP_MALFORMED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// One wrong or missing admin token.
+///
+/// Worth its own counter rather than reading it off
+/// `pahoa_http_requests_total{status="401"}`: that number also carries the
+/// tracker's gate, and this is the one an operator alerts on.
+pub fn record_auth_failure() {
+    AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_auth_rate_limited() {
+    AUTH_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn http_malformed() -> u64 {
+    HTTP_MALFORMED.load(Ordering::Relaxed)
+}
+
+pub fn auth_failures() -> u64 {
+    AUTH_FAILURES.load(Ordering::Relaxed)
+}
+
+pub fn auth_rate_limited() -> u64 {
+    AUTH_RATE_LIMITED.load(Ordering::Relaxed)
 }
 
 /// Resident set size, in bytes.

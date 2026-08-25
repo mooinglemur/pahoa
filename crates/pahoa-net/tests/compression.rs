@@ -124,6 +124,12 @@ impl RawClient {
 
     /// Drain whatever has arrived, so the server's outbound queue keeps moving.
     async fn drain(&mut self) {
+        let _ = self.drain_bytes().await;
+    }
+
+    /// The same, keeping the bytes so a caller can inspect the framing.
+    async fn drain_bytes(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
         let mut buf = [0u8; 65536];
         while let Ok(Ok(n)) =
             tokio::time::timeout(Duration::from_millis(50), self.stream.read(&mut buf)).await
@@ -131,8 +137,53 @@ impl RawClient {
             if n == 0 {
                 break;
             }
+            out.extend_from_slice(&buf[..n]);
         }
+        out
     }
+}
+
+/// Walk server-to-client frames, yielding `(rsv1, opcode)` for each complete
+/// one.
+///
+/// RSV1 is the permessage-deflate bit (RFC 7692 §7.2.3.1), and reading it off
+/// the wire is the only way to check the property that matters: a client which
+/// did not negotiate the extension cannot decode a frame carrying it, so
+/// sending one is a broken connection rather than a wasted CPU cycle. Server
+/// frames are never masked, which keeps this walk short.
+fn frames(bytes: &[u8]) -> Vec<(bool, u8)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 2 <= bytes.len() {
+        let rsv1 = bytes[i] & 0x40 != 0;
+        let opcode = bytes[i] & 0x0f;
+        let masked = bytes[i + 1] & 0x80 != 0;
+        let mut len = (bytes[i + 1] & 0x7f) as usize;
+        let mut header = 2;
+        if len == 126 {
+            if i + 4 > bytes.len() {
+                break;
+            }
+            len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+            header = 4;
+        } else if len == 127 {
+            if i + 10 > bytes.len() {
+                break;
+            }
+            len =
+                u64::from_be_bytes(bytes[i + 2..i + 10].try_into().expect("eight bytes")) as usize;
+            header = 10;
+        }
+        if masked {
+            header += 4;
+        }
+        if i + header + len > bytes.len() {
+            break;
+        }
+        out.push((rsv1, opcode));
+        i += header + len;
+    }
+    out
 }
 
 fn connect_packet(name: &str, game: &str) -> String {
@@ -150,6 +201,34 @@ fn connect_packet(name: &str, game: &str) -> String {
     .to_string()
 }
 
+/// Long enough for the room to accept it; the admin surface is here only so
+/// these tests can read their own metrics back.
+const TOKEN: &str = "test-token-of-at-least-thirty-two-bytes";
+
+/// Scrape `/admin/v1/metrics` over a plain socket.
+async fn admin_metrics(server: &Server) -> String {
+    let mut stream = TcpStream::connect(server.local_addr)
+        .await
+        .expect("connect");
+    stream
+        .write_all(
+            format!(
+                "GET /admin/v1/metrics HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n\
+                 Content-Length: 0\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write");
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out)).await;
+    String::from_utf8_lossy(&out)
+        .split_once("\r\n\r\n")
+        .expect("a complete response")
+        .1
+        .to_string()
+}
+
 async fn start(data: Arc<MultiData>) -> Server {
     let (names, _) = data.resolve_datapackage();
     let room = Room::new(data, Arc::new(names), RoomOptions::default(), 0.0);
@@ -158,6 +237,7 @@ async fn start(data: Arc<MultiData>) -> Server {
         NetConfig {
             port: 0,
             shards: Some(SHARDS),
+            admin_token: Some(TOKEN.to_string()),
             ..Default::default()
         },
     )
@@ -272,6 +352,116 @@ async fn a_connection_without_deflate_costs_no_compression_at_all() {
         pahoa_net::ws::deflate::compressions() - before,
         0,
         "compressed for a connection that never asked for it"
+    );
+
+    server.shutdown().await;
+}
+
+/// **The negotiation is honored per connection, checked on the wire.**
+///
+/// The test above proves the compressor is never *invoked* for a room with no
+/// deflate recipients. This is the sharper question, and the one that breaks a
+/// client rather than wasting a cycle: with a deflate connection open — so the
+/// compressed variant of every broadcast exists and is sitting in the shard's
+/// memo — does the plain connection still get the plain one? A client that did
+/// not negotiate the extension cannot decode an RSV1 frame at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_broadcast_reaches_each_connection_in_the_form_it_negotiated() {
+    let Some(data) = load() else {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    };
+    // This test compresses, and the other two measure the process-wide
+    // compression counter by sampling it around an action — so it has to be
+    // serialized against them for the same reason they are against each other.
+    // See `COUNTER`.
+    let _exclusive = COUNTER.lock().await;
+    let players: Vec<(String, String)> = data
+        .player_slots()
+        .take(2)
+        .map(|(_, i)| (i.name.clone(), i.game.clone()))
+        .collect();
+    assert_eq!(players.len(), 2, "the fixture needs two players");
+    let server = start(data).await;
+
+    // Taken before anyone connects: the deflate table is process-wide, and the
+    // other tests in this binary connect 64 clients against these same fixture
+    // slots. Deltas are the only reading immune to which test ran first.
+    let baseline = admin_metrics(&server).await;
+
+    let mut squeezed = RawClient::connect(server.local_addr, true).await;
+    let mut plain = RawClient::connect(server.local_addr, false).await;
+    squeezed
+        .send(&connect_packet(&players[0].0, &players[0].1))
+        .await;
+    plain
+        .send(&connect_packet(&players[1].0, &players[1].1))
+        .await;
+    squeezed.drain().await;
+    plain.drain().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    squeezed.drain().await;
+    plain.drain().await;
+
+    // Long and repetitive, so it is over the 128-byte floor and compresses to
+    // well under the original — a short line is sent plain to everyone and
+    // would make both halves of this pass for the wrong reason.
+    let chat = "deflate ".repeat(64);
+    squeezed
+        .send(&serde_json::json!([{"cmd": "Say", "text": chat}]).to_string())
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let squeezed_frames = frames(&squeezed.drain_bytes().await);
+    let plain_frames = frames(&plain.drain_bytes().await);
+
+    assert!(
+        !plain_frames.is_empty() && !squeezed_frames.is_empty(),
+        "both connections must have received something, or this proves nothing: \
+         {squeezed_frames:?} / {plain_frames:?}"
+    );
+    assert!(
+        squeezed_frames.iter().any(|(rsv1, _)| *rsv1),
+        "the connection that negotiated deflate should have been sent a compressed \
+         frame: {squeezed_frames:?}"
+    );
+    assert!(
+        plain_frames.iter().all(|(rsv1, _)| !*rsv1),
+        "a connection that never negotiated permessage-deflate was sent an RSV1 frame \
+         it cannot decode: {plain_frames:?}"
+    );
+
+    // And the metric says the same thing the wire does. Two clients, two slots,
+    // one compressing and one not — which is the correlation the metric exists
+    // to expose, and it can only be built where the handshake's answer and the
+    // slot's game are both in hand.
+    let body = admin_metrics(&server).await;
+    let count = |text: &str, player: &str, on: bool| -> u64 {
+        text.lines()
+            .find(|l| {
+                l.starts_with("pahoa_client_connections_total{")
+                    && l.contains(&format!(r#"player="{player}""#))
+                    && l.contains(&format!(r#"deflate="{on}""#))
+            })
+            .and_then(|l| l.rsplit(' ').next()?.parse().ok())
+            .unwrap_or(0)
+    };
+    let grew = |player: &str, on: bool| count(&body, player, on) - count(&baseline, player, on);
+
+    assert_eq!(
+        grew(&players[0].0, true),
+        1,
+        "the deflate client should be counted as compressing:\n{body}"
+    );
+    assert_eq!(
+        grew(&players[1].0, false),
+        1,
+        "and the plain one as not:\n{body}"
+    );
+    assert_eq!(
+        (grew(&players[0].0, false), grew(&players[1].0, true)),
+        (0, 0),
+        "neither should also appear under the other answer:\n{body}"
     );
 
     server.shutdown().await;

@@ -421,6 +421,33 @@ one, and a scraper that groups by it needs nothing rewritten if that ever
 changes, where one that assumed slot numbers were unique would silently add two
 teams together.
 
+**`pahoa_client_connections_total{...,deflate="true"|"false"}`** counts each
+connection that reached a slot by whether it negotiated permessage-deflate, so
+`sum by (game, deflate)` is which games' clients support compression.
+
+It is **per connection, not per slot** — a game client may compress where a
+tracker on the same slot does not — and a counter rather than a gauge, so it
+survives churn and answers the question over a room's life. The two facts it
+joins are settled in different places: the extension during the WebSocket
+handshake, before `Connect`, when no game is known; the game with `Connect`,
+known only to the room. They meet on the shard's per-connection record, which is
+where this is counted, on the transition that means "this connection
+authenticated".
+
+What it is really reporting is **which clients receive compressed payloads**,
+which is where the cost is: an outbound broadcast is compressed once per shard
+and handed to every recipient that negotiated it, while everyone else gets the
+plain frame. A connection that declined is one the room cannot share that work
+with.
+
+**`pahoa_bytes_in_total` counts wire bytes**, as framed and compressed on the
+socket, so it is comparable with `pahoa_bytes_out_total` rather than with the
+JSON the room parses. A client on permessage-deflate can send a 4 KiB `Say` for
+fifty bytes, and this reports the fifty. Pings, pongs and undecodable frames are
+excluded — the reader task that sees those bytes has a connection id and no slot
+— which makes this exactly the byte counterpart of `pahoa_packets_in_total`,
+with the same pre-auth split.
+
 **Outbound is two counters, not one, because there is no single number.** A
 slot's connections are not sent the same stream — a `NoText` tracker is left out
 of chat, and a scoped connection takes items by a different route than a
@@ -466,6 +493,40 @@ seed**, so they are untrusted text: quotes and backslashes are escaped, and
 values are cut at 128 characters, well past any real name. And these counters
 are **per process** — cumulative, monotonic, and back to zero on a restart, with
 the whole endpoint absent on a room that predates them.
+
+#### The HTTP surface's own metrics
+
+The admin API and the game share a port, and are counted apart. They are
+different workloads — an orchestrator on a reconcile loop and whatever the
+internet points at a public listener, against players — and summed together each
+would hide the other.
+
+```
+pahoa_http_requests_total{route="/admin/v1/slots/{slot}/filter",method="PUT",status="200"} 1
+pahoa_http_requests_total{route="other",method="GET",status="404"} 1
+pahoa_http_request_bytes_total{route="/healthz"} 86
+pahoa_http_response_bytes_total{route="/api/tracker"} 4823901
+pahoa_admin_auth_failures_total 1
+pahoa_admin_auth_rate_limited_total 0
+pahoa_http_malformed_total 0
+```
+
+**`route` is a template, never the path as sent.** A public port gets scanned,
+and a label taken from the request line would let anyone mint series until a
+scrape fell over — so `/admin/v1/slots/7/filter` counts under
+`/admin/v1/slots/{slot}/filter`, and anything unrecognized under `other`. Bytes
+are summed by route only: a tracker document is megabytes where a health check
+is bytes, and the method and status say nothing about what a request weighed.
+
+**A WebSocket upgrade is not counted here.** It is an HTTP request in form only,
+and everything it goes on to carry is already the game's.
+
+`pahoa_admin_auth_failures_total` gets its own counter rather than being read off
+`status="401"`, because that status also carries the tracker's gate — this is the
+one to alert on. `pahoa_admin_auth_rate_limited_total` counts the `429`s, which
+given that a correct token is never refused means sources that were guessing.
+`pahoa_http_malformed_total` is requests that never parsed into a route at all,
+so they appear nowhere else.
 
 #### Teams
 

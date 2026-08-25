@@ -336,10 +336,98 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         live.slots.iter().map(|s| s.total_checks as u64).sum(),
     );
 
+    metric(
+        "pahoa_admin_auth_failures_total",
+        "Admin requests with a wrong or missing bearer token. Its own counter rather than a \
+         status filter, because pahoa_http_requests_total{status=\"401\"} also carries the \
+         tracker's gate.",
+        "counter",
+        crate::metrics::auth_failures(),
+    );
+    metric(
+        "pahoa_admin_auth_rate_limited_total",
+        "Admin requests answered 429 because that source had already failed too often. A \
+         correct token is never refused, so this counts only sources that were guessing.",
+        "counter",
+        crate::metrics::auth_rate_limited(),
+    );
+    metric(
+        "pahoa_http_malformed_total",
+        "Requests that never parsed into a route, so they are counted nowhere else. A port \
+         scan looks like this.",
+        "counter",
+        crate::metrics::http_malformed(),
+    );
+
     // The closure holds `out` mutably; nothing above needs it again.
     let _ = metric;
     by_slot(&mut out, live);
+    http_surface(&mut out);
     out
+}
+
+/// The HTTP surface, kept apart from the game's traffic.
+///
+/// Same port, different workload: an orchestrator on a reconcile loop and
+/// whatever the internet points at a public listener, against players. Summed
+/// together, each would hide the other.
+fn http_surface(out: &mut String) {
+    let mut rows = crate::metrics::http();
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_unstable_by_key(|(key, _, _, _)| (key.route, key.method, key.status));
+
+    out.push_str(
+        "# HELP pahoa_http_requests_total Requests answered on the HTTP surface, by route, \
+         method and status. WebSocket upgrades are not counted here. The route is a template, \
+         so a slot's filter counts under /admin/v1/slots/{slot}/filter and anything \
+         unrecognized under \"other\" — a public port gets scanned, and a label taken from the \
+         request line would let a scanner mint series.\n\
+         # TYPE pahoa_http_requests_total counter\n",
+    );
+    for (key, count, _, _) in &rows {
+        out.push_str(&format!(
+            "pahoa_http_requests_total{{route=\"{}\",method=\"{}\",status=\"{}\"}} {count}\n",
+            label(key.route),
+            key.method,
+            key.status
+        ));
+    }
+
+    // Summed by route: the method and status of a request say little about what
+    // it weighed, and a tracker document is megabytes where a health check is
+    // bytes.
+    for (name, help, pick) in [
+        (
+            "pahoa_http_request_bytes_total",
+            "Bytes received on the HTTP surface, head and body, by route.",
+            0,
+        ),
+        (
+            "pahoa_http_response_bytes_total",
+            "Bytes sent on the HTTP surface, head and body, by route. The tracker documents \
+             dominate this on a large room.",
+            1,
+        ),
+    ] {
+        let mut by_route: Vec<(&'static str, u64)> = Vec::new();
+        for (key, _, request_bytes, response_bytes) in &rows {
+            let value = if pick == 0 {
+                request_bytes
+            } else {
+                response_bytes
+            };
+            match by_route.iter_mut().find(|(route, _)| *route == key.route) {
+                Some((_, total)) => *total += value,
+                None => by_route.push((key.route, *value)),
+            }
+        }
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
+        for (route, total) in by_route {
+            out.push_str(&format!("{name}{{route=\"{}\"}} {total}\n", label(route)));
+        }
+    }
 }
 
 /// The labeled series: traffic and drops broken out per slot.
@@ -418,6 +506,54 @@ fn by_slot(out: &mut String, live: &Status) {
                 ));
             }
         }
+    }
+
+    let mut deflate = crate::metrics::client_deflate();
+    if !deflate.is_empty() {
+        deflate.sort_unstable_by_key(|((key, on), _)| (*key, *on));
+        out.push_str(
+            "# HELP pahoa_client_connections_total Connections that reached a slot, by whether \
+             they negotiated permessage-deflate. Per connection, not per slot: a game client \
+             may compress where a tracker on the same slot does not. sum by (game, deflate) is \
+             which games' clients support it.\n\
+             # TYPE pahoa_client_connections_total counter\n",
+        );
+        for ((key, on), count) in &deflate {
+            out.push_str(&format!(
+                "pahoa_client_connections_total{{{},deflate=\"{on}\"}} {count}\n",
+                identify(*key)
+            ));
+        }
+    }
+
+    let mut bytes_in = crate::metrics::bytes_in();
+    bytes_in.sort_unstable_by_key(|(slot, _)| *slot);
+
+    if bytes_in.iter().any(|(slot, _)| slot.is_some()) {
+        out.push_str(
+            "# HELP pahoa_bytes_in_total Wire bytes of the protocol messages a slot sent, as \
+             framed and compressed on the socket. Pings, pongs and undecodable frames are not \
+             included: the reader that sees those bytes does not know whose they are.\n\
+             # TYPE pahoa_bytes_in_total counter\n",
+        );
+        for (slot, count) in &bytes_in {
+            if let Some(key) = slot {
+                out.push_str(&format!(
+                    "pahoa_bytes_in_total{{{}}} {count}\n",
+                    identify(*key)
+                ));
+            }
+        }
+    }
+
+    if let Some((_, count)) = bytes_in.iter().find(|(slot, _)| slot.is_none()) {
+        out.push_str(
+            "# HELP pahoa_bytes_in_preauth_total Wire bytes of messages read before the \
+             connection held a slot. A Connect arrives here, so this climbing on its own is \
+             login attempts.\n\
+             # TYPE pahoa_bytes_in_preauth_total counter\n",
+        );
+        out.push_str(&format!("pahoa_bytes_in_preauth_total {count}\n"));
     }
 
     // What the room produced, once per message whatever its audience. No slot

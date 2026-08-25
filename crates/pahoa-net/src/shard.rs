@@ -301,6 +301,21 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                 slot,
             } => {
                 if let Some(m) = members.get_mut(&conn) {
+                    // **Where the two halves of the deflate question meet.**
+                    // Whether a connection negotiated permessage-deflate is
+                    // settled during the handshake, before `Connect` — so the
+                    // game is not known yet — and the game arrives later, known
+                    // only to the room. `Member` is the one place holding both.
+                    //
+                    // On the `None -> Some` transition only, which is exactly
+                    // "this connection authenticated": it fires once per
+                    // connection, and a `ConnectUpdate` — which trackers send
+                    // routinely — is `Some -> Some` and does not count again.
+                    if m.slot.is_none()
+                        && let Some(key) = slot
+                    {
+                        crate::metrics::record_client_deflate(key, m.deflate.is_some());
+                    }
                     if m.slot != slot {
                         if let Some(old) = m.slot
                             && let Some(list) = by_slot.get_mut(&old)

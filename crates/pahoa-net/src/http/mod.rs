@@ -582,6 +582,41 @@ fn slot_password_path(path: &str) -> Option<u32> {
     slot.parse().ok()
 }
 
+/// The metric label for a request target: a **template**, never the path as
+/// sent.
+///
+/// This port is public and gets scanned, so a label taken from the request line
+/// would let anyone mint series until a scrape fell over. Everything
+/// unrecognized collapses to `other`, and the two routes carrying a slot number
+/// collapse to their template — which is also the more useful grouping, since
+/// nobody wants two thousand series for one resource.
+///
+/// Kept next to the matchers it mirrors so a new route is hard to add here
+/// without noticing this needs a line too.
+pub fn route_label(path: &str) -> &'static str {
+    let path = path.split(['?', '#']).next().unwrap_or("/");
+    if filter_path(path).is_some() {
+        return match path {
+            "/admin/v1/filter" => "/admin/v1/filter",
+            _ => "/admin/v1/slots/{slot}/filter",
+        };
+    }
+    if slot_password_path(path).is_some() {
+        return "/admin/v1/slots/{slot}/password";
+    }
+    match path {
+        "/healthz" => "/healthz",
+        "/api/v1/room" => "/api/v1/room",
+        "/api/tracker" => "/api/tracker",
+        "/api/static_tracker" => "/api/static_tracker",
+        "/admin/v1/status" => "/admin/v1/status",
+        "/admin/v1/metrics" => "/admin/v1/metrics",
+        "/admin/v1/command" => "/admin/v1/command",
+        "/admin/v1/shutdown" => "/admin/v1/shutdown",
+        _ => "other",
+    }
+}
+
 /// The room has stopped answering, which during a shutdown is ordinary.
 ///
 /// `503` rather than an empty document, because a monitor that read zeros here

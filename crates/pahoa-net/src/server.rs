@@ -486,13 +486,29 @@ where
         Ok(ws::accept::Accepted::WebSocket(upgraded)) => Ok(Some(upgraded)),
         Ok(ws::accept::Accepted::Http(exchange)) => {
             let response = router.route(&exchange, peer.ip()).await;
-            let _ = stream.write_all(&response.render()).await;
+            let rendered = response.render();
+            // Counted here rather than in the router, because this is where
+            // both halves of the exchange exist: the router never sees what its
+            // answer weighed. Upgrades take the branch above and are not
+            // counted — an upgrade is an HTTP request in form only, and
+            // everything it goes on to carry is the game's.
+            crate::metrics::record_http(
+                crate::http::route_label(&exchange.request.path),
+                &exchange.request.method,
+                response.status,
+                exchange.request.head_len + exchange.body.len(),
+                rendered.len(),
+            );
+            let _ = stream.write_all(&rendered).await;
             let _ = stream.flush().await;
             Ok(None)
         }
         Err(e) => {
             // A broken upgrade, or a request too large to read, gets a status
-            // rather than a silently dropped socket.
+            // rather than a silently dropped socket. Nothing here parsed into a
+            // route to file under, so it is counted only as the malformed
+            // request it was — which is what a port scan looks like.
+            crate::metrics::record_http_malformed();
             ws::accept::reject(stream, &e).await;
             Err(e)
         }
@@ -645,22 +661,33 @@ where
     // connection's own task, so none of it lands on the actor.
     let mut session = ws::message::Session::new(upgraded.inflater, config.max_message_bytes);
     let mut buf = upgraded.leftover;
+    // Wire bytes of the frames making up the message being assembled. `decode`
+    // splits what it consumed out of `buf`, so the difference is exactly the
+    // frame — header, mask and compressed payload — which is what makes this
+    // comparable with the outbound byte counter rather than with the inflated
+    // text. Continuation frames accumulate until the message completes.
+    let mut message_bytes = 0usize;
     let outcome = 'read: loop {
         // Drain whatever is already buffered before asking for more; a single
         // read commonly carries several frames.
         loop {
+            let buffered = buf.len();
             match ws::frame::decode(&mut buf, config.max_frame_bytes) {
-                Ok(Some(frame)) => match session.handle(frame) {
-                    Ok(Some(event)) => {
-                        if let Some(reason) =
-                            handle_event(event, conn, actor, &out_tx, &pongs).await
-                        {
-                            break 'read reason;
+                Ok(Some(frame)) => {
+                    message_bytes += buffered - buf.len();
+                    match session.handle(frame) {
+                        Ok(Some(event)) => {
+                            let bytes = std::mem::take(&mut message_bytes);
+                            if let Some(reason) =
+                                handle_event(event, conn, actor, &out_tx, &pongs, bytes).await
+                            {
+                                break 'read reason;
+                            }
                         }
+                        Ok(None) => {}
+                        Err(e) => break 'read format!("protocol error: {e}"),
                     }
-                    Ok(None) => {}
-                    Err(e) => break 'read format!("protocol error: {e}"),
-                },
+                }
                 Ok(None) => break,
                 Err(e) => break 'read format!("bad frame: {e}"),
             }
@@ -698,13 +725,18 @@ async fn handle_event(
     actor: &mpsc::Sender<ActorMsg>,
     out: &mpsc::Sender<Outbound>,
     pongs: &AtomicU64,
+    bytes: usize,
 ) -> Option<String> {
     use ws::message::Event;
     match event {
         Event::Text(text) => match decode(&text) {
             Ok(packets) => {
                 if actor
-                    .send(ActorMsg::Packets { conn, packets })
+                    .send(ActorMsg::Packets {
+                        conn,
+                        packets,
+                        bytes,
+                    })
                     .await
                     .is_err()
                 {

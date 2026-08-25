@@ -144,7 +144,9 @@ impl Admin {
         // A missing token and a wrong one are the same answer. Which of the two
         // it was is not something worth telling an attacker, and an operator can
         // see whether they sent a header.
+        crate::metrics::record_auth_failure();
         if self.record_failure(source) {
+            crate::metrics::record_auth_rate_limited();
             return Auth::Refused(
                 Response::status(429, "Too Many Requests")
                     .with_header("Retry-After", FAILURE_WINDOW.as_secs().to_string()),

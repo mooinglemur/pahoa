@@ -44,6 +44,10 @@ pub enum ActorMsg {
     Packets {
         conn: ConnId,
         packets: Vec<ClientPacket>,
+        /// Wire bytes of the message these came in, carried because only the
+        /// actor knows which slot to charge them to — the reader task that
+        /// measured them has a `ConnId` and nothing else.
+        bytes: usize,
     },
     /// The reader could not decode a frame. Reproduces the reference server's
     /// behavior of dropping the socket rather than answering `InvalidPacket`.
@@ -505,8 +509,22 @@ pub async fn run_with_saves(
                 room.on_connect_with_feed(conn, feed, &mut sink);
                 push_membership(room, conn, &mut sink);
             }
-            ActorMsg::Packets { conn, packets } => {
+            ActorMsg::Packets {
+                conn,
+                packets,
+                bytes,
+            } => {
                 crate::metrics::record_client_message();
+                // Once for the message, where `record_packet` below is once per
+                // packet in it. Resolved before any of them are handled, so a
+                // frame carrying `Connect` is charged to nobody — the same rule
+                // the packet counter follows.
+                crate::metrics::record_bytes_in(
+                    room.client(conn)
+                        .filter(|c| c.auth)
+                        .map(|c| (c.team, c.slot)),
+                    bytes,
+                );
                 for packet in packets {
                     // Attributed to the slot as it stands *now*, before this
                     // packet is handled: a `Connect` is what creates the slot,

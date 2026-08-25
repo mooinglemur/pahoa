@@ -110,6 +110,16 @@ impl Ws {
         client
     }
 
+    /// Send a `Sync` and wait for its answer, so everything sent before it has
+    /// been handled by the time the next scrape runs.
+    async fn settle(&mut self) {
+        self.0
+            .send(Message::text(json!([{"cmd": "Sync"}]).to_string()))
+            .await
+            .expect("sends");
+        self.wait_for("ReceivedItems").await;
+    }
+
     async fn wait_for(&mut self, cmd: &str) -> Value {
         for _ in 0..60 {
             let msg = tokio::time::timeout(Duration::from_secs(5), self.0.next())
@@ -187,11 +197,14 @@ const TROY: &str = r#"team="0",slot="1",player="Troy",game="A Link to the Past""
 /// are connections to deliver it to. A single per-slot outbound counter would
 /// have to be one or the other and would be read as the wrong one.
 ///
-/// **One test rather than two, because the counters are process-wide.** These
-/// phases read rows the other phase writes — the pre-auth check asserts no slot
-/// has been sent anything, which is only true before anybody joins. As separate
-/// `#[test]` functions they would run on parallel threads in this one process
-/// and take turns failing.
+/// **One test rather than several, because the counters are process-wide.**
+/// Two things force it. The phases read rows each other writes — the pre-auth
+/// check asserts no slot has been sent anything, which is only true before
+/// anybody joins. And a second room in this process is not inert even if it
+/// never carries a client: `Server::shutdown` broadcasts a closing notice, so a
+/// sibling test finishing mid-measurement adds a `PrintJSON` to the room-wide
+/// production counter. That one cost an afternoon as a 1-in-3 flake, because
+/// the extra packet arrives whenever the other test happens to end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn production_counts_once_and_delivery_counts_per_connection() {
     let server = start().await;
@@ -234,6 +247,15 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
         2,
         "two joins, two RoomInfos, and no Connected in the pre-auth bucket:\n{joined}"
     );
+
+    // **Settle before the baseline.** `join` returns when the client receives
+    // `Connected`, but the join *broadcast* is dispatched by the actor after
+    // that reply is queued — so a scrape taken right here catches it or misses
+    // it depending on which task ran first, and the delta below comes out 1 or
+    // 2. A `Sync` reply is queued behind the join handling, so seeing one means
+    // the actor is finished with it.
+    a.settle().await;
+    b.settle().await;
 
     let before = metrics(addr).await;
     let produced_before = series(&before, r#"pahoa_packets_out_total{cmd="PrintJSON"}"#);
@@ -308,6 +330,111 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
     assert_eq!(
         dropped, 2,
         "one broadcast, two connections on the slot, two drops:\n{muted}"
+    );
+
+    // --- inbound bytes ---------------------------------------------------
+    //
+    // Wire bytes, and attributed the same way the packet counter is: the frame
+    // carrying `Connect` belongs to nobody, everything after it to the slot.
+    let in_before = series(&muted, &format!("pahoa_bytes_in_total{{{TROY}}}"));
+    let preauth_in_before = series(&muted, "pahoa_bytes_in_preauth_total");
+
+    let padded = "x".repeat(4096);
+    a.0.send(Message::text(
+        json!([{"cmd": "Say", "text": padded}]).to_string(),
+    ))
+    .await
+    .expect("sends");
+    a.settle().await;
+
+    let after_in = metrics(addr).await;
+    let grew = series(&after_in, &format!("pahoa_bytes_in_total{{{TROY}}}")) - in_before;
+    // **This client does not negotiate permessage-deflate**, so wire bytes and
+    // payload are within framing overhead of each other and the bound can be
+    // the payload size. Against a client that does, 4096 identical bytes
+    // compress to tens — which is the counter being right, not wrong, and this
+    // assertion is what would say so.
+    assert!(
+        grew > 4096,
+        "a 4 KiB Say plus its framing should be charged to the slot, got {grew}:\n{after_in}"
+    );
+    assert_eq!(
+        series(&after_in, "pahoa_bytes_in_preauth_total"),
+        preauth_in_before,
+        "an authenticated slot's traffic must not land in the pre-auth bucket:\n{after_in}"
+    );
+    // The `Connect` frames themselves did, though — three connections opened in
+    // this test and each sent one before it held a slot.
+    assert!(
+        preauth_in_before > 0,
+        "a Connect arrives before the slot is known:\n{after_in}"
+    );
+
+    // --- the HTTP surface ------------------------------------------------
+    //
+    // Every scrape above was itself a request, so this has plenty to report.
+    let http = metrics(addr).await;
+    assert!(
+        series(
+            &http,
+            r#"pahoa_http_requests_total{route="/admin/v1/metrics",method="GET",status="200"}"#
+        ) >= 4,
+        "the scrapes counted themselves:\n{http}"
+    );
+    assert!(
+        series(
+            &http,
+            r#"pahoa_http_requests_total{route="/admin/v1/slots/{slot}/filter",method="PUT",status="200"}"#
+        ) >= 1,
+        "the slot number collapses into a template:\n{http}"
+    );
+    assert!(
+        series(
+            &http,
+            r#"pahoa_http_response_bytes_total{route="/admin/v1/metrics"}"#
+        ) > 0,
+        "and the answers had a size:\n{http}"
+    );
+    // Upgrades are the game's traffic, not the HTTP surface's. Three websocket
+    // clients connected above and none of them may appear here.
+    assert!(
+        !http.contains(r#"pahoa_http_requests_total{route="other",method="GET",status="101""#),
+        "a websocket upgrade was counted as an HTTP request:\n{http}"
+    );
+
+    // --- failed admin auth -----------------------------------------------
+
+    let auth = metrics(addr).await;
+    let failures_before = series(&auth, "pahoa_admin_auth_failures_total");
+    let limited_before = series(&auth, "pahoa_admin_auth_rate_limited_total");
+
+    // Past the per-source limit, so both counters have something to say.
+    for _ in 0..12 {
+        let _ = request(
+            addr,
+            "GET /admin/v1/status HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\n\
+             Content-Length: 0\r\n\r\n",
+        )
+        .await;
+    }
+
+    let after = metrics(addr).await;
+    assert_eq!(
+        series(&after, "pahoa_admin_auth_failures_total") - failures_before,
+        12,
+        "every wrong token counts, including the ones answered 429:\n{after}"
+    );
+    assert_eq!(
+        series(&after, "pahoa_admin_auth_rate_limited_total") - limited_before,
+        2,
+        "ten are answered 401 and the rest 429:\n{after}"
+    );
+    assert!(
+        series(
+            &after,
+            r#"pahoa_http_requests_total{route="/admin/v1/status",method="GET",status="401"}"#
+        ) >= 10,
+        "and the refusals are visible as requests too:\n{after}"
     );
 
     server.shutdown().await;
