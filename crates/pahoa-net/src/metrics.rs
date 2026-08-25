@@ -496,6 +496,62 @@ pub fn resident_bytes() -> Option<u64> {
     Some(pages * 4096)
 }
 
+/// `sysconf(_SC_CLK_TCK)` without libc: 100 Hz everywhere pahoa targets.
+///
+/// The same assumption [`resident_bytes`] already makes about page size, and it
+/// is wrong in the same way if pahoa is ever built for something exotic — the
+/// numbers would be off by a constant factor rather than absent, which is worth
+/// knowing before trusting one.
+const CLOCK_TICKS: f64 = 100.0;
+
+/// The fields of `/proc/self/stat` after the command name.
+///
+/// **Split at the last `)`, not the second field.** The command name is
+/// parenthesized and may itself contain spaces and parentheses, which is the
+/// classic way to misparse this file. Everything after that close paren is
+/// field 3 onward, so a caller indexes with `field - 3`.
+fn proc_stat_fields(stat: &str) -> Option<Vec<&str>> {
+    Some(stat.rsplit_once(')')?.1.split_whitespace().collect())
+}
+
+/// User plus system CPU this process has consumed, in seconds.
+///
+/// Fields 14 and 15 of `/proc/self/stat`. Process-wide on purpose: it says what
+/// the room costs a node, which is the capacity question. It deliberately does
+/// **not** say which task is hot, and the task that matters — the single actor
+/// owning room state — is watched by `mailbox_depth` and `mailbox_peak`
+/// instead. A room can be CPU-bound in its shards, which is fine, or backed up
+/// on its actor, which is not, and only the mailbox tells those apart.
+pub fn cpu_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let fields = proc_stat_fields(&stat)?;
+    let utime: u64 = fields.get(14 - 3)?.parse().ok()?;
+    let stime: u64 = fields.get(15 - 3)?.parse().ok()?;
+    Some((utime + stime) as f64 / CLOCK_TICKS)
+}
+
+/// When this process started, in seconds since the epoch.
+///
+/// Field 22 of `/proc/self/stat` is measured in clock ticks since *boot*, so
+/// this needs `btime` out of `/proc/stat` to land on a wall clock. That is what
+/// every Prometheus client library does, and it is worth the extra file: paired
+/// with [`cpu_seconds`] it gives a scraper the process's whole-life CPU share
+/// without needing a second sample, and it distinguishes a room that has been
+/// up for a week from one that restarted a minute ago.
+///
+/// Deliberately not the room's `started_at`. That is when the *server* began
+/// serving, which is a few milliseconds later and, for a room restored from a
+/// save, is not the same question at all.
+pub fn start_time_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let ticks: u64 = proc_stat_fields(&stat)?.get(22 - 3)?.parse().ok()?;
+    let btime: u64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())?;
+    Some(btime as f64 + ticks as f64 / CLOCK_TICKS)
+}
+
 /// A one-line summary, for a load run or an operator poking at a live room.
 pub fn summary() -> String {
     let (save_time, save_bytes) = last_save();
@@ -512,4 +568,67 @@ pub fn summary() -> String {
         save_time,
         save_bytes >> 10,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The command name is parenthesized and may contain spaces and its own
+    /// parentheses**, which is the standard way to misparse `/proc/*/stat`.
+    /// Splitting on whitespace and counting fields reads `Dice`, not the state,
+    /// and every field after it lands one or more places off — so CPU would be
+    /// some unrelated counter rather than absent.
+    #[test]
+    fn stat_fields_survive_a_command_name_with_spaces_and_parens() {
+        let hostile = "42 (yacht (dice) roller) S 1 42 42 0 -1 4194560 \
+                       111 0 2 0 1234 567 0 0 20 0 24 0 998877 12345 678";
+        let fields = proc_stat_fields(hostile).expect("parses");
+
+        // Field 3 is the state, so index 0.
+        assert_eq!(fields[0], "S", "the split landed in the wrong place");
+        assert_eq!(fields[14 - 3], "1234", "utime");
+        assert_eq!(fields[15 - 3], "567", "stime");
+        assert_eq!(fields[22 - 3], "998877", "starttime");
+    }
+
+    #[test]
+    fn cpu_seconds_are_readable_and_only_go_up() {
+        let Some(before) = cpu_seconds() else {
+            eprintln!("SKIP: no /proc on this platform");
+            return;
+        };
+        // Enough work to clear the 10 ms tick this is quantized to, several
+        // times over, so the comparison is not a coin flip.
+        let mut n = 0u64;
+        for i in 0..40_000_000u64 {
+            n = n.wrapping_add(i ^ n);
+        }
+        std::hint::black_box(n);
+
+        let after = cpu_seconds().expect("still readable");
+        assert!(
+            after > before,
+            "burning CPU should move the counter: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn the_process_started_in_the_past_and_after_the_epoch() {
+        let Some(at) = start_time_seconds() else {
+            eprintln!("SKIP: no /proc on this platform");
+            return;
+        };
+        let now = unix_now() as f64;
+        // A btime that failed to parse, or ticks read from the wrong field,
+        // lands far outside this rather than slightly off.
+        assert!(
+            at > 1_000_000_000.0 && at <= now + 1.0,
+            "start time {at} is not a plausible wall clock against now {now}"
+        );
+        assert!(
+            now - at < 60.0 * 60.0 * 24.0 * 365.0,
+            "this process cannot have been running for a year: {at} vs {now}"
+        );
+    }
 }

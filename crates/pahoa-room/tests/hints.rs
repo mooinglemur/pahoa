@@ -154,6 +154,75 @@ fn a_hint_reaches_both_the_finder_and_the_receiver() {
     assert!(sink.dirty);
 }
 
+/// **The two orderings a recipient sees, and why an unfound hint lands in the
+/// middle.**
+///
+/// `notify_hints` sorts twice, and the second undoes the first's grouping:
+/// found-before-unfound across the whole batch (`MultiServer.py:814`), then,
+/// per recipient, the hints *that recipient finds* before the rest
+/// (`MultiServer.py:840`). Both are stable, so the second decides the grouping
+/// and the first only orders within each group.
+///
+/// The consequence surprises people: an unfound hint the asker finds is
+/// announced **before** a found hint somebody else finds. That is not a bug and
+/// not a pahoa invention — it falls out of upstream's two sorts.
+///
+/// What is *not* pinned here is the order within a group of otherwise-equal
+/// hints. Upstream cannot be matched there even in principle: `get_hints` puts
+/// its candidates through `set()`, and `Hint.__hash__` includes the entrance
+/// string, which CPython hashes differently in every process — so the reference
+/// does not agree with itself across restarts. See `tools/README.md`.
+#[test]
+fn a_recipient_hears_what_it_finds_first_and_found_first_within_that() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, (a, a_slot), (_b, b_slot)) = two_players().unwrap();
+
+    // All four are for A, so A is the recipient of every one. They differ in
+    // who finds them and whether they are already found.
+    let mut a_finds_unfound = hint(a_slot, a_slot, 1001, 11);
+    let mut b_finds_found = hint(a_slot, b_slot, 2002, 22);
+    b_finds_found.found = true;
+    let mut a_finds_found = hint(a_slot, a_slot, 1003, 33);
+    a_finds_found.found = true;
+    let b_finds_unfound = hint(a_slot, b_slot, 2004, 44);
+    a_finds_unfound.found = false;
+
+    let mut sink = Recorder::default();
+    // Handed over in an order that matches none of the expected output, so a
+    // sort that did nothing could not pass.
+    room.notify_hints(
+        0,
+        vec![
+            b_finds_unfound.clone(),
+            a_finds_found.clone(),
+            b_finds_found.clone(),
+            a_finds_unfound.clone(),
+        ],
+        false,
+        false,
+        None,
+        &mut sink,
+    );
+
+    // Which location each announced line is about, in the order A received
+    // them. The location id is the identity here; the text is not the point.
+    let seen: Vec<i64> = print_json(&sink, a, &room)
+        .iter()
+        .filter_map(|m| m.item.as_ref().map(|i| i.location))
+        .collect();
+
+    assert_eq!(
+        seen,
+        vec![1003, 1001, 2002, 2004],
+        "expected A's own finds first (found 1003 before unfound 1001), then \
+         everyone else's (found 2002 before unfound 2004) — note the unfound \
+         1001 sits ahead of the found 2002, which is the interleaving upstream's \
+         two sorts produce"
+    );
+}
+
 #[test]
 fn a_local_hint_is_announced_once_not_twice() {
     if skip_without(FIXTURE) {

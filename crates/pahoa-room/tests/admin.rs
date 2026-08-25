@@ -424,6 +424,85 @@ fn a_forced_hint_costs_the_slot_nothing() {
     }
 }
 
+/// **A forced hint announces every match, every time it is run.**
+///
+/// This is the reference's console `/hint` (`MultiServer.py:2451-2465`), which
+/// collects and announces all of them with `notify_hints(team, hints)` — no
+/// cost and no one-per-call limit. The limiting an operator might expect is the
+/// *client* `!hint`, lives in `get_hints`, and applies only when the hint cost
+/// is non-zero.
+///
+/// The second run is the part that regressed: passing `only_new` here dropped
+/// every hint the slot already held, so re-running announced nothing while the
+/// reply still claimed a count.
+#[test]
+fn a_forced_hint_announces_every_match_and_repeats_on_a_rerun() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, slot, name, game) = fresh_room().unwrap();
+
+    // **A connected client, or there is nothing to observe.** `notify_hints`
+    // skips a slot with no clients, exactly as the reference does — so without
+    // this the room broadcasts nothing whatever the flags say, and the test
+    // passes against every version of the bug.
+    join(&mut room, 1, &name, &game, 0b001);
+
+    // **An item this slot actually receives**, addressed by id so no data
+    // package or name lookup can turn this into a skip. Picking a name off the
+    // game's item list is what an earlier version did, and it chose one the
+    // slot never receives — the hint found nothing, the test skipped, and it
+    // passed against the very bug it was written for.
+    let item = room
+        .multidata()
+        .locations
+        .all()
+        .iter()
+        .find(|e| e.receiver == slot)
+        .map(|e| e.item)
+        .expect("a player slot in this fixture must receive something");
+
+    let hint = |room: &mut Room| {
+        let mut sink = Recorder::default();
+        let outcome = room.admin(
+            AdminCommand::Hint {
+                slot,
+                item: item.to_string(),
+                force: true,
+            },
+            &mut sink,
+        );
+        let announced = sink
+            .broadcasts()
+            .flat_map(|(_, msgs)| msgs.iter())
+            .filter(|m| matches!(m, ServerPacket::PrintJSON(_)))
+            .count();
+        (outcome, announced)
+    };
+
+    let (first, announced) = hint(&mut room);
+    assert!(first.ok, "{:?}", first.output);
+    assert!(
+        announced > 0,
+        "a forced hint should announce what it granted"
+    );
+
+    // Again. Every hint is now one the slot already holds, which is exactly
+    // what the broken flag filtered out.
+    let (second, again) = hint(&mut room);
+    assert!(
+        second.ok,
+        "a rerun should still succeed: {:?}",
+        second.output
+    );
+    assert_eq!(
+        again, announced,
+        "the reference re-announces hints a slot already holds; dropping them \
+         silently is what {:?} claimed it had done anyway",
+        second.output
+    );
+}
+
 /// The status a slot reports is untouched by administration.
 #[test]
 fn administering_a_slot_does_not_change_its_client_status() {

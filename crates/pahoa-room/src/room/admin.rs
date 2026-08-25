@@ -427,9 +427,24 @@ impl Room {
         if force {
             // Straight past the economy: no points are spent and `hints_used`
             // does not move, because an administrator granting a hint is not the
-            // slot buying one.
+            // slot buying one. That is the whole of what `force` changes —
+            // this is the reference's console `/hint`
+            // (`MultiServer.py:2451-2465`), which collects and announces every
+            // matching hint with no cost and no one-per-call limit. The
+            // limiting an operator might expect belongs to the *client*
+            // `!hint`, lives in `get_hints`, and applies only when the hint
+            // cost is non-zero; the non-forced branch below is that path.
+            //
+            // **Both flags default**, exactly as `notify_hints(team, hints)`
+            // does there. They used to be `true, true`, which are the
+            // *LocationScouts* flags: `only_new` silently dropped every hint
+            // the slot already held — so re-running an admin hint announced
+            // nothing while still reporting a count — and
+            // `persist_even_if_found` banked hints for locations already
+            // checked, which the reference stores only for scouts and says so
+            // in a comment at `MultiServer.py:822-823`.
             let count = hints.len();
-            self.notify_hints(key.0, hints, true, true, None, out);
+            self.notify_hints(key.0, hints, false, false, None, out);
             out.mark_dirty();
             AdminOutcome::ok(
                 format!("Granted {count} hint(s) to {}.", self.slot_alias(key)),

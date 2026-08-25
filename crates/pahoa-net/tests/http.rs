@@ -429,9 +429,23 @@ async fn metrics_are_prometheus_text() {
         "pahoa_slots_locked 0",
         "pahoa_slots_filtered 0",
         "# TYPE pahoa_filtered_from_slots_total counter",
+        // Prometheus's conventional names, deliberately not `pahoa_`-prefixed:
+        // these are the two every client library exports, so an off-the-shelf
+        // dashboard plots them without anyone writing a panel.
+        "# TYPE process_cpu_seconds_total counter",
+        "# TYPE process_start_time_seconds gauge",
     ] {
         assert!(body.contains(expected), "missing {expected:?} in:\n{body}");
     }
+
+    // A start time before 2001 is a misparse rather than a clock — the failure
+    // mode of reading the wrong field, or of `btime` not resolving.
+    let start: f64 = body
+        .lines()
+        .find(|l| l.starts_with("process_start_time_seconds "))
+        .and_then(|l| l.rsplit(' ').next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no start time in:\n{body}"));
+    assert!(start > 1_000_000_000.0, "implausible start time {start}");
 
     // Every line is either a comment or `name[{labels}] value`. Split on the
     // *last* space rather than every one: a label value is quoted text out of a
@@ -451,6 +465,33 @@ async fn metrics_are_prometheus_text() {
             "unbalanced quotes, so a label value escaped: {line:?}"
         );
     }
+
+    server.shutdown().await;
+}
+
+/// CPU time reaches the exposition as a real number.
+///
+/// Its own test because it has to do some work first: the counter is quantized
+/// to the 10 ms clock tick, so a test binary that has barely started renders an
+/// exact and entirely correct `0.00` — which is why this burns a few ticks
+/// rather than asserting on whatever happened to have accumulated.
+#[tokio::test]
+async fn cpu_time_is_reported_once_there_is_any() {
+    let server = start_with_admin().await;
+
+    let mut n = 0u64;
+    for i in 0..40_000_000u64 {
+        n = n.wrapping_add(i ^ n);
+    }
+    std::hint::black_box(n);
+
+    let (_, body) = split(&authed(server.local_addr, "GET", "/admin/v1/metrics", TOKEN).await);
+    let cpu: f64 = body
+        .lines()
+        .find(|l| l.starts_with("process_cpu_seconds_total "))
+        .and_then(|l| l.rsplit(' ').next()?.parse().ok())
+        .unwrap_or_else(|| panic!("no CPU line in:\n{body}"));
+    assert!(cpu > 0.0, "burning CPU should show up, got {cpu}");
 
     server.shutdown().await;
 }

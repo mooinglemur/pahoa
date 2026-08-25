@@ -361,9 +361,53 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
 
     // The closure holds `out` mutably; nothing above needs it again.
     let _ = metric;
+    process(&mut out);
     by_slot(&mut out, live);
     http_surface(&mut out);
     out
+}
+
+/// What the process costs the node it runs on.
+///
+/// **These two keep Prometheus's conventional names rather than the `pahoa_`
+/// prefix**, because they are the two every client library exports and every
+/// off-the-shelf dashboard already plots. `rate(process_cpu_seconds_total[5m])`
+/// is CPU cores used, and it works on a panel nobody had to write.
+///
+/// The older `pahoa_resident_bytes` is the same idea under a house name and is
+/// left alone: renaming it would break a scrape that already exists for no gain
+/// beyond tidiness. New process-level metrics take the convention; that one
+/// stays where puna can still find it.
+///
+/// Both are absent rather than zero when `/proc` cannot be read, which is the
+/// honest answer on a platform that does not have it — a zero here would read
+/// as an idle room.
+fn process(out: &mut String) {
+    if let Some(seconds) = crate::metrics::cpu_seconds() {
+        out.push_str(
+            "# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds. \
+             Process-wide: it says what this room costs a node, not which task is busy — \
+             pahoa_mailbox_depth is what says whether the actor is the bottleneck.\n\
+             # TYPE process_cpu_seconds_total counter\n",
+        );
+        out.push_str(&format!("process_cpu_seconds_total {seconds:.2}\n"));
+    }
+    if let Some(at) = crate::metrics::start_time_seconds() {
+        out.push_str(
+            "# HELP process_start_time_seconds Start time of the process since unix epoch in \
+             seconds.\n\
+             # TYPE process_start_time_seconds gauge\n",
+        );
+        out.push_str(&format!("process_start_time_seconds {at:.3}\n"));
+    }
+    if let Some(rss) = crate::metrics::resident_bytes() {
+        out.push_str(
+            "# HELP process_resident_memory_bytes Resident memory size in bytes. The canonical \
+             spelling of pahoa_resident_bytes, which is the same number and is kept for now.\n\
+             # TYPE process_resident_memory_bytes gauge\n",
+        );
+        out.push_str(&format!("process_resident_memory_bytes {rss}\n"));
+    }
 }
 
 /// The HTTP surface, kept apart from the game's traffic.

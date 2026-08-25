@@ -166,6 +166,77 @@ async fn a_wss_client_upgrades_and_is_greeted() {
     server.shutdown().await;
 }
 
+/// **pahoa's own WebSocket client, over TLS, negotiating deflate.**
+///
+/// The test above uses `tokio-tungstenite`, which is fine for proving the room
+/// answers — but tungstenite has no permessage-deflate at all and rejects any
+/// frame with RSV1 set, so it cannot exercise the one thing this client exists
+/// for. Until `Client` became generic over its stream it opened its own
+/// `TcpStream`, which meant the load driver could reach a plaintext room and
+/// nothing else: pahoa's TLS listener had never been driven by pahoa's own
+/// harness, and puna's load generator could not reach a real room at all,
+/// because every one of theirs is `wss://`.
+///
+/// So this is the combination that was unreachable: a caller-supplied TLS
+/// stream, a `Host` that is a name rather than a socket address, and the
+/// extension actually negotiated.
+#[tokio::test]
+async fn pahoas_own_client_speaks_deflate_over_a_caller_supplied_tls_stream() {
+    use pahoa_net::ws::client::Client;
+
+    let mount = Mount::new("client-tls");
+    let (paths, root) = mount.issue();
+    let server = start(Some(paths), false).await;
+
+    let tcp = TcpStream::connect(server.local_addr)
+        .await
+        .expect("connects");
+    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let tls = connector(root)
+        .connect(name, tcp)
+        .await
+        .expect("the TLS handshake should complete");
+
+    // The caller owns SNI and verification above; this owns only the upgrade.
+    let mut client = Client::handshake(tls, "localhost", true)
+        .await
+        .expect("the upgrade should be accepted over TLS");
+
+    assert!(
+        client.deflate,
+        "the whole point of this client is that it negotiates the extension"
+    );
+
+    let first = client
+        .recv()
+        .await
+        .expect("a message")
+        .expect("not a close");
+    assert!(
+        first.contains("RoomInfo"),
+        "expected RoomInfo over wss, got {first}"
+    );
+
+    // And it inflates what comes back: `RoomInfo` on a real seed is well past
+    // the server's 128-byte compression floor, so that text arrived as a
+    // compressed frame and came out of the inflater intact.
+    assert!(
+        first.len() > 128,
+        "a payload short enough to be sent plain would not prove inflation: {first}"
+    );
+
+    // Splitting works over a non-`TcpStream` too, which is what a load driver
+    // needs to receive continuously while it sends.
+    let (mut reader, mut writer) = client.split();
+    writer
+        .send(&serde_json::json!([{"cmd": "Sync"}]).to_string())
+        .await
+        .expect("sends over TLS");
+    let _ = tokio::time::timeout(Duration::from_secs(5), reader.recv()).await;
+
+    server.shutdown().await;
+}
+
 /// An ordinary plaintext request gets RFC 2817's status, which is the legible
 /// answer for the human or the probe that sent it.
 #[tokio::test]

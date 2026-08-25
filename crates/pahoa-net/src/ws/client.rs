@@ -6,18 +6,29 @@
 //! minimal: no fragmentation on send, no close-handshake bookkeeping beyond
 //! echoing, because the traffic it generates is Archipelago's, which does
 //! neither.
+//!
+//! **Generic over the stream, with `TcpStream` as the default.** A room that
+//! serves TLS could not be driven by this at all while it opened its own
+//! socket, which left two things unmeasurable: puna's load generator against
+//! any real room, every one of which is `wss://`, and pahoa's own `loadtest`
+//! example against pahoa's own TLS listener — so the acceptor, the session
+//! setup and the cost of a thousand handshakes had never been under load from
+//! the harness written to find exactly that kind of problem.
+//!
+//! Handing the stream in also puts SNI, verification and the `Host:` header
+//! where they belong, which is with whoever knows the server's name.
 
 use super::deflate::{Deflater, Inflater, WINDOW_BITS};
 use super::frame::{self, OpCode, Role};
 use super::message::{Event, Session};
 use bytes::BytesMut;
 use std::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 /// A connection to a pahoa server, speaking the wire protocol properly.
-pub struct Client {
-    stream: TcpStream,
+pub struct Client<S = TcpStream> {
+    stream: S,
     session: Session,
     buf: BytesMut,
     deflater: Option<Deflater>,
@@ -27,12 +38,87 @@ pub struct Client {
     pub deflate: bool,
 }
 
-impl Client {
+impl Client<TcpStream> {
     /// Connect and upgrade, offering deflate unless told otherwise.
+    ///
+    /// Plaintext. For a TLS room, connect and wrap the stream yourself, then
+    /// hand it to [`Client::handshake`].
     pub async fn connect(addr: std::net::SocketAddr, offer_deflate: bool) -> io::Result<Self> {
-        let mut stream = TcpStream::connect(addr).await?;
+        let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true).ok();
+        // The socket address is the right `Host` for a room addressed by
+        // address; `handshake` takes the name for the case where it is not.
+        Self::handshake(stream, &addr.to_string(), offer_deflate).await
+    }
 
+    /// Split into halves that can be driven from separate tasks.
+    ///
+    /// Keeps `TcpStream`'s **owned** halves, where [`Client::split`] pays for a
+    /// `BiLock`. The same distinction the server draws for the same reason: the
+    /// plaintext path is the hot one and there is no reason for it to pay for
+    /// the TLS path's plumbing.
+    pub fn into_split(
+        self,
+    ) -> (
+        Reader<tokio::net::tcp::OwnedReadHalf>,
+        Writer<tokio::net::tcp::OwnedWriteHalf>,
+    ) {
+        let (read, write) = self.stream.into_split();
+        (
+            Reader {
+                read,
+                session: self.session,
+                buf: self.buf,
+            },
+            Writer {
+                write,
+                deflater: self.deflater,
+                counter: self.counter,
+            },
+        )
+    }
+
+    /// Consume whatever has already arrived without waiting for more.
+    ///
+    /// The load driver's connections exist mostly to *receive*, and a client
+    /// that stops reading is indistinguishable from one that is too slow — the
+    /// server would drop it, and the run would measure the wrong thing.
+    ///
+    /// **`TcpStream` only**, because it is built on `try_read` and `AsyncRead`
+    /// has no equivalent. A caller on another stream selects on a deadline
+    /// instead.
+    pub async fn drain_ready(&mut self) -> io::Result<usize> {
+        let mut messages = 0;
+        loop {
+            match frame::decode_as(&mut self.buf, 64 << 20, Role::Client) {
+                Ok(Some(f)) => {
+                    if matches!(self.session.handle(f), Ok(Some(Event::Text(_)))) {
+                        messages += 1;
+                    }
+                }
+                Ok(None) => {
+                    let mut chunk = [0u8; 65536];
+                    match self.stream.try_read(&mut chunk) {
+                        Ok(0) => return Ok(messages),
+                        Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(messages),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+            }
+        }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
+    /// Upgrade over a stream somebody else connected — a TLS session, a pipe, a
+    /// duplex in a test.
+    ///
+    /// `host` is what goes in the `Host:` header. The caller owns SNI and
+    /// certificate verification, because the caller is the only one that knows
+    /// the server's name; this layer never had it.
+    pub async fn handshake(mut stream: S, host: &str, offer_deflate: bool) -> io::Result<Self> {
         let extensions = if offer_deflate {
             "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n"
         } else {
@@ -41,7 +127,7 @@ impl Client {
         // A fixed key is fine: the server only echoes it back through SHA-1, and
         // nothing here depends on it being unguessable.
         let request = format!(
-            "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+            "GET / HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\
              {extensions}\r\n"
         );
@@ -157,58 +243,13 @@ impl Client {
         Ok(None)
     }
 
-    /// Consume whatever has already arrived without waiting for more.
+    /// Split into halves that can be driven from separate tasks, over any
+    /// stream.
     ///
-    /// The load driver's connections exist mostly to *receive*, and a client
-    /// that stops reading is indistinguishable from one that is too slow — the
-    /// server would drop it, and the run would measure the wrong thing.
-    pub async fn drain_ready(&mut self) -> io::Result<usize> {
-        let mut messages = 0;
-        loop {
-            match frame::decode_as(&mut self.buf, 64 << 20, Role::Client) {
-                Ok(Some(f)) => {
-                    if matches!(self.session.handle(f), Ok(Some(Event::Text(_)))) {
-                        messages += 1;
-                    }
-                }
-                Ok(None) => {
-                    let mut chunk = [0u8; 65536];
-                    match self.stream.try_read(&mut chunk) {
-                        Ok(0) => return Ok(messages),
-                        Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(messages),
-                        Err(e) => return Err(e),
-                    }
-                }
-                Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
-            }
-        }
-    }
-}
-
-/// The read half, for a caller that wants to receive continuously while
-/// something else sends.
-///
-/// The load driver needs this: polling for readable bytes on a timer makes the
-/// *client* the bottleneck, and the server would then drop it for lagging —
-/// turning a measurement of the server into a measurement of the harness.
-pub struct Reader {
-    read: tokio::net::tcp::OwnedReadHalf,
-    session: Session,
-    buf: BytesMut,
-}
-
-/// The write half.
-pub struct Writer {
-    write: tokio::net::tcp::OwnedWriteHalf,
-    deflater: Option<Deflater>,
-    counter: u32,
-}
-
-impl Client {
-    /// Split into halves that can be driven from separate tasks.
-    pub fn into_split(self) -> (Reader, Writer) {
-        let (read, write) = self.stream.into_split();
+    /// Uses `tokio::io::split`, which costs a `BiLock`. `Client<TcpStream>`
+    /// has [`Client::into_split`] instead, which does not.
+    pub fn split(self) -> (Reader<ReadHalf<S>>, Writer<WriteHalf<S>>) {
+        let (read, write) = tokio::io::split(self.stream);
         (
             Reader {
                 read,
@@ -224,7 +265,26 @@ impl Client {
     }
 }
 
-impl Reader {
+/// The read half, for a caller that wants to receive continuously while
+/// something else sends.
+///
+/// The load driver needs this: polling for readable bytes on a timer makes the
+/// *client* the bottleneck, and the server would then drop it for lagging —
+/// turning a measurement of the server into a measurement of the harness.
+pub struct Reader<R = tokio::net::tcp::OwnedReadHalf> {
+    read: R,
+    session: Session,
+    buf: BytesMut,
+}
+
+/// The write half.
+pub struct Writer<W = tokio::net::tcp::OwnedWriteHalf> {
+    write: W,
+    deflater: Option<Deflater>,
+    counter: u32,
+}
+
+impl<R: AsyncRead + Unpin> Reader<R> {
     /// Next message, awaiting rather than polling. `None` on close.
     ///
     /// Pings are *not* answered here — the writer half owns the socket for
@@ -252,7 +312,7 @@ impl Reader {
     }
 }
 
-impl Reader {
+impl<R: AsyncRead + Unpin> Reader<R> {
     /// Consume frames without inflating or parsing them, counting messages.
     ///
     /// For load generation, where the question is what the *server* costs. A
@@ -288,7 +348,7 @@ impl Reader {
     }
 }
 
-impl Writer {
+impl<W: AsyncWrite + Unpin> Writer<W> {
     pub async fn send(&mut self, text: &str) -> io::Result<()> {
         self.counter = self.counter.wrapping_add(0x9E37_79B9);
         let key = self.counter.to_be_bytes();

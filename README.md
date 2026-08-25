@@ -494,6 +494,38 @@ values are cut at 128 characters, well past any real name. And these counters
 are **per process** — cumulative, monotonic, and back to zero on a restart, with
 the whole endpoint absent on a room that predates them.
 
+#### Process cost
+
+```
+process_cpu_seconds_total 0.01
+process_start_time_seconds 1787641309.060
+process_resident_memory_bytes 24174592
+pahoa_resident_bytes 24174592
+```
+
+**These keep Prometheus's conventional names rather than the `pahoa_` prefix**,
+because they are what every client library exports and every off-the-shelf
+dashboard already plots: `rate(process_cpu_seconds_total[5m])` is cores used,
+and pairing it with the start time gives a whole-life CPU share from a single
+sample.
+
+`pahoa_resident_bytes` is the same number as `process_resident_memory_bytes`
+and is kept as an alias for now. The canonical spelling is the `process_` one;
+prefer it.
+
+**Process-wide, and that is the limit of what it says.** It answers what a room
+costs a node, not which task is busy — and the task that matters is the single
+actor owning room state. A room can be CPU-bound in its shards, which is
+compression doing its job, or backed up on its actor, which is the bottleneck
+the whole design exists to avoid; only `pahoa_mailbox_depth` and
+`pahoa_mailbox_peak` tell those apart. Read CPU for capacity and the mailbox
+for health.
+
+Both come from `/proc/self/stat`, and are **absent rather than zero** where it
+cannot be read — a zero would report a busy room as an idle one. An idle room
+genuinely does read `0.00`: the counter is quantized to the 10 ms clock tick,
+and a room with nobody connected does not reach one.
+
 #### The HTTP surface's own metrics
 
 The admin API and the game share a port, and are counted apart. They are
