@@ -167,7 +167,24 @@ pub enum ShardMsg {
         conn: ConnId,
         reason: &'static str,
     },
+    /// A frame for this shard was discarded, so whoever would have received it
+    /// may be out of sync and cannot tell. Close them.
+    ///
+    /// `Some` is one connection, whose own `Send` was lost. `None` is every
+    /// connection this shard owns, which is the answer for a lost broadcast:
+    /// the audience is expanded *here*, so the actor that dropped it does not
+    /// know who it was for, and finding out would mean doing the per-connection
+    /// walk shards exist to avoid.
+    Desynced {
+        conn: Option<ConnId>,
+    },
 }
+
+/// Why a connection is closed after a frame was discarded.
+///
+/// Not a lag disconnect and deliberately worded differently: the client did
+/// nothing wrong and was keeping up fine.
+const DESYNCED: &str = "server dropped a frame";
 
 /// What a filter rule can match an outbound frame against.
 ///
@@ -176,21 +193,72 @@ pub enum ShardMsg {
 /// tag to every shard.
 pub type OutTag = Arc<(pahoa_room::filter::Kind, Vec<String>)>;
 
+impl ShardMsg {
+    /// Whether this message changes what a shard *knows* rather than what it
+    /// sends.
+    ///
+    /// The distinction decides which of a shard's two inboxes it takes, and the
+    /// two have opposite failure modes. Dropping a frame under load is the
+    /// design — that is what the bounded queue and the lag rule are for. **
+    /// Dropping a membership change is silent corruption**: a lost `Remove`
+    /// strands a member and the outbound budget it holds for the life of the
+    /// process, a lost `Add` leaves a connection that never receives anything,
+    /// and a lost `Update` leaves one filtered against stale flags. None of
+    /// those recover, and none of them look like anything from outside.
+    fn is_control(&self) -> bool {
+        matches!(
+            self,
+            Self::Add { .. }
+                | Self::Remove { .. }
+                | Self::Update { .. }
+                | Self::SetFilter { .. }
+                // A close that does not arrive is a connection that should be
+                // gone and is not — an admin kick reporting success while the
+                // player keeps playing.
+                | Self::Close { .. }
+                // And the whole point of this one is that it is the answer to a
+                // dropped message; sending it down the queue that just refused
+                // one would be circular.
+                | Self::Desynced { .. }
+        )
+    }
+}
+
 /// Handles for the actor to talk to its shards.
+///
+/// **Two inboxes per shard, and the split is load-bearing.** Frames go through
+/// a bounded queue, because bounding it is the whole backpressure mechanism:
+/// the room holds finite memory under a mass release precisely because that
+/// queue can refuse. Membership changes go through an unbounded one, because
+/// there is no useful way to refuse them — see [`ShardMsg::is_control`].
+///
+/// Unbounded is safe here in a way it would not be for frames: control traffic
+/// is bounded by connection *churn* rather than by broadcast volume, each
+/// message is a handful of bytes, and the actor never blocks on either.
 #[derive(Debug, Clone)]
 pub struct Shards {
     txs: Vec<mpsc::Sender<ShardMsg>>,
+    control: Vec<mpsc::UnboundedSender<ShardMsg>>,
 }
 
 impl Shards {
     pub fn spawn(count: usize, queue_depth: usize, compression_level: u32, budget: Budget) -> Self {
         let mut txs = Vec::with_capacity(count);
+        let mut control = Vec::with_capacity(count);
         for index in 0..count {
             let (tx, rx) = mpsc::channel(queue_depth);
+            let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
             txs.push(tx);
-            tokio::spawn(run_shard(index, rx, compression_level, budget.clone()));
+            control.push(ctl_tx);
+            tokio::spawn(run_shard(
+                index,
+                rx,
+                ctl_rx,
+                compression_level,
+                budget.clone(),
+            ));
         }
-        Self { txs }
+        Self { txs, control }
     }
 
     pub fn len(&self) -> usize {
@@ -206,20 +274,38 @@ impl Shards {
     }
 
     /// Route to the one shard that owns this connection.
+    ///
+    /// Never awaits, on either inbox: the actor blocking on a shard would
+    /// reintroduce exactly the head-of-line stall shards exist to prevent.
+    /// Control messages take the unbounded queue so that "never awaits" does
+    /// not have to mean "may be discarded" — which it did, and which cost a
+    /// live room 7 MiB of its outbound budget permanently.
     pub fn tell(&self, conn: ConnId, msg: ShardMsg) {
-        // try_send, never await: the actor blocking on a shard would reintroduce
-        // exactly the head-of-line stall shards exist to prevent.
-        // A dropped `Remove` is not merely a lost message: it strands the
-        // member, and with it the outbound budget it still holds, for the life
-        // of the process. Say so rather than discarding it silently.
-        if let Err(e) = self.shard_of(conn).try_send(msg) {
-            let dropped = match &e {
-                mpsc::error::TrySendError::Full(m) | mpsc::error::TrySendError::Closed(m) => m,
-            };
-            if matches!(dropped, ShardMsg::Remove { .. }) {
-                tracing::warn!(%conn, "shard mailbox full; a connection's removal was dropped");
-            }
+        if msg.is_control() {
+            // Fails only once the shard task is gone, which is process
+            // shutdown; there is nothing to strand at that point.
+            let _ = self.control(conn).send(msg);
+            return;
         }
+        if self.shard_of(conn).try_send(msg).is_err() {
+            // **The frame is gone, so the connection has to go too.** There is
+            // no version of this where the room carries on: it advances a
+            // slot's send index as it sends, so a discarded `ReceivedItems`
+            // leaves the room believing that slot holds items it never
+            // received, and the client has no way to notice. Closing is safe
+            // where dropping is not, because the protocol resumes —
+            // `Connect` resends `checked_locations` in full and replays the
+            // item queue from zero. See `budget.rs`.
+            crate::metrics::record_shard_overflow();
+            let _ = self
+                .control(conn)
+                .send(ShardMsg::Desynced { conn: Some(conn) });
+        }
+    }
+
+    /// The unbounded half of one shard's inbox.
+    fn control(&self, conn: ConnId) -> &mpsc::UnboundedSender<ShardMsg> {
+        &self.control[conn.0 as usize % self.control.len()]
     }
 
     /// Hand a broadcast to every shard. Cost to the actor is K sends.
@@ -230,17 +316,34 @@ impl Shards {
     /// actor — measured at ~175µs for a full 140-packet chunk, which across a
     /// mass release would be half a second of mailbox stall.
     pub fn broadcast(&self, to: Recipients, msg: Outgoing, tag: Option<OutTag>) {
-        for tx in &self.txs {
-            let _ = tx.try_send(ShardMsg::Broadcast {
-                to: to.clone(),
-                msg: msg.clone(),
-                tag: tag.clone(),
-            });
+        for (index, tx) in self.txs.iter().enumerate() {
+            if tx
+                .try_send(ShardMsg::Broadcast {
+                    to: to.clone(),
+                    msg: msg.clone(),
+                    tag: tag.clone(),
+                })
+                .is_err()
+            {
+                // Every connection this shard owns, because the audience is
+                // expanded inside the shard and nothing here knows who the
+                // broadcast was for. Over-closing costs those clients a
+                // reconnect; under-closing costs one of them a game that
+                // silently disagrees with the room. See `ShardMsg::Desynced`.
+                crate::metrics::record_shard_overflow();
+                let _ = self.control[index].send(ShardMsg::Desynced { conn: None });
+            }
         }
     }
 }
 
-async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, budget: Budget) {
+async fn run_shard(
+    index: usize,
+    mut rx: mpsc::Receiver<ShardMsg>,
+    mut control: mpsc::UnboundedReceiver<ShardMsg>,
+    level: u32,
+    budget: Budget,
+) {
     let mut members: HashMap<ConnId, Member> = HashMap::new();
     // Slot membership, so `Recipients::Slot` needs no scan.
     let mut by_slot: HashMap<SlotKey, Vec<ConnId>> = HashMap::new();
@@ -255,7 +358,30 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
     // a proportion over many messages, not a schedule.
     let mut sampler = pahoa_room::filter::Sampler::new(0x9E37_79B9_7F4A_7C15 ^ index as u64);
 
-    while let Some(msg) = rx.recv().await {
+    loop {
+        // **Membership first, deliberately.** A shard that is behind on frames
+        // is still expected to know who is connected — that is what it is being
+        // asked about — and every ordering the room depends on wants it this
+        // way round: the transport must know a connection is authenticated
+        // before the join broadcast it belongs in, and must have its filter
+        // before anything filterable reaches it.
+        //
+        // Control cannot starve frames: it is bounded by connection churn,
+        // while frames are bounded by broadcast volume, and a room generates
+        // vastly more of the second.
+        let msg = tokio::select! {
+            biased;
+            Some(msg) = control.recv() => msg,
+            msg = rx.recv() => match msg {
+                Some(msg) => msg,
+                // The actor is gone. Drain whatever membership is still queued
+                // so no reservation is stranded on the way out, then stop.
+                None => match control.try_recv() {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                },
+            },
+        };
         match msg {
             ShardMsg::Add {
                 conn,
@@ -444,6 +570,26 @@ async fn run_shard(index: usize, mut rx: mpsc::Receiver<ShardMsg>, level: u32, b
                     close_member(m, reason);
                 }
             }
+            ShardMsg::Desynced { conn } => match conn {
+                Some(conn) => {
+                    if let Some(m) = members.get(&conn) {
+                        tracing::warn!(%conn, "closing a connection whose frame was dropped");
+                        close_member(m, DESYNCED);
+                    }
+                }
+                None => {
+                    if !members.is_empty() {
+                        tracing::warn!(
+                            shard = index,
+                            connections = members.len(),
+                            "closing every connection on a shard whose broadcast was dropped"
+                        );
+                    }
+                    for m in members.values() {
+                        close_member(m, DESYNCED);
+                    }
+                }
+            },
         }
     }
     tracing::debug!(shard = index, "shard stopped");
@@ -635,6 +781,145 @@ mod tests {
         // connection is behind". Those are the two cases these tests exist to
         // tell apart.
         (member, close_rx, held)
+    }
+
+    /// **A `Remove` that does not arrive strands the budget forever.**
+    ///
+    /// Seen on a live dev room: `pahoa_outbound_queued_bytes` sat at 7,288,655
+    /// constant *to the byte* for over half an hour, across two complete load
+    /// runs, through stretches where one client was connected, and while 19 MB
+    /// of traffic flowed. It arrived in steps, during a run that
+    /// lag-disconnected 165 of 200 connections — which is exactly when a
+    /// shard's mailbox is under enough pressure to refuse one.
+    ///
+    /// The same shape as the `fetch_sub` wrap from the other side: a budget
+    /// that walks down until the room refuses every reservation while holding
+    /// no memory at all, on a pod that looks perfectly healthy.
+    #[tokio::test]
+    async fn a_removal_that_cannot_be_delivered_does_not_strand_the_budget() {
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let conn = ConnId(0);
+        let handle = ConnHandle::default();
+        let (tx, _held) = mpsc::channel(4);
+        let (close_tx, _close_rx) = mpsc::channel(1);
+
+        // One shard with a one-deep frame queue, which is a shard under
+        // pressure.
+        let shards = Shards::spawn(1, 1, 0, budget.clone());
+        let before = crate::budget::queued_bytes();
+
+        shards.tell(
+            conn,
+            ShardMsg::Add {
+                conn,
+                tx,
+                close: close_tx,
+                deflate: None,
+                budget: ConnHandle::clone(&handle),
+                scoped: false,
+            },
+        );
+        assert!(
+            budget.reserve(&handle, 4096),
+            "the connection queues a frame"
+        );
+        assert_eq!(crate::budget::queued_bytes(), before + 4096);
+
+        // **Everything from here to the `await` runs without the shard getting
+        // a turn**, which is what makes the frame queue reliably full rather
+        // than a race: this is a current-thread runtime, so the shard task
+        // cannot be scheduled until this one yields.
+        for _ in 0..64 {
+            shards.tell(
+                conn,
+                ShardMsg::Send {
+                    conn,
+                    msg: crate::ws::Outgoing::text(b"x"),
+                    tag: None,
+                },
+            );
+        }
+        // The removal that hands those bytes back, asked for at the worst
+        // moment — which is the moment it is always asked for, because a mass
+        // lag-disconnect is what fills the queue in the first place.
+        shards.tell(conn, ShardMsg::Remove { conn });
+
+        // Give anything asynchronous a chance to happen before judging.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            crate::budget::queued_bytes(),
+            before,
+            "the removal was refused and its reservation is stranded for the \
+             life of the process"
+        );
+    }
+
+    /// **A frame the shard could not accept closes whoever it was for.**
+    ///
+    /// Carrying on is not an option and never was: the room advances a slot's
+    /// send index as it sends, so a discarded `ReceivedItems` leaves the room
+    /// believing that slot holds items it never received, and the client has no
+    /// way to notice. It would play a different game until it happened to
+    /// reconnect. Closing is safe where dropping is not, because `Connect`
+    /// resends `checked_locations` in full and replays the item queue from
+    /// zero — see `budget.rs`.
+    ///
+    /// Before this, the frame was discarded and nothing else happened at all.
+    #[tokio::test]
+    async fn a_frame_the_shard_cannot_accept_closes_the_connection_it_was_for() {
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let conn = ConnId(0);
+        let (tx, mut held) = mpsc::channel(4);
+        let (close_tx, mut close_rx) = mpsc::channel(1);
+
+        let shards = Shards::spawn(1, 1, 0, budget);
+        let before = crate::metrics::shard_overflow();
+
+        shards.tell(
+            conn,
+            ShardMsg::Add {
+                conn,
+                tx,
+                close: close_tx,
+                deflate: None,
+                budget: ConnHandle::default(),
+                scoped: false,
+            },
+        );
+
+        // Current-thread runtime, so the shard gets no turn until the await
+        // below: every one of these lands while its inbox stays full.
+        for _ in 0..64 {
+            shards.tell(
+                conn,
+                ShardMsg::Send {
+                    conn,
+                    msg: crate::ws::Outgoing::text(b"an item delivery"),
+                    tag: None,
+                },
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            crate::metrics::shard_overflow() > before,
+            "the shard's inbox should have refused something"
+        );
+
+        // The close reaches the connection by one route or the other: queued
+        // ahead of whatever it still holds, or out of band if that is full.
+        let mut closed = close_rx.try_recv().is_ok();
+        while let Ok(out) = held.try_recv() {
+            if matches!(out, Outbound::Close(_)) {
+                closed = true;
+            }
+        }
+        assert!(
+            closed,
+            "a connection that lost a frame was left connected and silently \
+             out of sync"
+        );
     }
 
     /// The bug in one assertion.

@@ -352,6 +352,17 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         crate::metrics::auth_rate_limited(),
     );
     metric(
+        "pahoa_shard_overflow_total",
+        "Frames a fan-out shard's inbox had no room for. Each one disconnects whoever it was \
+         for — one connection for a directed send, every connection on that shard for a \
+         broadcast — because a lost frame would otherwise leave a client silently out of sync \
+         with the room. Should be zero; if it is not, the shard queue is too shallow for the \
+         load. Not the same as pahoa_lag_disconnects_total, which is a client that could not \
+         keep up rather than a server that could not.",
+        "counter",
+        crate::metrics::shard_overflow(),
+    );
+    metric(
         "pahoa_http_malformed_total",
         "Requests that never parsed into a route, so they are counted nowhere else. A port \
          scan looks like this.",

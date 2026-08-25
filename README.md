@@ -468,6 +468,21 @@ room-wide gauges cannot. `pahoa_filtered_total{direction="to_slot"}` shares the
 per-connection denominator, so the share of a slot's traffic being filtered is a
 ratio of the two.
 
+**`pahoa_shard_overflow_total` should be zero, and is not a lag disconnect.** A
+lagged client is one that could not keep up; this is the *server* failing to —
+a fan-out shard's inbox with no room in it. The frame is lost, so the room
+disconnects whoever it was for: one connection for a directed send, every
+connection on that shard for a broadcast, since the audience is expanded inside
+the shard and nothing upstream knows who it was for.
+
+That is deliberately expensive, because the alternative is worse. The room
+advances a slot's send index as it sends, so a dropped `ReceivedItems` leaves
+the room believing a slot holds items it never received and the client cannot
+tell — it would play a different game until it happened to reconnect. Closing is
+safe where dropping is not, because `Connect` resends `checked_locations` in
+full and replays the item queue from zero. If this counter moves, the shard
+queue is too shallow for the load.
+
 Pre-auth deliveries have their own pair, `pahoa_frames_out_preauth_total` and
 `pahoa_bytes_out_preauth_total`: every connection is sent `RoomInfo` before it
 holds a slot, and a `DataPackage` answered there can run to megabytes.

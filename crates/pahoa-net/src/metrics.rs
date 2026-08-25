@@ -455,6 +455,38 @@ static AUTH_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// Requests refused because the source had already failed too often.
 static AUTH_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
 
+/// Frames a shard's mailbox had no room for.
+///
+/// **Should be zero, and it is not the same thing as a lag disconnect.** A
+/// lagged client is dropped deliberately, told about it, and can reconnect into
+/// correct state. This is the other kind: the shard's own inbox was full, so a
+/// frame — possibly a broadcast bound for every connection that shard owns —
+/// was discarded with nobody closed and nobody told. `budget.rs` explains at
+/// length why that must not happen: a discarded `ReceivedItems` leaves the room
+/// believing a slot holds items it never received, and the client cannot tell.
+///
+/// **The frame being lost is now answered by closing whoever lost it**, which
+/// is the only option that keeps the room correct: a `Send` closes its one
+/// connection, a broadcast closes every connection on that shard, because the
+/// audience is expanded inside the shard and the actor does not know who it was
+/// for. Closing is safe where dropping is not — the protocol resumes on
+/// `Connect` — so this trades a reconnect for a game that would otherwise
+/// silently disagree with the room.
+///
+/// So this counter is no longer "something bad may have happened invisibly"; it
+/// is "the room had to disconnect people to stay correct". Still should be
+/// zero, and now it names a cost rather than a mystery. If it moves, the shard
+/// queue is too shallow for the load.
+static SHARD_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_shard_overflow() {
+    SHARD_OVERFLOW.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn shard_overflow() -> u64 {
+    SHARD_OVERFLOW.load(Ordering::Relaxed)
+}
+
 pub fn record_http_malformed() {
     HTTP_MALFORMED.fetch_add(1, Ordering::Relaxed);
 }

@@ -19,6 +19,20 @@
 //! test can make happen reliably: at one point it passed one run in three, and
 //! a flaky test asserting a correctness property is worse than none. The
 //! deterministic version in `shard.rs` covers the same invariant.
+//!
+//! **So is the end-to-end budget-leak test**, and for a sharper reason than
+//! flakiness: written the obvious way — drive a room busy, drop every client,
+//! assert `queued_bytes() == 0` — it passes whether or not the leak is
+//! present. Clients that read normally have their reservations released by
+//! their own writers on the ordinary path, so the assertion comes out true for
+//! a reason that has nothing to do with what it claims to check. Confirmed by
+//! running it with the fix reverted, and again with `release_all` removed
+//! entirely: green both times.
+//!
+//! Reaching the state that leaks means a connection going away while still
+//! holding undrained bytes, which is the same kernel-buffer problem as above.
+//! `shard.rs`'s `a_removal_that_cannot_be_delivered_does_not_strand_the_budget`
+//! makes it deterministic instead, and does fail without the fix.
 
 use pahoa_multidata::{LocationStore, MultiData, NetworkSlot, SlotType, Version};
 use pahoa_net::{NetConfig, Server};
