@@ -557,7 +557,6 @@ the whole endpoint absent on a room that predates them.
 process_cpu_seconds_total 0.01
 process_start_time_seconds 1787641309.060
 process_resident_memory_bytes 24174592
-pahoa_resident_bytes 24174592
 ```
 
 **These keep Prometheus's conventional names rather than the `pahoa_` prefix**,
@@ -566,9 +565,11 @@ dashboard already plots: `rate(process_cpu_seconds_total[5m])` is cores used,
 and pairing it with the start time gives a whole-life CPU share from a single
 sample.
 
-`pahoa_resident_bytes` is the same number as `process_resident_memory_bytes`
-and is kept as an alias for now. The canonical spelling is the `process_` one;
-prefer it.
+`process_resident_memory_bytes` is the only spelling of resident memory.
+Earlier builds also exported `pahoa_resident_bytes` carrying the identical
+number; that has been removed rather than kept as an alias, because two series
+that can never disagree give a reader no way to tell them from two that might.
+A scrape naming the old one gets nothing and should be repointed.
 
 **Process-wide, and that is the limit of what it says.** It answers what a room
 costs a node, not which task is busy — and the task that matters is the single

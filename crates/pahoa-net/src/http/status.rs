@@ -226,14 +226,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "counter",
         crate::ws::deflate::compressions(),
     );
-    if let Some(rss) = crate::metrics::resident_bytes() {
-        metric(
-            "pahoa_resident_bytes",
-            "Resident set size of the whole process, allocator included.",
-            "gauge",
-            rss,
-        );
-    }
+    // Resident memory is not here: it is `process_resident_memory_bytes`, in
+    // `process` below, under the conventional spelling.
     metric(
         "pahoa_idle_seconds",
         "Seconds since any client last sent a message.",
@@ -391,19 +385,21 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
 
 /// What the process costs the node it runs on.
 ///
-/// **These two keep Prometheus's conventional names rather than the `pahoa_`
-/// prefix**, because they are the two every client library exports and every
+/// **These keep Prometheus's conventional names rather than the `pahoa_`
+/// prefix**, because they are the ones every client library exports and every
 /// off-the-shelf dashboard already plots. `rate(process_cpu_seconds_total[5m])`
 /// is CPU cores used, and it works on a panel nobody had to write.
 ///
-/// The older `pahoa_resident_bytes` is the same idea under a house name and is
-/// left alone: renaming it would break a scrape that already exists for no gain
-/// beyond tidiness. New process-level metrics take the convention; that one
-/// stays where puna can still find it.
+/// `process_resident_memory_bytes` is the **only** spelling of resident memory
+/// now. It was exported alongside a house-named `pahoa_resident_bytes` carrying
+/// the identical number, which is worse than either name alone: two series that
+/// can never disagree, and a reader with no way to tell that from two that
+/// might. Exporting one number twice is not compatibility, it is an invitation
+/// to sum them.
 ///
-/// Both are absent rather than zero when `/proc` cannot be read, which is the
-/// honest answer on a platform that does not have it — a zero here would read
-/// as an idle room.
+/// All three are absent rather than zero when `/proc` cannot be read, which is
+/// the honest answer on a platform that does not have it — a zero here would
+/// read as an idle room.
 fn process(out: &mut String) {
     if let Some(seconds) = crate::metrics::cpu_seconds() {
         out.push_str(
@@ -424,8 +420,10 @@ fn process(out: &mut String) {
     }
     if let Some(rss) = crate::metrics::resident_bytes() {
         out.push_str(
-            "# HELP process_resident_memory_bytes Resident memory size in bytes. The canonical \
-             spelling of pahoa_resident_bytes, which is the same number and is kept for now.\n\
+            "# HELP process_resident_memory_bytes Resident memory size in bytes: the whole \
+             process, allocator included, not what pahoa believes it holds. Replaces \
+             pahoa_resident_bytes, which was the same number under a house name and is no \
+             longer exported.\n\
              # TYPE process_resident_memory_bytes gauge\n",
         );
         out.push_str(&format!("process_resident_memory_bytes {rss}\n"));
