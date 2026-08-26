@@ -363,6 +363,17 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         crate::metrics::shard_overflow(),
     );
     metric(
+        "pahoa_shard_sweeps_total",
+        "Times a shard closed every connection it owns because a broadcast for them was \
+         dropped. Read against pahoa_shard_overflow_total: a full inbox refuses a broadcast on \
+         every attempt, but a sweep only has work once per population, so overflows count how \
+         far past the first failure the load went while this counts how many times people were \
+         actually disconnected. Multiply by the connections per shard for the number of \
+         players affected.",
+        "counter",
+        crate::metrics::shard_sweeps(),
+    );
+    metric(
         "pahoa_http_malformed_total",
         "Requests that never parsed into a route, so they are counted nowhere else. A port \
          scan looks like this.",

@@ -14,7 +14,27 @@ pub struct NetConfig {
     ///
     /// Broadcasts cost the room actor one message per shard rather than one per
     /// connection, which is the whole point of having them.
+    ///
+    /// A room that knows its seed should call [`shards_for`] instead. The
+    /// worker-thread fallback here is a last resort for a caller that has no
+    /// slot count — it sizes a *topology* parameter from a *compute* one, and
+    /// the two do not track each other. See [`shards_for`].
     pub shards: Option<usize>,
+
+    /// How many messages one shard's frame inbox holds. `None` matches
+    /// [`DEFAULT_SHARD_QUEUE_DEPTH`].
+    ///
+    /// A room that knows its seed should call [`shard_queue_depth_for`]: the
+    /// cost of draining one broadcast scales with the shard's membership, so a
+    /// depth that absorbs a burst in a four-slot room is not the same number
+    /// that absorbs one in a two-thousand-slot room.
+    ///
+    /// **This memory is not inside [`NetConfig::outbound_budget_bytes`].** The
+    /// budget is charged where a frame is queued *for a connection*, which is
+    /// downstream of here; a message waiting in this inbox has not been
+    /// expanded to an audience yet and nothing has reserved for it. See
+    /// [`shard_queue_bytes`] for what to size a container against.
+    pub shard_queue_depth: Option<usize>,
 
     /// Total bytes that may sit in outbound queues across all connections.
     ///
@@ -148,6 +168,7 @@ impl Default for NetConfig {
             port: 38281,
             worker_threads: None,
             shards: None,
+            shard_queue_depth: None,
             outbound_budget_bytes: 512 * 1024 * 1024,
             per_connection_budget_bytes: 256 * 1024,
             max_frame_bytes: 1024 * 1024,
@@ -177,6 +198,12 @@ impl NetConfig {
     pub fn shards_resolved(&self) -> usize {
         self.shards
             .unwrap_or_else(|| self.worker_threads_resolved())
+            .max(1)
+    }
+
+    pub fn shard_queue_depth_resolved(&self) -> usize {
+        self.shard_queue_depth
+            .unwrap_or(DEFAULT_SHARD_QUEUE_DEPTH)
             .max(1)
     }
 
@@ -216,13 +243,124 @@ pub fn outbound_budget_for(slots: usize) -> usize {
     /// Headroom per expected connection, under the per-connection cap so the
     /// global limit still binds first when many clients stall at once.
     const PER_CONNECTION: usize = 96 * 1024;
-    const CONNECTIONS_PER_SLOT: usize = 3;
     const FLOOR: usize = 64 * 1024 * 1024;
 
     slots
         .saturating_mul(CONNECTIONS_PER_SLOT)
         .saturating_mul(PER_CONNECTION)
         .max(FLOOR)
+}
+
+/// Connections one slot is expected to bring: a game client, a text client and
+/// a tracker. The same rule [`outbound_budget_for`] sizes against.
+const CONNECTIONS_PER_SLOT: usize = 3;
+
+/// What a shard's frame inbox holds when nothing sizes it from a seed, and the
+/// floor [`shard_queue_depth_for`] will not go below. It is the constant every
+/// room ran at before either knob existed, and it has never been the thing that
+/// failed on its own.
+pub const DEFAULT_SHARD_QUEUE_DEPTH: usize = 4096;
+
+/// Widest fan-out worth asking for. See [`shards_for`] for why there is a
+/// ceiling at all.
+pub const MAX_SHARDS: usize = 32;
+
+/// Deepest inbox worth asking for. Past this the envelopes alone cost megabytes
+/// per shard, and a room this far behind will not catch up by queuing more.
+pub const MAX_SHARD_QUEUE_DEPTH: usize = 65536;
+
+/// Fan-out width for a room of this many slots.
+///
+/// # Why this does not follow the CPU quota
+///
+/// It used to, and that was wrong twice over. Shard count is a **topology**
+/// decision — it follows how many connections there are to fan out to — while
+/// the worker count is a **compute** one, and an orchestrator that sets
+/// `limits.cpu: 2` for a 2000-slot room means exactly that. Deriving one from
+/// the other left the only way to widen the fan-out being to buy a CPU ceiling
+/// nothing was going to use.
+///
+/// # It is a reliability parameter before it is a throughput one
+///
+/// `Shards::broadcast` answers a full inbox by closing **every connection the
+/// shard owns**, because the audience is expanded inside the shard and the
+/// actor that dropped the message does not know who it was for. Blast radius is
+/// therefore `connections / shards`, and at the old default a 2000-slot room on
+/// two workers put half the room behind one queue. A dev-cluster run at ~5000
+/// connections shed ~2,500 of them on the first overflow and never recovered:
+/// every one came back at once, each buying a full item-history replay, which
+/// costs the room far more than shedding them saved.
+///
+/// # The ceiling
+///
+/// Each shard compresses each broadcast at most once for its own deflate
+/// connections, so compression work is `O(shards)` per broadcast, not
+/// `O(connections)` — that is what makes fan-out cheap. But it does mean shards
+/// are not free: past some width the redundant compressions cost more than the
+/// narrower blast radius buys. 32 is the same ceiling
+/// [`detect_worker_threads`] clamps to, and at that width a 6000-slot room
+/// still keeps its blast radius near the target below.
+pub fn shards_for(slots: usize) -> usize {
+    /// Connections one shard may own before it is worth splitting. This is the
+    /// blast radius a broadcast overflow costs, so it is chosen as "how many
+    /// players may a dropped frame disconnect", not as a throughput figure.
+    const CONNECTIONS_PER_SHARD: usize = 512;
+    const FLOOR: usize = 2;
+
+    slots
+        .saturating_mul(CONNECTIONS_PER_SLOT)
+        .div_ceil(CONNECTIONS_PER_SHARD)
+        .clamp(FLOOR, MAX_SHARDS)
+}
+
+/// Frame-inbox depth for a room of this many slots at this fan-out width.
+///
+/// **The two knobs multiply, which is why this takes both.** What a shard must
+/// absorb is a burst from the connections *it* owns, and the widest realistic
+/// one is every connection reconnecting at once — a reconnect storm is exactly
+/// what an overflow provokes — with each buying its own replay. So the depth
+/// that matters is per-connection-of-this-shard, and widening the fan-out
+/// lowers the depth each shard needs by the same factor.
+///
+/// That is the arithmetic the dev-cluster run failed: at two shards a
+/// 2000-slot room's shards owned ~3000 connections each against a depth of
+/// 4096, which is 1.4 messages per connection. At the default width above the
+/// same room owns ~500 per shard, and the same 4096 is eight times what it
+/// needs.
+///
+/// The floor keeps a small room at today's constant, which has never been the
+/// thing that failed.
+pub fn shard_queue_depth_for(slots: usize, shards: usize) -> usize {
+    /// Headroom per connection the shard owns.
+    const MESSAGES_PER_CONNECTION: usize = 8;
+
+    slots
+        .saturating_mul(CONNECTIONS_PER_SLOT)
+        .div_ceil(shards.max(1))
+        .saturating_mul(MESSAGES_PER_CONNECTION)
+        .clamp(DEFAULT_SHARD_QUEUE_DEPTH, MAX_SHARD_QUEUE_DEPTH)
+}
+
+/// Memory the shard inboxes can hold, which **nothing else accounts for**.
+///
+/// [`NetConfig::outbound_budget_bytes`] is charged when a frame is queued for a
+/// *connection*, which happens after a shard has expanded the audience — so a
+/// message still sitting in a shard's inbox is outside the budget entirely. An
+/// orchestrator sizing a container against the budget has to add this.
+///
+/// This is the **envelope** cost, and it is the part that is bounded: `depth ×
+/// shards` messages of [`ShardMsg`], all of it reserved by `mpsc::channel` up
+/// front. The payloads they point at are refcounted `Bytes` — one broadcast is
+/// a single allocation no matter how many shards hold it — so the payload
+/// footprint is bounded by what the room has in flight rather than by the
+/// depth, and a queue this deep is only reached when the room is producing far
+/// more than it drains.
+///
+/// [`ShardMsg`]: crate::shard::ShardMsg
+pub fn shard_queue_bytes(shards: usize, depth: usize) -> usize {
+    shards
+        .saturating_mul(depth)
+        .saturating_mul(size_of::<crate::shard::ShardMsg>())
 }
 
 /// Worker-thread count derived from the cgroup CPU quota, not the host.
@@ -318,6 +456,100 @@ mod tests {
             1,
             "zero shards would drop every broadcast"
         );
+    }
+
+    #[test]
+    fn the_queue_depth_falls_back_to_the_constant_and_is_never_zero() {
+        let cfg = NetConfig::default();
+        assert_eq!(cfg.shard_queue_depth_resolved(), DEFAULT_SHARD_QUEUE_DEPTH);
+
+        let explicit = NetConfig {
+            shard_queue_depth: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            explicit.shard_queue_depth_resolved(),
+            1,
+            "a zero-capacity channel refuses every send, so every broadcast \
+             would overflow and close the room"
+        );
+    }
+
+    /// **The blast radius is what this is sizing**, so that is what to assert
+    /// on: a broadcast that overflows closes every connection its shard owns.
+    #[test]
+    fn the_fan_out_bounds_what_one_dropped_broadcast_can_close() {
+        // The width the old default produced for the room that fell over: two
+        // CPUs meant two shards, so half of a 2000-slot room sat behind one
+        // queue. Nothing about the seed changed; only what it is derived from.
+        for slots in [500usize, 2000, 6000] {
+            let shards = shards_for(slots);
+            let blast = slots * 3 / shards;
+            assert!(
+                blast <= 600,
+                "{slots} slots across {shards} shards puts {blast} connections \
+                 behind one queue"
+            );
+        }
+
+        // Small rooms keep some parallelism without paying for shards they
+        // cannot fill, and nothing exceeds the documented ceiling.
+        assert_eq!(shards_for(0), 2);
+        assert_eq!(shards_for(4), 2);
+        assert_eq!(shards_for(usize::MAX), MAX_SHARDS);
+    }
+
+    /// The two knobs multiply, which is the whole reason the depth takes the
+    /// width: a narrower fan-out gives each shard more connections to absorb a
+    /// burst from, so it needs a deeper inbox to absorb the same burst.
+    #[test]
+    fn a_narrower_fan_out_needs_a_deeper_inbox() {
+        let wide = shard_queue_depth_for(2000, 12);
+        let narrow = shard_queue_depth_for(2000, 2);
+        assert!(
+            narrow > wide,
+            "halving the width must not leave each shard holding the same depth: \
+             {narrow} vs {wide}"
+        );
+
+        // The failure from the dev cluster, in the arithmetic. Two shards owned
+        // ~3000 connections each against the flat 4096, which is 1.4 messages
+        // per connection — less than one broadcast apiece.
+        assert!(
+            narrow >= 2000 * 3 / 2,
+            "a shard must be able to hold at least one message per connection \
+             it owns"
+        );
+
+        // A small room stays exactly where it has always been.
+        assert_eq!(shard_queue_depth_for(4, 2), DEFAULT_SHARD_QUEUE_DEPTH);
+        assert_eq!(
+            shard_queue_depth_for(usize::MAX, 1),
+            MAX_SHARD_QUEUE_DEPTH,
+            "the ceiling binds rather than overflowing"
+        );
+    }
+
+    /// What an orchestrator sizing a container has to add to the outbound
+    /// budget, since nothing else accounts for it.
+    #[test]
+    fn the_shard_inboxes_cost_a_bounded_and_modest_amount() {
+        for slots in [4usize, 500, 2000, 6000] {
+            let shards = shards_for(slots);
+            let depth = shard_queue_depth_for(slots, shards);
+            let bytes = shard_queue_bytes(shards, depth);
+            assert!(
+                bytes < 16 * 1024 * 1024,
+                "{slots} slots reserve {bytes} bytes of envelopes outside the \
+                 outbound budget"
+            );
+        }
+        // And it does not run away when the width is pinned narrow by hand,
+        // because the depth that compensates is per-shard.
+        let bytes = shard_queue_bytes(1, shard_queue_depth_for(6000, 1));
+        assert!(bytes < 16 * 1024 * 1024, "{bytes}");
+
+        assert_eq!(shard_queue_bytes(usize::MAX, usize::MAX), usize::MAX);
     }
 
     #[test]

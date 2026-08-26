@@ -19,7 +19,9 @@ pub mod tls;
 pub mod ws;
 
 pub use config::{
-    NetConfig, cgroup_cpu_quota, cgroup_memory_limit, detect_worker_threads, outbound_budget_for,
+    DEFAULT_SHARD_QUEUE_DEPTH, MAX_SHARD_QUEUE_DEPTH, MAX_SHARDS, NetConfig, cgroup_cpu_quota,
+    cgroup_memory_limit, detect_worker_threads, outbound_budget_for, shard_queue_bytes,
+    shard_queue_depth_for, shards_for,
 };
 pub use save::{SaveSink, SaveStore};
 pub use server::{Server, build_runtime, serve};

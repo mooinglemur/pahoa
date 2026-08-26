@@ -40,6 +40,8 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 | `--ping-timeout <secs>` | `20` | Grace for the answering pong; `0` never drops |
 | `--journal` | off | Append the room's history to `history.jsonl` beside the save |
 | `--outbound-budget <MiB>` | derived | Cap on queued outbound data across all clients |
+| `--shards <n>` | derived | Fan-out width, 1–32. Also the blast radius of a dropped broadcast |
+| `--shard-queue-depth <n>` | derived | How far one shard may fall behind, 4096–65536 |
 | `--log-level <level>` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
 | `--log-format <fmt>` | `text` | `text` for a terminal, `json` for a log aggregator |
 | `--tls-cert <file.pem>` | — | Certificate chain; terminates TLS on the room port |
@@ -49,6 +51,36 @@ underscored spellings (`--hint_cost`, `--release_mode`, `--disable_item_cheat`,
 ```sh
 pahoa serve seed.archipelago --port 38281 --save-dir /var/lib/pahoa/room-1
 ```
+
+### Fan-out
+
+Broadcasts go to *K* shard tasks rather than to every connection, and each shard
+expands the audience against the membership it owns. **`--shards` is a
+reliability knob before a throughput one:** a broadcast a shard's inbox has no
+room for is dropped, and the room answers by closing every connection that shard
+owns, because the audience is expanded inside the shard and nothing upstream
+knows who the frame was for. Blast radius is therefore connections ÷ shards.
+
+Both knobs default from the seed's slot count at three connections per slot —
+one shard per 512 expected connections, and a depth of 8 messages per connection
+each shard owns. **They multiply**, so the depth follows whichever width is in
+force: passing only `--shards` resizes both. A 2000-slot room gets 12 shards
+holding 4096 each, ~500 connections behind any one queue.
+
+They used to follow the Tokio worker count, which follows the cgroup CPU quota,
+and that was wrong: shard count is a topology decision and the quota is a
+scheduling one. An orchestrator setting `limits.cpu: 2` for a 2000-slot room had
+no way to widen the fan-out except by buying a CPU ceiling nothing would use —
+and at two shards that room put half its connections behind one queue.
+
+**Shard inboxes are not inside `--outbound-budget`.** The budget is charged when
+a frame is queued *for a connection*, which is downstream of these queues; a
+message still waiting in one has not been expanded to an audience yet. The
+envelopes cost `shards × depth × 72` bytes, reserved up front — a few megabytes
+at any supported sizing — and the payloads they point at are refcounted, so one
+broadcast is a single allocation however many shards hold it. The startup log
+reports the width, depth, blast radius and envelope bytes on its `fanning out`
+line, which is the number to add when sizing a container against the budget.
 
 ### Keepalives
 
@@ -482,6 +514,16 @@ tell — it would play a different game until it happened to reconnect. Closing 
 safe where dropping is not, because `Connect` resends `checked_locations` in
 full and replays the item queue from zero. If this counter moves, the shard
 queue is too shallow for the load.
+
+**Read it against `pahoa_shard_sweeps_total`, which is the one that counts
+people.** A shard whose inbox is full refuses a broadcast on every attempt, and
+each refusal used to walk the whole membership again — on the unbounded control
+queue, which is selected ahead of frames, so the response to congestion competed
+with its own recovery. A sweep now happens once per population and stands down
+only when somebody new arrives, so overflows count how far past the first
+failure the load went while sweeps count how many times connections were
+actually closed. Multiply sweeps by `--shards`' blast radius for the number of
+players affected.
 
 Pre-auth deliveries have their own pair, `pahoa_frames_out_preauth_total` and
 `pahoa_bytes_out_preauth_total`: every connection is sent `RoomInfo` before it

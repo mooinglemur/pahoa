@@ -487,6 +487,31 @@ pub fn shard_overflow() -> u64 {
     SHARD_OVERFLOW.load(Ordering::Relaxed)
 }
 
+/// Whole-population close sweeps a shard actually performed.
+///
+/// **Read against `shard_overflow` rather than on its own.** A shard whose
+/// inbox is full drops a broadcast on every attempt and each one asks for a
+/// sweep, but a sweep only has work to do once per population: it closed
+/// everybody who was there, so the next one is a no-op until somebody new
+/// arrives. The ratio is therefore how far past the first failure the room went
+/// before it stopped being asked — a dev-cluster run recorded 195,971 overflows
+/// against a room that held ~5,000 connections, and every one of those used to
+/// walk the whole membership in preference to draining the queue that
+/// overflowed.
+///
+/// So this is the counter that means "people were disconnected", and
+/// `shard_overflow` is the one that means "the queue is too shallow for the
+/// load". They moved together before and they should not.
+static SHARD_SWEEPS: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_shard_sweep() {
+    SHARD_SWEEPS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn shard_sweeps() -> u64 {
+    SHARD_SWEEPS.load(Ordering::Relaxed)
+}
+
 pub fn record_http_malformed() {
     HTTP_MALFORMED.fetch_add(1, Ordering::Relaxed);
 }

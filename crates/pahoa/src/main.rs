@@ -11,6 +11,11 @@ mod secrets;
 mod serve;
 
 use cli::{Opt, flag, value};
+// Re-exported rather than restated, so the bounds the parser enforces and the
+// bounds the sizing functions clamp to cannot drift apart.
+use pahoa_net::{
+    DEFAULT_SHARD_QUEUE_DEPTH as MIN_SHARD_QUEUE_DEPTH, MAX_SHARD_QUEUE_DEPTH, MAX_SHARDS,
+};
 use pahoa_proto::Permission;
 use pahoa_room::RoomOptions;
 use std::path::Path;
@@ -57,6 +62,20 @@ SERVE OPTIONS
     --outbound-budget <MiB>  Cap on queued outbound data across all clients.
                              Defaults to 288 KiB per slot, floored at 64 MiB —
                              a 2000-slot room gets 562 MiB, a small one 64.
+    --shards <n>             Fan-out width, 1 to 32. Defaults to one shard per
+                             512 expected connections (3 per slot), so a
+                             2000-slot room gets 12 and a small one 2. This is a
+                             reliability knob before a throughput one: a
+                             broadcast that overflows a shard's queue closes
+                             every connection that shard owns, so the blast
+                             radius is connections divided by this.
+    --shard-queue-depth <n>  Messages one shard may fall behind by, 4096 to
+                             65536, before it starts closing connections.
+                             Defaults to 8 per connection the shard owns, which
+                             falls out of --shards — halving the width doubles
+                             what each shard needs. This memory sits OUTSIDE
+                             --outbound-budget; the startup banner reports what
+                             the two together reserve.
     --log-level <level>      trace, debug, info, warn, error (default info).
                              Logs go to stderr.
     --log-format <fmt>       text or json (default text). Text is for a person
@@ -118,6 +137,8 @@ const SERVE_OPTS: &[Opt] = &[
     value("--ping-interval", &["--ping_interval"]),
     value("--ping-timeout", &["--ping_timeout"]),
     value("--outbound-budget", &[]),
+    value("--shards", &[]),
+    value("--shard-queue-depth", &["--shard_queue_depth"]),
     value("--log-level", &["--loglevel"]),
     value("--log-format", &["--log_format"]),
     flag("--journal", &[]),
@@ -342,6 +363,32 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
         None => None,
     };
 
+    // Bounded rather than merely floored, because both of these are numbers an
+    // orchestrator renders from a template and a slipped decimal point should
+    // be a refused start rather than a room that spawns a thousand shards or
+    // reserves gigabytes of envelopes.
+    let shards = match args.number::<usize>("--shards")? {
+        Some(n @ 1..=MAX_SHARDS) => Some(n),
+        Some(_) => {
+            return Err(format!(
+                "--shards: expected 1 to {MAX_SHARDS}; past that the per-shard \
+                 compression of every broadcast costs more than the narrower \
+                 blast radius buys"
+            ));
+        }
+        None => None,
+    };
+    let shard_queue_depth = match args.number::<usize>("--shard-queue-depth")? {
+        Some(n @ MIN_SHARD_QUEUE_DEPTH..=MAX_SHARD_QUEUE_DEPTH) => Some(n),
+        Some(_) => {
+            return Err(format!(
+                "--shard-queue-depth: expected {MIN_SHARD_QUEUE_DEPTH} to \
+                 {MAX_SHARD_QUEUE_DEPTH}"
+            ));
+        }
+        None => None,
+    };
+
     let log_level = match args.get("--log-level") {
         Some(v) => log_level(v)?,
         None => LevelFilter::INFO,
@@ -385,6 +432,8 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
     serve::run(serve::ServeArgs {
         multidata: Path::new(multidata),
         outbound_budget_bytes,
+        shards,
+        shard_queue_depth,
         log_level,
         log_format,
         argv: redacted_argv(argv),

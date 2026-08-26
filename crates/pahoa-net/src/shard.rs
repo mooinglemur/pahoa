@@ -357,6 +357,9 @@ async fn run_shard(
     // draw the same sequence. Independent streams are fine: a sampling rule is
     // a proportion over many messages, not a schedule.
     let mut sampler = pahoa_room::filter::Sampler::new(0x9E37_79B9_7F4A_7C15 ^ index as u64);
+    // Whether every member currently held has already been closed by a
+    // whole-population desync sweep. See the `Desynced { conn: None }` arm.
+    let mut swept = false;
 
     loop {
         // **Membership first, deliberately.** A shard that is behind on frames
@@ -391,6 +394,10 @@ async fn run_shard(
                 budget,
                 scoped,
             } => {
+                // A member the last sweep never saw, so the next dropped
+                // broadcast has somebody new to close and the guard has to
+                // stand down.
+                swept = false;
                 members.insert(
                     conn,
                     Member {
@@ -572,12 +579,33 @@ async fn run_shard(
             }
             ShardMsg::Desynced { conn } => match conn {
                 Some(conn) => {
-                    if let Some(m) = members.get(&conn) {
+                    if let Some(m) = members.get_mut(&conn)
+                        && !m.lagged
+                    {
                         tracing::warn!(%conn, "closing a connection whose frame was dropped");
+                        m.lagged = true;
                         close_member(m, DESYNCED);
                     }
                 }
+                // **Once per population, not once per dropped broadcast.**
+                // A shard whose queue is full drops a broadcast per attempt,
+                // and every one of them lands here — on the *unbounded* control
+                // queue, which is selected ahead of frames. Without the guard
+                // the shard spends a full `O(members)` sweep per drop, in
+                // preference to draining the queue that overflowed, re-closing
+                // connections that are already closing. A dev-cluster run
+                // recorded 195,971 overflows and 31,330 of these sweeps against
+                // a room that only ever held ~5,000 connections: the response
+                // to congestion was competing with its own recovery.
+                //
+                // `swept` is cleared by `Add` and by nothing else, which is
+                // exactly right — a sweep closed everyone who was here when it
+                // ran, so the only thing that can make another one necessary is
+                // somebody new arriving.
+                None if swept => {}
                 None => {
+                    swept = true;
+                    crate::metrics::record_shard_sweep();
                     if !members.is_empty() {
                         tracing::warn!(
                             shard = index,
@@ -585,7 +613,11 @@ async fn run_shard(
                             "closing every connection on a shard whose broadcast was dropped"
                         );
                     }
-                    for m in members.values() {
+                    for m in members.values_mut() {
+                        if m.lagged {
+                            continue;
+                        }
+                        m.lagged = true;
                         close_member(m, DESYNCED);
                     }
                 }
@@ -750,6 +782,172 @@ fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[ConnId]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SHARD_SWEEPS` is process-wide and the runner is threaded, so the two
+    /// tests that assert an exact number of sweeps have to exclude each other.
+    /// Nothing else in this binary spawns a shard, so this is sufficient.
+    ///
+    /// Tokio's rather than `std`'s because both holders await while holding it,
+    /// and a `std` guard across an await point parks a runtime thread on a lock
+    /// the task that owns it cannot release from another thread.
+    static SWEEPS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Fill a depth-1 shard inbox and keep pushing, so the broadcasts past the
+    /// first are refused and each asks for a sweep.
+    ///
+    /// Every one of these lands before the shard gets a turn: this is a
+    /// current-thread runtime, so the shard task cannot be scheduled until the
+    /// caller awaits.
+    fn flood(shards: &Shards) {
+        for _ in 0..64 {
+            shards.broadcast(Recipients::All, crate::ws::Outgoing::text(b"x"), None);
+        }
+    }
+
+    fn member_channels() -> (
+        mpsc::Sender<Outbound>,
+        mpsc::Receiver<Outbound>,
+        CloseSignal,
+        mpsc::Receiver<&'static str>,
+    ) {
+        // Deep enough that a second queued close would fit, so a repeat sweep
+        // would be visible rather than silently dropped.
+        let (tx, rx) = mpsc::channel(16);
+        let (close_tx, close_rx) = mpsc::channel(1);
+        (tx, rx, close_tx, close_rx)
+    }
+
+    fn closes(
+        out: &mut mpsc::Receiver<Outbound>,
+        close: &mut mpsc::Receiver<&'static str>,
+    ) -> usize {
+        let mut n = 0;
+        while let Ok(msg) = out.try_recv() {
+            if matches!(msg, Outbound::Close(_)) {
+                n += 1;
+            }
+        }
+        while close.try_recv().is_ok() {
+            n += 1;
+        }
+        n
+    }
+
+    /// **One sweep per population, not one per dropped broadcast.**
+    ///
+    /// A shard whose inbox is full refuses every broadcast that follows, and
+    /// each refusal asks it to close everyone it owns. But the first sweep
+    /// already did that, so the rest are pure cost — and expensive cost: they
+    /// arrive on the *unbounded* control queue, which `run_shard` selects ahead
+    /// of frames, so the shard spends an `O(members)` walk per drop in
+    /// preference to draining the queue that overflowed, re-closing connections
+    /// that are already closing.
+    ///
+    /// Measured on the dev cluster as 195,971 overflows and 31,330 sweeps
+    /// against a room that only ever held ~5,000 connections: the response to
+    /// congestion was competing with its own recovery.
+    #[tokio::test]
+    async fn a_shard_sweeps_once_however_many_broadcasts_it_drops() {
+        let _guard = SWEEPS.lock().await;
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let conn = ConnId(0);
+        let (tx, mut out_rx, close_tx, mut close_rx) = member_channels();
+
+        let shards = Shards::spawn(1, 1, 0, budget);
+        let sweeps = crate::metrics::shard_sweeps();
+        let overflows = crate::metrics::shard_overflow();
+
+        shards.tell(
+            conn,
+            ShardMsg::Add {
+                conn,
+                tx,
+                close: close_tx,
+                deflate: None,
+                budget: ConnHandle::default(),
+                scoped: false,
+            },
+        );
+        flood(&shards);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            crate::metrics::shard_overflow() - overflows > 1,
+            "the flood should have been refused many times over"
+        );
+        assert_eq!(
+            crate::metrics::shard_sweeps() - sweeps,
+            1,
+            "every dropped broadcast walked the whole membership again"
+        );
+        assert_eq!(
+            closes(&mut out_rx, &mut close_rx),
+            1,
+            "a connection was closed more than once for the same desync"
+        );
+    }
+
+    /// ...and the debounce stands down for anyone the sweep never saw.
+    ///
+    /// This is the half that makes it safe. A guard that latched would leave a
+    /// connection that arrived after the sweep still receiving frames the shard
+    /// had already given up on — silently out of sync, which is the exact state
+    /// the sweep exists to prevent. `Add` is what clears it, and `Add` is the
+    /// only thing that can.
+    #[tokio::test]
+    async fn a_connection_that_arrives_after_a_sweep_is_still_closed_by_the_next() {
+        let _guard = SWEEPS.lock().await;
+        let budget = Budget::new(1 << 20, 1 << 16);
+        let shards = Shards::spawn(1, 1, 0, budget);
+        let sweeps = crate::metrics::shard_sweeps();
+
+        let first = ConnId(0);
+        let (tx, _out_rx, close_tx, _close_rx) = member_channels();
+        shards.tell(
+            first,
+            ShardMsg::Add {
+                conn: first,
+                tx,
+                close: close_tx,
+                deflate: None,
+                budget: ConnHandle::default(),
+                scoped: false,
+            },
+        );
+        flood(&shards);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(crate::metrics::shard_sweeps() - sweeps, 1);
+
+        // A reconnect, which is exactly what an overflow provokes — the shed
+        // connections all come back at once.
+        let second = ConnId(1);
+        let (tx, mut out_rx, close_tx, mut close_rx) = member_channels();
+        shards.tell(
+            second,
+            ShardMsg::Add {
+                conn: second,
+                tx,
+                close: close_tx,
+                deflate: None,
+                budget: ConnHandle::default(),
+                scoped: false,
+            },
+        );
+        flood(&shards);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            crate::metrics::shard_sweeps() - sweeps,
+            2,
+            "the debounce latched, so a connection the first sweep never saw \
+             kept a frame it should have been closed for"
+        );
+        assert_eq!(
+            closes(&mut out_rx, &mut close_rx),
+            1,
+            "the connection that arrived after the first sweep was not closed"
+        );
+    }
 
     /// A member whose outbound queue is already full, which is the state every
     /// interesting case here starts from.

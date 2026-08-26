@@ -24,6 +24,15 @@ pub struct ServeArgs<'a> {
     pub ping_timeout: Duration,
     /// `None` derives it from the seed's slot count.
     pub outbound_budget_bytes: Option<usize>,
+    /// Fan-out width and how deep each shard's frame inbox is. `None` derives
+    /// both from the seed's slot count, and the second from the first.
+    ///
+    /// Passed explicitly by an orchestrator for the same reason
+    /// `outbound_budget_bytes` is: it sizes the container against these, so the
+    /// value it sized for and the value the room runs at must not be able to
+    /// disagree.
+    pub shards: Option<usize>,
+    pub shard_queue_depth: Option<usize>,
     pub options: RoomOptions,
     /// Which room-option flags were actually given, as their flag spellings.
     ///
@@ -174,8 +183,31 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     let budget = args
         .outbound_budget_bytes
         .unwrap_or_else(|| pahoa_net::outbound_budget_for(data.slot_info.len()));
+    // Sized from the seed for the same reason, and the depth from the width:
+    // what a shard must absorb is a burst from the connections it owns, so
+    // halving the fan-out doubles what each shard needs to hold. Deriving the
+    // second from whichever width is actually in force — flag or default —
+    // means passing only `--shards` still resizes both.
+    let shards = args
+        .shards
+        .unwrap_or_else(|| pahoa_net::shards_for(data.slot_info.len()));
+    let shard_queue_depth = args
+        .shard_queue_depth
+        .unwrap_or_else(|| pahoa_net::shard_queue_depth_for(data.slot_info.len(), shards));
     // Reported on their own lines rather than folded into the startup line,
     // which puna parses and which keeps its shape.
+    tracing::info!(
+        shards,
+        shard_queue_depth,
+        // What an overflowing shard would close, which is the number worth
+        // looking at when `pahoa_shard_overflow_total` moves.
+        blast_radius = data.slot_info.len().saturating_mul(3).div_ceil(shards),
+        // Not inside `outbound_budget_bytes` — that is charged when a frame is
+        // queued for a connection, downstream of these queues — so anything
+        // sizing a container against the budget has to add this.
+        queue_bytes = pahoa_net::shard_queue_bytes(shards, shard_queue_depth),
+        "fanning out"
+    );
     if let Some(paths) = &args.tls {
         tracing::info!(
             cert = %paths.cert.display(),
@@ -198,6 +230,8 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         bind: args.bind,
         port: args.port,
         outbound_budget_bytes: budget,
+        shards: Some(shards),
+        shard_queue_depth: Some(shard_queue_depth),
         ping_interval: args.ping_interval,
         ping_timeout: args.ping_timeout,
         tls: args.tls,

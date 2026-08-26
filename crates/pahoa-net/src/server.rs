@@ -87,7 +87,7 @@ impl Server {
         );
         let shards = Shards::spawn(
             config.shards_resolved(),
-            4096,
+            config.shard_queue_depth_resolved(),
             config.compression_level,
             budget.clone(),
         );
