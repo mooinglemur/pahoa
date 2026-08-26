@@ -477,10 +477,17 @@ fn compatibility_zero_demands_an_exact_version_match() {
     sink.clear();
 
     // Newer than the floor, but not identical to the server.
+    //
+    // **Derived from `SERVER_VERSION` rather than written out.** It was
+    // hardcoded as 0.6.7, and the day the room started advertising 0.6.7 that
+    // became a version which *matches* — so the client was accepted and the
+    // test failed on the assertion rather than on anything being wrong. One
+    // above the server is always a mismatch and always above the floor.
+    let server = pahoa_room::SERVER_VERSION;
     let ClientPacket::Connect(mut c) = connect(&name, &game, 0b001) else {
         unreachable!()
     };
-    c.version = Version::new(0, 6, 7);
+    c.version = Version::new(server.major, server.minor, server.build + 1);
     room.handle(conn, ClientPacket::Connect(c), &mut sink);
 
     assert_eq!(refusal(&sink, conn, &room), [Refused::IncompatibleVersion]);

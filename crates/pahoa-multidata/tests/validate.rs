@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Matches the version `pahoa_room::SERVER_VERSION` reports. Hardcoded rather
 /// than imported so this crate keeps no dependency on the one above it.
-const SERVER_VERSION: Version = Version::new(0, 6, 8);
+const SERVER_VERSION: Version = Version::new(0, 6, 7);
 
 fn fixture_dir() -> PathBuf {
     std::env::var_os("PAHOA_FIXTURE_DIR")

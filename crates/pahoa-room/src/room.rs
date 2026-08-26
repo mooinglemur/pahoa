@@ -27,7 +27,13 @@ use std::sync::Arc;
 
 /// Server version reported in `RoomInfo`. Tracks the Archipelago release whose
 /// behavior this implementation reproduces.
-pub const SERVER_VERSION: Version = Version::new(0, 6, 8);
+///
+/// **A release tag, not the tip of upstream's default branch.** This was 0.6.8
+/// for a while, which is what the checkout the behavior was read from calls
+/// itself — but 0.6.8 is unreleased, so a client comparing against it would be
+/// told the room is newer than any Archipelago that exists. The last tagged
+/// release is what a client can actually reason about.
+pub const SERVER_VERSION: Version = Version::new(0, 6, 7);
 
 /// `PrintJSON` packets per broadcast frame.
 ///
