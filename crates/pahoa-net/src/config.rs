@@ -315,29 +315,73 @@ pub fn shards_for(slots: usize) -> usize {
 
 /// Frame-inbox depth for a room of this many slots at this fan-out width.
 ///
-/// **The two knobs multiply, which is why this takes both.** What a shard must
-/// absorb is a burst from the connections *it* owns, and the widest realistic
-/// one is every connection reconnecting at once — a reconnect storm is exactly
-/// what an overflow provokes — with each buying its own replay. So the depth
-/// that matters is per-connection-of-this-shard, and widening the fan-out
-/// lowers the depth each shard needs by the same factor.
+/// # Two burst shapes, and only one of them divides by the width
 ///
-/// That is the arithmetic the dev-cluster run failed: at two shards a
-/// 2000-slot room's shards owned ~3000 connections each against a depth of
-/// 4096, which is 1.4 messages per connection. At the default width above the
-/// same room owns ~500 per shard, and the same 4096 is eight times what it
-/// needs.
+/// This took the width as its only input once, and that was wrong in a way that
+/// made the whole derivation inert. The two bursts a shard has to absorb scale
+/// in opposite directions:
 ///
-/// The floor keeps a small room at today's constant, which has never been the
-/// thing that failed.
+/// - **A reconnect storm is per-connection.** Every connection comes back at
+///   once, each buying its own replay, so what one shard sees is a burst from
+///   the connections *it* owns — and widening the fan-out really does lower
+///   what each shard needs, by the same factor.
+/// - **A release tail is per-broadcast, and does not divide by anything.**
+///   [`crate::shard::Shards::broadcast`] puts one copy of the message into
+///   *every* shard's inbox, so the broadcasts a room may have outstanding is
+///   exactly the depth, however many shards there are. Widening the fan-out
+///   buys no broadcast headroom at all — it only multiplies what the same
+///   headroom costs in memory.
+///
+/// Sizing for the first alone made the two knobs **anti-correlated** for the
+/// burst that was actually binding: dividing the depth by a width that buys
+/// broadcasts nothing moved the scarce number *down* as the fan-out widened.
+///
+/// It was also inert on the default path, which is the part that hid it.
+/// [`shards_for`] divides by 512 and this multiplied by 8, and those cancel
+/// exactly: every room up to ~5,461 slots computed at or below
+/// [`DEFAULT_SHARD_QUEUE_DEPTH`], the floor won, and the answer was always
+/// 4,096. The derivation only ever contributed once [`MAX_SHARDS`] clamped the
+/// divisor. The test that was supposed to cover this pinned the width by hand,
+/// which is the one case that does not collapse.
+///
+/// So the depth is the **larger** of the two shapes.
+///
+/// # Why the release burst is one broadcast per receiver slot
+///
+/// A mass release amortizes on the full feed — 140 items to one broadcast — but
+/// the scoped feed cannot: it emits one broadcast per distinct receiver slot,
+/// because each one carries only what concerns that slot. A release therefore
+/// costs about `min(locations per slot, slots)` broadcasts, which is why
+/// `effect.rs` puts a 2000-slot release at ~2,860 broadcast frames. Bounding it
+/// by the slot count is an upper bound available before the room starts.
+///
+/// Sixteen concurrent releases is puna's figure, arrived at independently on
+/// the cluster this failed on and adopted here unchanged so that a room and its
+/// orchestrator cannot disagree about what it was sized for.
+///
+/// # The ceiling binds above ~4,096 slots
+///
+/// [`MAX_SHARD_QUEUE_DEPTH`] caps this, so past ~4,096 slots the number of
+/// concurrent releases covered falls below sixteen — ten at 6,000 slots. That
+/// is deliberate: the envelopes cost `shards × depth`, so the ceiling is what
+/// keeps a wide fan-out from reserving hundreds of megabytes for headroom that
+/// only ever needed to be one deep queue's worth. See [`shard_queue_bytes`].
 pub fn shard_queue_depth_for(slots: usize, shards: usize) -> usize {
-    /// Headroom per connection the shard owns.
+    /// Headroom per connection one shard owns, for the reconnect storm.
     const MESSAGES_PER_CONNECTION: usize = 8;
+    /// Simultaneous releases to keep room for, for the release tail. Each costs
+    /// up to one broadcast per receiver slot, and a broadcast occupies a slot
+    /// in every shard's inbox.
+    const CONCURRENT_RELEASES: usize = 16;
 
-    slots
+    let reconnect_storm = slots
         .saturating_mul(CONNECTIONS_PER_SLOT)
         .div_ceil(shards.max(1))
-        .saturating_mul(MESSAGES_PER_CONNECTION)
+        .saturating_mul(MESSAGES_PER_CONNECTION);
+    let release_tail = slots.saturating_mul(CONCURRENT_RELEASES);
+
+    reconnect_storm
+        .max(release_tail)
         .clamp(DEFAULT_SHARD_QUEUE_DEPTH, MAX_SHARD_QUEUE_DEPTH)
 }
 
@@ -499,24 +543,82 @@ mod tests {
         assert_eq!(shards_for(usize::MAX), MAX_SHARDS);
     }
 
-    /// The two knobs multiply, which is the whole reason the depth takes the
-    /// width: a narrower fan-out gives each shard more connections to absorb a
-    /// burst from, so it needs a deeper inbox to absorb the same burst.
+    /// **The derivation has to contribute on the path rooms actually take.**
+    ///
+    /// It did not. `shards_for` divides by 512 and the depth multiplied the
+    /// per-shard connection count by 8, and those cancel exactly — so every
+    /// room up to ~5,461 slots computed at or below the floor, the floor won,
+    /// and the answer was always 4,096 however many slots the seed had. The
+    /// formula only ever contributed once `MAX_SHARDS` clamped the divisor.
+    ///
+    /// It survived review because the test that was meant to cover it pinned
+    /// the width by hand, which is the one case that does not collapse. This
+    /// one takes the width from `shards_for`, the way a room does.
     #[test]
-    fn a_narrower_fan_out_needs_a_deeper_inbox() {
-        let wide = shard_queue_depth_for(2000, 12);
-        let narrow = shard_queue_depth_for(2000, 2);
+    fn the_default_path_derives_a_depth_rather_than_landing_on_the_floor() {
+        for slots in [500usize, 1000, 2000, 6000] {
+            let depth = shard_queue_depth_for(slots, shards_for(slots));
+            assert!(
+                depth > DEFAULT_SHARD_QUEUE_DEPTH,
+                "{slots} slots defaulted to the floor, so the derivation did \
+                 nothing: {depth}"
+            );
+        }
+
+        // A room small enough that the floor is genuinely the right answer
+        // still gets it, and that is not the same failure.
+        assert_eq!(
+            shard_queue_depth_for(4, shards_for(4)),
+            DEFAULT_SHARD_QUEUE_DEPTH
+        );
+    }
+
+    /// **Widening the fan-out must never shrink the broadcast headroom.**
+    ///
+    /// `Shards::broadcast` puts one copy of the message into *every* shard's
+    /// inbox, so the broadcasts a room may have outstanding is exactly the
+    /// depth — the width buys none. Deriving the depth by dividing by the width
+    /// therefore made the two knobs anti-correlated for the burst that was
+    /// actually binding: going from 2 shards to 12 cut the scarce number by six
+    /// while multiplying what it cost in memory by the same factor.
+    ///
+    /// A release is what produces that burst. The full feed amortizes 140 items
+    /// into one broadcast; the scoped feed cannot, because each broadcast
+    /// carries only what concerns one receiver slot.
+    #[test]
+    fn the_broadcast_headroom_does_not_fall_as_the_fan_out_widens() {
+        const SLOTS: usize = 2000;
+        // Sixteen concurrent releases at one broadcast per receiver slot.
+        let needed = SLOTS * 16;
+        for shards in 1..=MAX_SHARDS {
+            let depth = shard_queue_depth_for(SLOTS, shards);
+            assert!(
+                depth >= needed,
+                "at {shards} shards a {SLOTS}-slot room holds {depth} broadcasts, \
+                 under the {needed} a release tail needs — and the width bought \
+                 none of it back"
+            );
+        }
+    }
+
+    /// The other shape still wins where it should: a fan-out pinned narrow
+    /// leaves each shard owning enough connections that a reconnect storm —
+    /// every one of them returning at once, each buying a full replay — is the
+    /// larger of the two bursts.
+    #[test]
+    fn a_fan_out_pinned_narrow_is_sized_for_the_reconnect_storm() {
+        let narrow = shard_queue_depth_for(2000, 1);
         assert!(
-            narrow > wide,
-            "halving the width must not leave each shard holding the same depth: \
-             {narrow} vs {wide}"
+            narrow > 2000 * 16,
+            "one shard owning 6000 connections needs more than the release \
+             tail alone: {narrow}"
         );
 
         // The failure from the dev cluster, in the arithmetic. Two shards owned
         // ~3000 connections each against the flat 4096, which is 1.4 messages
         // per connection — less than one broadcast apiece.
         assert!(
-            narrow >= 2000 * 3 / 2,
+            shard_queue_depth_for(2000, 2) >= 2000 * 3 / 2,
             "a shard must be able to hold at least one message per connection \
              it owns"
         );
@@ -532,22 +634,42 @@ mod tests {
 
     /// What an orchestrator sizing a container has to add to the outbound
     /// budget, since nothing else accounts for it.
+    ///
+    /// **This is not free and the numbers here are the price of the fix.**
+    /// Sizing the depth for the release tail rather than letting it collapse to
+    /// the floor took a 2000-slot room from 3.4 MiB of envelopes to 26 MiB, and
+    /// a 6000-slot one to the 144 MiB ceiling. That is the trade: broadcast
+    /// headroom costs `shards × depth`, because a broadcast occupies a slot in
+    /// every shard's inbox, while buying headroom of only `depth`.
+    ///
+    /// The bound asserted is the one at the documented flag limits, so it holds
+    /// for anything an operator can ask for and not merely for what the
+    /// derivation picks.
     #[test]
-    fn the_shard_inboxes_cost_a_bounded_and_modest_amount() {
+    fn the_shard_inboxes_cost_a_bounded_amount_at_every_reachable_sizing() {
+        // Nothing reachable through the flags exceeds the corner.
+        let ceiling = shard_queue_bytes(MAX_SHARDS, MAX_SHARD_QUEUE_DEPTH);
+        assert!(
+            ceiling <= 160 * 1024 * 1024,
+            "the worst case an operator can ask for is {ceiling} bytes"
+        );
+
         for slots in [4usize, 500, 2000, 6000] {
             let shards = shards_for(slots);
-            let depth = shard_queue_depth_for(slots, shards);
-            let bytes = shard_queue_bytes(shards, depth);
+            let bytes = shard_queue_bytes(shards, shard_queue_depth_for(slots, shards));
             assert!(
-                bytes < 16 * 1024 * 1024,
-                "{slots} slots reserve {bytes} bytes of envelopes outside the \
-                 outbound budget"
+                bytes <= ceiling,
+                "{slots} slots reserve {bytes} bytes, past the documented corner"
             );
         }
-        // And it does not run away when the width is pinned narrow by hand,
-        // because the depth that compensates is per-shard.
-        let bytes = shard_queue_bytes(1, shard_queue_depth_for(6000, 1));
-        assert!(bytes < 16 * 1024 * 1024, "{bytes}");
+
+        // A small room is still nearly free, which is what keeps a hand-run
+        // pahoa from reserving tens of megabytes it will never touch.
+        let small = shard_queue_bytes(shards_for(4), shard_queue_depth_for(4, shards_for(4)));
+        assert!(
+            small < 1024 * 1024,
+            "a four-slot room reserves {small} bytes"
+        );
 
         assert_eq!(shard_queue_bytes(usize::MAX, usize::MAX), usize::MAX);
     }

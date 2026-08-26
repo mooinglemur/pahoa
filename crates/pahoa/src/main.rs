@@ -71,11 +71,15 @@ SERVE OPTIONS
                              radius is connections divided by this.
     --shard-queue-depth <n>  Messages one shard may fall behind by, 4096 to
                              65536, before it starts closing connections.
-                             Defaults to 8 per connection the shard owns, which
-                             falls out of --shards — halving the width doubles
-                             what each shard needs. This memory sits OUTSIDE
-                             --outbound-budget; the startup banner reports what
-                             the two together reserve.
+                             Defaults to whichever burst is larger: a reconnect
+                             storm, at 8 per connection the shard owns, or a
+                             release tail, at 16 concurrent releases of one
+                             broadcast per receiver slot. Only the first divides
+                             by --shards; a broadcast lands in every shard, so
+                             the width buys no broadcast headroom at all. This
+                             memory sits OUTSIDE --outbound-budget, and it is
+                             the width that multiplies it — the startup line
+                             reports what the two together reserve.
     --log-level <level>      trace, debug, info, warn, error (default info).
                              Logs go to stderr.
     --log-format <fmt>       text or json (default text). Text is for a person

@@ -61,11 +61,29 @@ room for is dropped, and the room answers by closing every connection that shard
 owns, because the audience is expanded inside the shard and nothing upstream
 knows who the frame was for. Blast radius is therefore connections ÷ shards.
 
-Both knobs default from the seed's slot count at three connections per slot —
-one shard per 512 expected connections, and a depth of 8 messages per connection
-each shard owns. **They multiply**, so the depth follows whichever width is in
-force: passing only `--shards` resizes both. A 2000-slot room gets 12 shards
-holding 4096 each, ~500 connections behind any one queue.
+Both default from the seed's slot count at three connections per slot: one shard
+per 512 expected connections, and a depth sized for whichever of two bursts is
+larger. A 2000-slot room gets 12 shards holding 32,000 each, ~500 connections
+behind any one queue.
+
+**Only one of those bursts divides by the width, and getting that wrong made
+the derivation inert.** A reconnect storm is per-connection — every connection
+returns at once, each buying a full replay — so a wider fan-out really does
+lower what each shard needs. A release tail is per-broadcast and divides by
+nothing: `Shards::broadcast` puts one copy into *every* shard's inbox, so the
+broadcasts a room may have outstanding is exactly the depth however many shards
+there are. Widening buys no broadcast headroom, and only multiplies its cost.
+
+Sizing for the per-connection shape alone therefore moved the scarce number the
+wrong way — and cancelled out against `shards_for`'s own divisor, so every room
+under ~5,461 slots landed on the 4,096 floor whatever its seed. The depth is now
+the larger of the two shapes: `slots × 16` for the release tail, against
+`connections-per-shard × 8` for the storm.
+
+A release is what makes the second shape large. The full feed amortizes 140
+items into one broadcast; the [scoped feed](docs/scoped-feed.md) cannot, since
+each broadcast carries only what concerns one receiver slot, so a release costs
+about one broadcast per receiver.
 
 They used to follow the Tokio worker count, which follows the cgroup CPU quota,
 and that was wrong: shard count is a topology decision and the quota is a
@@ -76,11 +94,13 @@ and at two shards that room put half its connections behind one queue.
 **Shard inboxes are not inside `--outbound-budget`.** The budget is charged when
 a frame is queued *for a connection*, which is downstream of these queues; a
 message still waiting in one has not been expanded to an audience yet. The
-envelopes cost `shards × depth × 72` bytes, reserved up front — a few megabytes
-at any supported sizing — and the payloads they point at are refcounted, so one
-broadcast is a single allocation however many shards hold it. The startup log
-reports the width, depth, blast radius and envelope bytes on its `fanning out`
-line, which is the number to add when sizing a container against the budget.
+envelopes cost `shards × depth × 72` bytes, reserved up front, and the payloads
+they point at are refcounted — one broadcast is a single allocation however many
+shards hold it. **This is where broadcast headroom gets expensive:** it costs
+`shards × depth` to buy `depth`, so a 2000-slot room reserves 26 MiB and a
+6000-slot one hits the 144 MiB corner at the flag's limits. The startup log
+reports width, depth, blast radius and envelope bytes on its `fanning out` line,
+which is the number to add when sizing a container against the budget.
 
 ### Keepalives
 
