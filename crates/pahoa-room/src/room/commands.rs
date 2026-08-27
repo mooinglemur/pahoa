@@ -330,7 +330,7 @@ impl Room {
     /// The chat line every `Say` produces, whether or not it is a command.
     fn broadcast_chat(&self, key: SlotKey, display: &str, message: &str, out: &mut dyn EffectSink) {
         let text = format!("{}: {display}", self.slot_alias(key));
-        // Logged and journalled from `text`, which is built from `display`.
+        // Logged and journaled from `text`, which is built from `display`.
         // That matters for `!admin`: its caller masks the password *before*
         // calling here and passes the masked form, so what reaches the log and
         // the history is what reached the room. Anything that recorded the

@@ -75,7 +75,7 @@ broadcasts a room may have outstanding is exactly the depth however many shards
 there are. Widening buys no broadcast headroom, and only multiplies its cost.
 
 Sizing for the per-connection shape alone therefore moved the scarce number the
-wrong way — and cancelled out against `shards_for`'s own divisor, so every room
+wrong way — and canceled out against `shards_for`'s own divisor, so every room
 under ~5,461 slots landed on the 4,096 floor whatever its seed. The depth is now
 the larger of the two shapes: `slots × 16` for the release tail, against
 `connections-per-shard × 8` for the storm.
@@ -129,9 +129,15 @@ anyone ever reporting the bug.
 
 `--journal` appends the room's history to `history.jsonl` in the save directory,
 one JSON line per event: checks, cheats, hints with the point balance either
-side, chat, DeathLinks, option changes, and the `started`/`stopped` pair that
-divides the file into the runs that produced it. It needs `--save-dir`, and it is
-**not** in the log stream.
+side, chat, the DeathLink/TrapLink/RingLink conventions, goals, connects and
+disconnects, tag changes, every mutating admin command, option changes, and the
+`started`/`stopped` pair that divides the file into the runs that produced it. It
+needs `--save-dir`, and it is **not** in the log stream.
+
+The link records carry **both** the sender the room authenticated and the
+`source` the packet claimed, because the second is client-supplied and nothing
+stops a client naming somebody else. Other `Bounce` traffic stays out: a link
+fires on a game event, while a fork's own relay protocol is unbounded.
 
 Because the file outlives any one process, `started` carries the version and git
 revision that wrote what follows, and `stopped` carries those plus why the room

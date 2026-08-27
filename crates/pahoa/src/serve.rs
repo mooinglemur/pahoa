@@ -437,7 +437,7 @@ fn env_field(name: &str) -> Option<String> {
 /// How log lines are rendered.
 ///
 /// Deliberately **not** inferred from `stderr().is_terminal()`, though the
-/// colouring right below it is. Colour is cosmetic and getting it wrong costs
+/// coloring right below it is. Color is cosmetic and getting it wrong costs
 /// nothing; the format is structural, and inferring it would mean
 /// `pahoa serve … 2>debug.log` or piping through `less` silently produced a
 /// different shape than the same command produced on the screen. An operator
@@ -461,7 +461,7 @@ fn init_logging(level: LevelFilter, format: LogFormat) {
         .with_writer(std::io::stderr);
 
     match format {
-        // Colour when a person is watching, plain text when the kubelet is.
+        // Color when a person is watching, plain text when the kubelet is.
         LogFormat::Text => builder.with_ansi(std::io::stderr().is_terminal()).init(),
         // `flatten_event` lifts the event's own fields to the top level rather
         // than nesting them under "fields", so a query is `.slot` and not

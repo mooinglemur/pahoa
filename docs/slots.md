@@ -9,7 +9,7 @@ A seed's `slot_info` holds three kinds of slot, and they are not interchangeable
 - **Group** — an item-link construct. No client ever connects as one.
 
 For a long time only players existed in practice, so "a slot" was unambiguous and one accessor
-served every purpose. A spectator pulls two properties apart that had always travelled together:
+served every purpose. A spectator pulls two properties apart that had always traveled together:
 **who may connect**, and **who has progress to report**. Using one where the other belongs is how a
 spectator goes missing from a roster, or turns up as a permanently idle player.
 

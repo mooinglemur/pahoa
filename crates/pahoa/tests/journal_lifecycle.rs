@@ -45,7 +45,7 @@ fn temp_dir(name: &str) -> PathBuf {
 /// Start a room with a journal and wait until it is actually serving.
 ///
 /// Waiting for the announcement rather than sleeping: a debug build parsing a
-/// 96-slot seed is not fast, and signalling a room that has not finished its
+/// 96-slot seed is not fast, and signaling a room that has not finished its
 /// restore would test the wrong path entirely.
 fn serving_room(dir: &Path) -> Child {
     let seed = fixture().expect("caller checked");
@@ -77,7 +77,7 @@ fn serving_room(dir: &Path) -> Child {
         }
     });
 
-    // Waiting for the announcement rather than sleeping: signalling a room that
+    // Waiting for the announcement rather than sleeping: signaling a room that
     // has not finished its restore would test a different path entirely.
     match ready.recv_timeout(Duration::from_secs(30)) {
         Ok(()) => child,
@@ -127,11 +127,11 @@ fn a_terminated_room_records_that_it_started_and_why_it_stopped() {
 
     // SIGTERM by hand: `Child::kill` sends SIGKILL, which is the case that
     // deliberately writes nothing.
-    let signalled = Command::new("kill")
+    let signaled = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .expect("kill runs");
-    assert!(signalled.success(), "could not signal the room");
+    assert!(signaled.success(), "could not signal the room");
     wait_for_exit(&mut child);
 
     let records = records(&dir);
@@ -189,11 +189,11 @@ fn a_killed_room_leaves_no_closing_record_so_a_crash_is_visible() {
 
     // A second incarnation in the same directory, stopped cleanly this time.
     let mut child = serving_room(&dir);
-    let signalled = Command::new("kill")
+    let signaled = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
         .expect("kill runs");
-    assert!(signalled.success());
+    assert!(signaled.success());
     wait_for_exit(&mut child);
 
     let kinds: Vec<String> = records(&dir)

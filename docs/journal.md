@@ -12,10 +12,17 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 | `started` | a room process began serving | `version`, `build_rev` |
 | `stopped` | it stopped cleanly | `reason`, `version`, `build_rev` |
 | `check` | a location became checked, including via release and collect | `finder`, `receiver`, `item_name`, `location_name`, `flags` |
+| `connected` | a connection finished authenticating | `slot`, `player`, `game`, `version`, `tags` |
+| `disconnected` | a connection went away | `slot`, `player`, `tags`, `slot_empty` |
+| `tags_changed` | a client's tags actually changed | `slot`, `from`, `to` |
+| `goal` | a slot reached its goal | `slot`, `player`, `game` |
+| `admin` | any mutating admin-API command | `command`, `slot`, `detail` |
 | `cheat` | `!getitem` conjured an item | `slot`, `item_name` |
 | `hints` | hints were granted | `granted`, `cost`, `points_before`, `points_after` |
 | `chat` | anything said in the room | `slot`, `text` |
 | `deathlink` | a `Bounce` tagged DeathLink | `slot`, `cause`, `source`, `recipients` |
+| `traplink` | a `Bounce` tagged TrapLink | `slot`, `trap_name`, `source`, `recipients` |
+| `ringlink` | a `Bounce` tagged RingLink | `slot`, `amount`, `source`, `recipients` |
 | `options` | room start, and after any option change | every option, plus `password_mode` |
 | `option_changed` | `!admin /option` | `option`, `value` |
 | `slot_password_changed` | the admin API set or cleared one | `slot`, `set` |
@@ -24,6 +31,13 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 ```json
 {"type":"started","at":1787844931.943,"version":"0.1.0","build_rev":"497b5e1"}
 {"type":"stopped","at":1787845029.761,"reason":"SIGTERM","version":"0.1.0","build_rev":"497b5e1"}
+{"type":"connected","at":1787157140.101,"team":0,"slot":1,"player":"amperketBalala",
+ "game":"Balatro","version":"0.6.8","tags":["AP"]}
+{"type":"goal","at":1787159999.002,"team":0,"slot":1,"player":"amperketBalala","game":"Balatro"}
+{"type":"admin","at":1787160001.500,"command":"send_item","slot":1,
+ "detail":{"item":"Archipelago Tarot","amount":3}}
+{"type":"disconnected","at":1787160400.880,"team":0,"slot":1,"player":"amperketBalala",
+ "tags":["AP","DeathLink"],"slot_empty":true}
 {"type":"check","at":1787157141.420,"finder":1,"finder_name":"amperketBalala",
  "receiver":1,"receiver_name":"amperketBalala","item":5606235,"item_name":"Archipelago Tarot",
  "location":5606192,"location_name":"Green Deck Ante 1 White Stake","flags":1}
@@ -41,7 +55,7 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 **No password, ever.** Two paths could have put one here and both are closed:
 
 - `chat` is built from the text the room *broadcast*, which for `!admin` is already masked by
-  `cmd_admin` before anything else sees it. So `!admin login hunter2` is journalled as
+  `cmd_admin` before anything else sees it. So `!admin login hunter2` is journaled as
   `!admin login ****************`. Recording anything earlier in that path would undo the masking
   into a file that outlives the room, which is the worst place for a password to reappear.
 - `options` and `slot_password_changed` carry password **modes and facts**, never values:
@@ -52,7 +66,7 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 
 **Only DeathLink among bounces.** `Bounce` is a general relay that forks and trackers use for their
 own traffic, and unlike checks its volume is unbounded — checks are capped by the seed's location
-count, deaths are not. Journalling all of it would let one chatty client dominate a room's history.
+count, deaths are not. Journaling all of it would let one chatty client dominate a room's history.
 
 ## Why the option set is written twice
 
@@ -76,7 +90,7 @@ than durability.
   rather than the platform's logs.
 - **Lifetime.** Retention is a platform setting. An async room outliving that window loses the
   history the organizer wanted, and nobody finds out until they ask for it.
-- **Identity across restarts.** Pod logs are labelled by pod, and a restarted room is a new pod;
+- **Identity across restarts.** Pod logs are labeled by pod, and a restarted room is a new pod;
   reassembling one room's history means promoting a stable label through the shipper. The save
   directory is the same directory by definition, so appending to a file in it is continuous for
   free.
@@ -165,11 +179,53 @@ not competing with anyone else's retention.
 
 ## What it does not yet record
 
-Goal completions, joins and parts, countdowns, and admin actions other than option and slot-password
-changes. The `type` field exists so these can be added without changing what a reader does with the
-lines it already understands.
+The remaining gaps are narrow, and all of them are things whose *effect* is already in the file even
+where the cause is not:
 
-Two of the events above are worth a note on why they are shaped as they are:
+- **Which checks came from a release or a collect.** `check` records the movement and not its origin,
+  so a released world's 3,000 lines look like a very fast player. An `admin` record now explains the
+  ones an operator caused, and a `goal` explains an auto-release, but a player's own `!release` does
+  not say so. Fixing it properly means a field on `check`, which is the highest-volume record in the
+  file and the one most worth leaving alone.
+- **`!countdown` typed by a player.** The admin one is an `admin` record; the chat one is not.
+- **Team completion**, as distinct from the individual `goal` records that imply it.
+- **Datastore writes.** `Set` is client scratch space, unbounded in volume and meaningful only to the
+  client that wrote it.
+- **Non-goal status changes.** `Ready` and `Playing` churn as clients come and go; only the
+  irreversible transition earns a line.
+
+The `type` field exists so these can be added without changing what a reader does with the lines it
+already understands.
+
+Several of the events above are worth a note on why they are shaped as they are:
+
+- **`admin` is one record for every verb, written at the dispatch point.** A bespoke record per
+  handler would have been more precise and would have rotted: a new admin verb is journaled here
+  because it is an admin verb, not because whoever added it remembered. It also settles an
+  inconsistency — `!getitem` in chat has always been a `cheat`, while the same grant through `/send`
+  used to leave no trace at all, so whether an action was recorded depended on which door the
+  operator came through. It records the command **as asked for**, so a refused verb still appears;
+  what came of it is in the reply the operator got.
+- **`connected` is per connection, not per player**, and only ever after authentication succeeds. A
+  slot running a game, a text client and a tracker produces three. A port scan, a wrong password and
+  a refused version produce none, which is what stops the file being somewhere a stranger can write.
+- **`disconnected` carries `slot_empty`.** Closing one of three clients is ordinary; the slot going
+  dark is the thing somebody asks about later, and deriving it means replaying every join and part
+  from the top of the file.
+- **`tags_changed` fires on the change, not on the packet.** Trackers send `ConnectUpdate` routinely
+  and most change nothing. Tags are worth recording when they do move: they decide whether a
+  connection may claim the goal, whether it receives chat, and whether it counts as a game client.
+- **The link records carry both who sent it and who the packet said sent it.** `source` is copied
+  straight out of the bounce payload, so it is the client's unvalidated claim and nothing stops one
+  naming somebody else; `team`, `slot` and `player` come from the authenticated connection the packet
+  arrived on. An organizer asked "who killed me" needs the second. `RingLink` has no `source` at all
+  — that convention puts a client instance id where the others put a name.
+- **Links are journaled and other bounces are not, and the reason is volume rather than
+  importance.** A link fires on a discrete game event, so its rate is bounded by play; a fork's or a
+  tracker's own relay traffic is bounded by nothing and would let one chatty client dominate the
+  file. The three conventions live in one table (`LINKS`), so a fourth is a row rather than a branch
+  — only `DeathLink` was recorded at first, which left the history unable to answer "why did I get a
+  trap I never earned".
 
 - **`hints` carries both balances, not just the cost.** Hint price is a percentage of a slot's own
   location count and can be changed mid-room with `!admin /option hint_cost`, so a cost recorded in

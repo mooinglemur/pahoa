@@ -157,12 +157,108 @@ impl AdminOutcome {
     }
 }
 
+/// Whether an option's *value* is a secret, judged from its name alone.
+///
+/// Deliberately a substring test rather than a list to keep in step with
+/// `SETTABLE`: a new password-bearing option added elsewhere is masked here by
+/// default, and the failure mode of a false positive is one masked value in a
+/// history rather than a leaked credential in a file handed to a person.
+fn is_secret_option(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("password")
+}
+
+/// How one admin command is recorded: verb, target slot, and its arguments.
+///
+/// `None` for the commands that change nothing — there is exactly one, and a
+/// history full of somebody refreshing a status page is a history nobody reads.
+fn journal_shape(command: &AdminCommand) -> Option<(&'static str, Option<u32>, serde_json::Value)> {
+    use serde_json::json;
+    Some(match command {
+        // Read-only. The reply goes to the operator and nothing in the room moved.
+        AdminCommand::Status => return None,
+        AdminCommand::Say { text } => ("say", None, json!({ "text": text })),
+        AdminCommand::Countdown { seconds } => ("countdown", None, json!({ "seconds": seconds })),
+        AdminCommand::Release { slot } => ("release", Some(*slot), json!({})),
+        AdminCommand::Collect { slot } => ("collect", Some(*slot), json!({})),
+        AdminCommand::SendItem { slot, item } => (
+            "send_item",
+            Some(*slot),
+            json!({ "item": item, "amount": 1 }),
+        ),
+        AdminCommand::SendMultiple { slot, item, amount } => (
+            "send_item",
+            Some(*slot),
+            json!({ "item": item, "amount": amount }),
+        ),
+        AdminCommand::Hint { slot, item, force } => (
+            "hint",
+            Some(*slot),
+            json!({ "item": item, "forced": force }),
+        ),
+        AdminCommand::HintLocation {
+            slot,
+            location,
+            force,
+        } => (
+            "hint_location",
+            Some(*slot),
+            json!({ "location": location, "forced": force }),
+        ),
+        AdminCommand::SendLocation { slot, location } => (
+            "send_location",
+            Some(*slot),
+            json!({ "location": location }),
+        ),
+        AdminCommand::AllowRelease { slot, allowed } => {
+            ("allow_release", Some(*slot), json!({ "allowed": allowed }))
+        }
+        AdminCommand::Lock { slot, locked } => ("lock", Some(*slot), json!({ "locked": locked })),
+        AdminCommand::SetStatus { slot, status } => (
+            "set_status",
+            Some(*slot),
+            json!({ "status": status.as_text() }),
+        ),
+        AdminCommand::Alias { slot, alias } => ("alias", Some(*slot), json!({ "alias": alias })),
+        // **Masked on the name, not on whether the command will succeed.**
+        // `/option` refuses every password-bearing option — but that refusal
+        // happens in the handler, and this record is written before dispatch,
+        // so relying on it would put `server_password: topsecret` in a file
+        // that outlives the room every time an operator tried. The attempt is
+        // still worth recording; the value never is.
+        AdminCommand::Option { name, value } => (
+            "option",
+            None,
+            json!({
+                "option": name,
+                "value": if is_secret_option(name) { "***" } else { value.as_str() },
+            }),
+        ),
+        AdminCommand::Kick { slot, reason } => ("kick", Some(*slot), json!({ "reason": reason })),
+    })
+}
+
 impl Room {
     /// Run one administrative command.
     ///
     /// Every path is synchronous and runs on the actor, holding `&mut Room`, so
     /// there is no locking here and nothing to reconcile afterwards.
     pub fn admin(&mut self, command: AdminCommand, out: &mut dyn EffectSink) -> AdminOutcome {
+        // **Before dispatch, and once for every verb.** Recording it here
+        // rather than inside each handler is what keeps the history honest as
+        // the surface grows: a command is journaled because it is an admin
+        // command, not because whoever added it remembered to. It is also what
+        // makes the two doors agree — `!getitem` in chat has always been a
+        // `cheat` record, while the same grant through `/send` used to be
+        // invisible.
+        //
+        // The command as *asked for*, not as it turned out: a refused verb is
+        // exactly as interesting to somebody reconstructing a dispute, and the
+        // outcome is in the reply the operator got.
+        if let Some((verb, slot, detail)) = journal_shape(&command) {
+            out.journal_event(crate::effect::JournalEvent::admin(
+                self.clock, verb, slot, detail,
+            ));
+        }
         match command {
             AdminCommand::Status => AdminOutcome::lines(self.admin_status()),
             AdminCommand::Say { text } => self.admin_say(text, out),

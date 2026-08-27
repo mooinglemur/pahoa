@@ -19,7 +19,7 @@
 //! - **Lifetime.** Retention is a platform setting. An async room outliving that
 //!   window loses the history the organizer wanted, and nobody involved would
 //!   notice until they asked for it.
-//! - **Identity across restarts.** Pod logs are labelled by pod, and a restarted
+//! - **Identity across restarts.** Pod logs are labeled by pod, and a restarted
 //!   room is a new pod. Reassembling one room's history means promoting a stable
 //!   label through the shipper. The save directory is the same directory by
 //!   definition, so appending to a file in it is continuous for free.

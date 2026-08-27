@@ -516,7 +516,7 @@ async fn shutdown_answers_and_then_asks_the_process_to_stop() {
 
     tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
-        .expect("the shutdown request should have been signalled")
+        .expect("the shutdown request should have been signaled")
         .expect("the waiter should not have panicked");
 
     server.shutdown().await;

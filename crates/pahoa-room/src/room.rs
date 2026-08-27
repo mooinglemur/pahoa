@@ -35,6 +35,29 @@ use std::sync::Arc;
 /// release is what a client can actually reason about.
 pub const SERVER_VERSION: Version = Version::new(0, 6, 7);
 
+/// The cross-game *link* conventions carried over `Bounce`, as
+/// `(bounce tag, journal record type, the payload field naming what happened)`.
+///
+/// **A table rather than a branch per convention**, because the set grows and
+/// the last time it grew nothing noticed: only `DeathLink` was recorded, so a
+/// history could not answer "why did I get a trap I never earned" — which is
+/// exactly the sort of question the file exists for. A fourth convention is a
+/// row here.
+///
+/// The server relays all `Bounce` traffic identically and none of these are
+/// server semantics; what earns them a line is that a link fires on a discrete
+/// game event, while a fork's own relay traffic is bounded by nothing. Counts
+/// upstream at the time of writing: `DeathLink` in 98 worlds, `TrapLink` in 5,
+/// `RingLink` in 4.
+///
+/// A bounce naming two of them takes the first match, which is deterministic
+/// and good enough for a combination no client sends — the payloads differ.
+const LINKS: &[(&str, &str, &str)] = &[
+    ("DeathLink", "deathlink", "cause"),
+    ("TrapLink", "traplink", "trap_name"),
+    ("RingLink", "ringlink", "amount"),
+];
+
 /// `PrintJSON` packets per broadcast frame.
 ///
 /// Chosen by Archipelago to sit near the compression window without producing
@@ -362,6 +385,17 @@ impl Room {
                 ..Default::default()
             })],
         );
+
+        // After the `by_slot` prune above, so `slot_empty` answers "is this
+        // slot dark now" rather than "was it dark before this one left" — which
+        // would be false for every departure and true for none.
+        out.journal_event(crate::effect::JournalEvent::disconnected(
+            self.clock,
+            key,
+            &self.slot_alias(key),
+            &client.tags,
+            self.by_slot.get(&key).is_none_or(Vec::is_empty),
+        ));
     }
 
     // --- packet dispatch -------------------------------------------------
@@ -664,6 +698,17 @@ impl Room {
     fn announce_join(&self, conn: ConnId, out: &mut dyn EffectSink) {
         let client = &self.clients[&conn];
         let key = (client.team, client.slot);
+        // Here rather than beside the `auth` flip, because this is the one
+        // place that runs exactly once per authenticated connection — the flip
+        // above it also fires for a reconnecting `ConnectUpdate`.
+        out.journal_event(crate::effect::JournalEvent::connected(
+            self.clock,
+            key,
+            &self.slot_alias(key),
+            &self.slot_game(client.slot),
+            &client.version.to_string(),
+            &client.tags,
+        ));
         let verb = non_game_verb(&client.tags).unwrap_or("playing");
         // `MultiServer.py:972-976`, verbatim. Every part of the shape matters
         // because players read it: the parenthesized field is the *team*, the
@@ -715,6 +760,10 @@ impl Room {
         out: &mut dyn EffectSink,
     ) {
         let mut resend = false;
+        // Captured before `apply_tags` overwrites them, and only compared —
+        // a tracker sends `ConnectUpdate` routinely and most of those change
+        // nothing at all.
+        let mut retagged: Option<(SlotKey, Vec<String>, Vec<String>)> = None;
         {
             let Some(client) = self.clients.get_mut(&conn) else {
                 return;
@@ -741,8 +790,25 @@ impl Room {
                 }
             }
             if let Some(tags) = args.tags {
+                if tags != client.tags {
+                    retagged = Some((
+                        (client.team, client.slot),
+                        client.tags.clone(),
+                        tags.clone(),
+                    ));
+                }
                 client.apply_tags(tags);
             }
+        }
+
+        if let Some((key, from, to)) = retagged {
+            out.journal_event(crate::effect::JournalEvent::tags_changed(
+                self.clock,
+                key,
+                &self.slot_alias(key),
+                &from,
+                &to,
+            ));
         }
 
         // Changing items_handling restarts the item stream from zero, because
@@ -1011,26 +1077,34 @@ impl Room {
         let mut targets = targets;
         targets.sort_unstable();
 
-        // DeathLink specifically, not every bounce. A `Bounce` is a general
-        // relay — trackers and forks use it for their own traffic — and its
-        // volume is unbounded in a way checks are not, so journalling all of it
-        // would let one chatty client dominate the room's history. DeathLink is
-        // the one an organizer is asked about.
-        if tags.iter().any(|t| t.eq_ignore_ascii_case("DeathLink")) {
+        // The link conventions, not every bounce. A `Bounce` is a general relay
+        // — trackers and forks use it for their own traffic — and its volume is
+        // unbounded in a way checks are not, so journaling all of it would let
+        // one chatty client dominate the room's history. A link is different in
+        // kind: it fires on a discrete game event, so its rate is bounded by
+        // play, and it is a cross-game effect somebody will be asked to
+        // explain. See `LINKS`.
+        if let Some((_, kind, payload)) = LINKS
+            .iter()
+            .find(|(tag, _, _)| tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+        {
             let data = args.data.as_object();
-            let field = |name: &str| {
-                data.and_then(|d| d.get(name))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            };
+            // Cloned rather than stringified, so `amount` stays a number and
+            // `cause` stays a string — the conventions do not agree on a type
+            // and there is no reason to flatten them into one.
+            let mut extra = serde_json::Map::new();
+            if let Some(value) = data.and_then(|d| d.get(*payload)) {
+                extra.insert((*payload).to_string(), value.clone());
+            }
             let key = (team, sender_slot);
-            out.journal_event(crate::effect::JournalEvent::death_link(
+            out.journal_event(crate::effect::JournalEvent::link(
                 self.clock,
+                kind,
                 key,
                 &self.slot_alias(key),
-                field("cause").as_deref(),
-                field("source").as_deref(),
+                data.and_then(|d| d.get("source")).and_then(Value::as_str),
                 targets.len(),
+                extra,
             ));
         }
 
@@ -1091,6 +1165,15 @@ impl Room {
         out.mark_dirty();
 
         if status == ClientStatus::Goal {
+            // Before the auto-release and auto-collect below, so the `check`
+            // records they produce sit under the goal that explains them
+            // rather than above it.
+            out.journal_event(crate::effect::JournalEvent::goal(
+                self.clock,
+                key,
+                &self.slot_alias(key),
+                &self.slot_game(key.1),
+            ));
             self.on_goal_achieved(key, out);
             self.announce_team_completion(key.0, out);
         }
@@ -1265,7 +1348,7 @@ impl Room {
 
         for (receiver, item, location, flags) in sortable {
             // The room's durable history, if anything is keeping one. A no-op
-            // on every sink but the journalling one, so a room without
+            // on every sink but the journaling one, so a room without
             // `--journal` pays an empty call here rather than a branch on
             // configuration it would otherwise have to carry.
             out.journal_check(crate::effect::CheckRecord {
