@@ -166,15 +166,39 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             )
             .map_err(|e| format!("journal in {}: {e}", dir.display()))?;
             tracing::info!(path = %writer.path().display(), "appending a per-check history");
+            // First, so the records below it are attributable to a build. The
+            // matching `stopped` is written on the way out, and its *absence*
+            // before the next `started` is how a reader tells a crash from a
+            // quiet night — see `JournalEvent::started`.
+            journal.event(pahoa_room::JournalEvent::started(
+                start_time,
+                env!("CARGO_PKG_VERSION"),
+                env!("PAHOA_BUILD_REV"),
+            ));
             // The rules this room is starting under, before anything happens in
             // it. Written on every start rather than only the first, because a
             // restart is exactly when they can have changed — and a reader
             // scanning back from any point finds the options in force without
             // replaying every change from the beginning.
             journal.event(pahoa_room::JournalEvent::options(start_time, &room.options));
+            // **Both of those go to the disk now rather than on the next tick.**
+            // `started` is the marker a reader uses to notice that the previous
+            // incarnation never stopped, so a room that dies in its first
+            // second — which is when a bad config, a wedged mount or an OOM
+            // kill takes one — has to have already left the evidence. One
+            // syscall per room start, against a crash that would otherwise be
+            // invisible.
+            journal.flush();
             (Some(journal), Some(writer))
         }
     };
+    // Cloned before the handle moves into the actor's config, because the
+    // closing record is written after the actor has stopped and there is
+    // nothing left to ask by then. It must also be *dropped* before
+    // `writer.finish()` — a surviving clone holds the channel open and the join
+    // below would wait forever — which is why it lives inside the runtime block
+    // rather than beside the writer.
+    let closing = journal.clone();
     let saves = SaveConfig { journal, ..saves };
 
     // Sized from the seed rather than left at a constant: the cap is there to
@@ -301,6 +325,22 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         };
         tracing::info!(reason, "shutting down");
         server.shutdown().await;
+        // After the quiesce, so the record sits below the last check the room
+        // accepted rather than above it, and the file reads in the order things
+        // happened. `flush` because the writer batches, and this is the one
+        // record whose whole value is that it reached the disk.
+        if let Some(journal) = closing {
+            journal.event(pahoa_room::JournalEvent::stopped(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or_default(),
+                reason,
+                env!("CARGO_PKG_VERSION"),
+                env!("PAHOA_BUILD_REV"),
+            ));
+            journal.flush();
+        }
         Ok(())
     });
 

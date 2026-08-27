@@ -9,6 +9,8 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 
 | `type` | when | notable fields |
 |---|---|---|
+| `started` | a room process began serving | `version`, `build_rev` |
+| `stopped` | it stopped cleanly | `reason`, `version`, `build_rev` |
 | `check` | a location became checked, including via release and collect | `finder`, `receiver`, `item_name`, `location_name`, `flags` |
 | `cheat` | `!getitem` conjured an item | `slot`, `item_name` |
 | `hints` | hints were granted | `granted`, `cost`, `points_before`, `points_after` |
@@ -20,6 +22,8 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 | `gap` | the writer had to drop records | `dropped` |
 
 ```json
+{"type":"started","at":1787844931.943,"version":"0.1.0","build_rev":"497b5e1"}
+{"type":"stopped","at":1787845029.761,"reason":"SIGTERM","version":"0.1.0","build_rev":"497b5e1"}
 {"type":"check","at":1787157141.420,"finder":1,"finder_name":"amperketBalala",
  "receiver":1,"receiver_name":"amperketBalala","item":5606235,"item_name":"Archipelago Tarot",
  "location":5606192,"location_name":"Green Deck Ante 1 White Stake","flags":1}
@@ -111,11 +115,37 @@ The buffer holds 2<sup>19</sup> records, which is more than the largest burst a 
 produce on any real seed — so the drop path is reserved for a disk that has genuinely stopped, not
 for ordinary play.
 
+## Incarnations, and telling a crash from a quiet night
+
+The file spans every run of a room — that is the whole reason it lives beside the save rather than in
+the log stream — so `started` and `stopped` are what divide it into the runs that produced it. Each
+carries the `version` and the git `build_rev`, which is what makes "did this room's behavior change
+under it" answerable months later, when the version number alone has been reused by a dozen builds.
+
+**A `started` with no `stopped` before it is an unclean stop.** That is the design rather than a gap
+in it: a process killed outright — `SIGKILL`, an OOM kill, a node disappearing — writes nothing,
+because there is nothing left that could write it. So the absence is the signal, and it is legible to
+somebody who never saw the pod. Writing a closing record optimistically at startup was the obvious
+alternative and would state the opposite of the truth in exactly the case worth detecting.
+
+`reason` is the same word the shutdown log line uses, so the two match without a translation table:
+`SIGTERM` for an orchestrator draining a pod, `SIGINT` for a person at a terminal, and
+`admin request` for `POST /admin/v1/shutdown`.
+
 ## Durability
 
-The writer flushes every 1024 records and on the save timer, so the journal and the save agree about
-how much a hard kill can cost. An `fsync` per check would make a release disk-bound for a guarantee
-nobody asked for: the save file makes the same bargain for the same reason.
+The writer flushes every 1024 records, after one second of quiet, and on the save timer — so the
+journal and the save agree about how much a hard kill can cost. An `fsync` per check would make a
+release disk-bound for a guarantee nobody asked for: the save file makes the same bargain for the
+same reason.
+
+The idle second matters because a count alone scales the wrong way for a reader. A busy room passes
+1024 constantly and is always fresh; a quiet room would reach the disk only on the save tick, so the
+room with somebody watching the feed was the room whose file was worst.
+
+**`started` is flushed the moment it is written**, ahead of any of that. It is the marker that says
+the previous incarnation never stopped, so a room that dies in its first second — which is when a bad
+config, a wedged mount or an OOM kill takes one — has to have already left the evidence.
 
 At shutdown the actor's handle is dropped, which closes the channel, and the process joins the writer
 before exiting — so a clean stop never leaves records in a buffer.

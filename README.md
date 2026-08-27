@@ -129,8 +129,16 @@ anyone ever reporting the bug.
 
 `--journal` appends the room's history to `history.jsonl` in the save directory,
 one JSON line per event: checks, cheats, hints with the point balance either
-side, chat, DeathLinks, and option changes. It needs `--save-dir`, and it is
+side, chat, DeathLinks, option changes, and the `started`/`stopped` pair that
+divides the file into the runs that produced it. It needs `--save-dir`, and it is
 **not** in the log stream.
+
+Because the file outlives any one process, `started` carries the version and git
+revision that wrote what follows, and `stopped` carries those plus why the room
+went down — `SIGTERM`, `SIGINT`, or `admin request`. **A `started` with no
+`stopped` before it is an unclean stop**, which is the design rather than a gap
+in it: nothing can write a closing record for a process that has already been
+killed, so the absence is the signal.
 
 That split is about access rather than durability. A log aggregator is the right
 place for an operator debugging across rooms, but scoping one organizer to one

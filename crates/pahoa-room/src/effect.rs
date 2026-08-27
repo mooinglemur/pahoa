@@ -181,6 +181,66 @@ impl JournalEvent {
         Self(serde_json::Value::Object(fields))
     }
 
+    /// This build, beginning to serve the room.
+    ///
+    /// # The pair is what makes the history readable across restarts
+    ///
+    /// A journal spans every incarnation of a room by design — that is the
+    /// whole reason it lives beside the save rather than in the log stream —
+    /// but nothing in it said where one incarnation ended and the next began.
+    /// A reader looking at a gap in the timestamps could not tell a quiet
+    /// night from a crash, and could not tell which build produced the records
+    /// on either side of it.
+    ///
+    /// **A [`started`](Self::started) with no [`stopped`](Self::stopped) before
+    /// it is an unclean stop, and that is deliberate rather than a gap in the
+    /// record.** A process killed outright — `SIGKILL`, an OOM kill, a node
+    /// disappearing — writes nothing, because there is nothing that could
+    /// write it. So the absence *is* the signal, and it is available to a
+    /// reader who never saw the pod. The alternative would be a shutdown record
+    /// written optimistically at start, which would say the opposite of the
+    /// truth in exactly the case worth detecting.
+    ///
+    /// `build_rev` is the git revision, which is what makes "did this room's
+    /// behavior change under it" answerable months later, when the version
+    /// number alone has been reused by half a dozen builds.
+    pub fn started(at: f64, version: &str, build_rev: &str) -> Self {
+        Self::new(
+            "started",
+            serde_json::json!({ "at": at, "version": version, "build_rev": build_rev })
+                .as_object()
+                .expect("json! built an object")
+                .clone(),
+        )
+    }
+
+    /// This build, stopping cleanly, and what asked it to.
+    ///
+    /// `reason` is the same word the log line uses, so the two can be matched
+    /// without a translation table: `SIGTERM` for an orchestrator draining the
+    /// pod, `SIGINT` for a person at a terminal, `admin request` for
+    /// `POST /admin/v1/shutdown`.
+    ///
+    /// The version is repeated here rather than left to the matching
+    /// [`started`](Self::started) so that each record stands on its own — a
+    /// reader tailing from a point in the middle sees a `stopped` whose build
+    /// it never saw announced, and the same reasoning already makes `options`
+    /// re-state itself on every start.
+    pub fn stopped(at: f64, reason: &str, version: &str, build_rev: &str) -> Self {
+        Self::new(
+            "stopped",
+            serde_json::json!({
+                "at": at,
+                "reason": reason,
+                "version": version,
+                "build_rev": build_rev,
+            })
+            .as_object()
+            .expect("json! built an object")
+            .clone(),
+        )
+    }
+
     /// The room's effective options, written at start and after any change.
     ///
     /// **Carries password *modes*, never password values.** Whether a room
