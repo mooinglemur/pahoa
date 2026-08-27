@@ -1307,12 +1307,26 @@ impl Room {
         // Unknown ids are dropped silently: clients legitimately send ids for
         // locations this multidata does not contain.
         let mut fresh: Vec<i64> = Vec::new();
+        // Locations this slot had already checked. Not an error — a client
+        // re-sends its list on reconnect and that is how the protocol
+        // resynchronizes — but a client doing it in a loop is invisible without
+        // this, because the room handles it correctly and says nothing. See
+        // `crate::redundant`.
+        let mut repeats = 0usize;
         for &loc in locations {
-            if !already.contains(&loc) && self.data.locations.contains(slot, loc) {
+            if !self.data.locations.contains(slot, loc) {
+                continue;
+            }
+            if already.contains(&loc) {
+                repeats += 1;
+            } else {
                 fresh.push(loc);
             }
         }
+        crate::redundant::record(key, crate::redundant::Kind::LocationCheck, repeats);
         if fresh.is_empty() {
+            // **Counted before this returns**, because a batch that was
+            // entirely redundant is exactly the interesting one.
             return;
         }
         fresh.sort_unstable();
@@ -1981,6 +1995,10 @@ impl Room {
     /// which does not bank a hint for a location that was already checked.
     /// `recipients`, when given, restricts *delivery* without restricting what
     /// gets stored.
+    /// Returns how many hints were dropped as already existing, which is
+    /// meaningless to the room and is the whole signal for
+    /// [`crate::redundant`] — the caller knows which slot *asked*, and this
+    /// does not.
     pub fn notify_hints(
         &mut self,
         team: u32,
@@ -1989,7 +2007,8 @@ impl Room {
         persist_even_if_found: bool,
         recipients: Option<&[u32]>,
         out: &mut dyn EffectSink,
-    ) {
+    ) -> usize {
+        let asked = hints.len();
         let mut hints: Vec<Hint> = if only_new {
             hints
                 .into_iter()
@@ -1998,8 +2017,9 @@ impl Room {
         } else {
             hints
         };
+        let repeats = asked - hints.len();
         if hints.is_empty() {
-            return;
+            return repeats;
         }
 
         // Found hints first, stably, so a scout of a partly-completed world
@@ -2063,6 +2083,7 @@ impl Room {
                 .collect();
             out.broadcast(Recipients::SlotText((team, slot)), &msgs);
         }
+        repeats
     }
 
     /// `LocationScouts` (`MultiServer.py:2016-2035`).
@@ -2126,7 +2147,12 @@ impl Room {
             conn,
             &[ServerPacket::LocationInfo(LocationInfo { locations })],
         );
-        self.notify_hints(team, hints, args.create_as_hint == 2, true, None, out);
+        // Only `create_as_hint == 2` asks for new hints only, so it is the only
+        // scout that can *detect* a repeat — 1 re-announces them and 0 banks
+        // nothing. Attributed to the scouting slot rather than to whoever the
+        // hint belongs to: this counts who asked, not what was asked about.
+        let repeats = self.notify_hints(team, hints, args.create_as_hint == 2, true, None, out);
+        crate::redundant::record((team, slot), crate::redundant::Kind::Hint, repeats);
         if created_hints {
             out.mark_dirty();
         }
@@ -2238,7 +2264,8 @@ impl Room {
             ));
         }
 
-        self.notify_hints(team, hints, true, true, None, out);
+        let repeats = self.notify_hints(team, hints, true, true, None, out);
+        crate::redundant::record((team, slot), crate::redundant::Kind::Hint, repeats);
         out.mark_dirty();
     }
 

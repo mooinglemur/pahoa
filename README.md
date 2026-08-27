@@ -466,7 +466,30 @@ pahoa_packets_preauth_total{cmd="Connect"} 91
 pahoa_filtered_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice",direction="from_slot",kind="bounce"} 22
 pahoa_frames_out_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice"} 15
 pahoa_bytes_out_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice"} 3744
+pahoa_redundant_requests_total{team="0",slot="4",player="MooingYacht",game="Yacht Dice",kind="location_check"} 9
 ```
+
+**`pahoa_redundant_requests_total` counts work the room had already done**, and
+it is the one series here that is not about load. `kind="location_check"` is a
+location that slot had already checked; `kind="hint"` is a `CreateHints`, or a
+`create_as_hint=2` `LocationScouts`, naming a hint that already existed.
+
+Neither is an error — the room filters both and stays correct — which is exactly
+why they are worth counting. **A client can be badly wrong in a way that
+produces no wrong behavior**, so a world's client re-sending its whole check list
+every tick, or re-scouting in a loop, costs the room work and appears nowhere:
+not in the log, not in the journal, and not in any error count, because there is
+no error. It looks like a busy player.
+
+**Read it as a ratio against `pahoa_packets_in_total` for the same slot, never as
+a threshold.** Re-sending checks on reconnect is how the protocol
+resynchronizes, so a room with churn accumulates these legitimately; one
+redundant batch per connection is correct and a thousand is a loop. The `game`
+label is the axis that finds the bug: a whole game's slots sharing a ratio is a
+client-implementation problem worth reporting upstream, while one slot out of
+forty is a mod or a script. Location ids this seed does not contain are **not**
+counted — clients legitimately send those, and including them would put a
+permanent floor under the signal.
 
 **Labeled at the slot rather than pre-aggregated**, because the finest honest
 granularity aggregates upward for free and nothing recovers detail that was

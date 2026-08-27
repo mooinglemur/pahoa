@@ -136,6 +136,16 @@ pub fn document(
             "dropped_to_slots": pahoa_room::filter::dropped_to_slot(),
         },
 
+        // Not an error count. Both are things the room handled correctly and a
+        // client should not have asked for; the per-slot breakdown, with its
+        // game label, is on the metrics endpoint.
+        "redundant": {
+            "location_checks": pahoa_room::redundant::total(
+                pahoa_room::redundant::Kind::LocationCheck,
+            ),
+            "hints": pahoa_room::redundant::total(pahoa_room::redundant::Kind::Hint),
+        },
+
         "options": {
             "hint_cost": live.options.hint_cost,
             "location_check_points": live.options.location_check_points,
@@ -683,6 +693,31 @@ fn by_slot(out: &mut String, live: &Status) {
              can be megabytes.\n# TYPE pahoa_bytes_out_preauth_total counter\n",
         );
         out.push_str(&format!("pahoa_bytes_out_preauth_total {bytes}\n"));
+    }
+
+    let mut redundant = pahoa_room::redundant::by_slot();
+    if !redundant.is_empty() {
+        redundant.sort_unstable_by_key(|((key, kind), _)| (*key, *kind));
+        out.push_str(
+            "# HELP pahoa_redundant_requests_total Requests a client made for work the room had \
+             already done, by slot, game and kind: location_check is a location that slot had \
+             already checked, hint is a CreateHints or a create_as_hint=2 LocationScouts naming a \
+             hint that already existed. Neither is an error and the room handles both correctly, \
+             which is why they are otherwise invisible — a client looping on either costs the \
+             room work and looks exactly like a busy player. Read as a ratio against \
+             pahoa_packets_total for the same slot, never as a threshold: re-sending checks on \
+             reconnect is how the protocol resynchronizes, so a room with churn accumulates \
+             these legitimately. A whole game's slots sharing a ratio is a client bug; one slot \
+             is a mod or a script.\n\
+             # TYPE pahoa_redundant_requests_total counter\n",
+        );
+        for ((key, kind), count) in &redundant {
+            out.push_str(&format!(
+                "pahoa_redundant_requests_total{{{},kind=\"{}\"}} {count}\n",
+                identify(*key),
+                kind.as_text()
+            ));
+        }
     }
 
     let mut drops = pahoa_room::filter::drops_by_slot();

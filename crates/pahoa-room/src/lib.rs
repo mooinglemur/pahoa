@@ -14,6 +14,7 @@ pub mod filter;
 pub mod fuzzy;
 pub mod hints;
 mod options;
+pub mod redundant;
 mod room;
 pub mod save;
 pub mod secret;
