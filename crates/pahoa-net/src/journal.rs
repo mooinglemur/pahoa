@@ -62,6 +62,23 @@ const CAPACITY: usize = 1 << 19;
 /// check would make a release disk-bound.
 const FLUSH_EVERY: usize = 1024;
 
+/// How long a buffered tail may sit unwritten once the room goes quiet.
+///
+/// **A count alone scales the wrong way for anything reading this file.** A busy
+/// room passes [`FLUSH_EVERY`] constantly and is always fresh; a quiet room
+/// reaches the disk only on the save tick, which is a `--save-interval` chosen
+/// for how much play a crash may lose and has nothing to do with how stale a
+/// reader may be. So the room where somebody is watching a feed go by — one
+/// check every few seconds — was the room whose file was worst, up to half a
+/// minute behind and then arriving in a burst.
+///
+/// This shortens the durability window rather than widening it: it is
+/// `BufWriter::flush` to the OS, not an `fsync`, so it moves a quiet room's tail
+/// out of this process's memory and into the page cache, where a kill no longer
+/// takes it. Nothing about the per-check cost changes — a release still batches
+/// at [`FLUSH_EVERY`] and still never blocks the actor.
+const IDLE_FLUSH: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// A handle the transport hands its effect sink.
 #[derive(Clone)]
 pub struct Journal {
@@ -186,7 +203,28 @@ fn run(
     // shipping is not good enough.
     let mut reported_drops = 0u64;
 
-    for message in rx {
+    loop {
+        // **Only wait on a timer when there is something to wait for.** With an
+        // empty buffer this blocks exactly as it always did, so an idle room
+        // wakes a thread no more often than a record arrives; the tick exists
+        // for a tail that is already written and not yet flushed, which is the
+        // only state the timer can improve.
+        let message = if since_flush == 0 {
+            match rx.recv() {
+                Ok(message) => message,
+                Err(_) => break,
+            }
+        } else {
+            match rx.recv_timeout(IDLE_FLUSH) {
+                Ok(message) => message,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = out.flush();
+                    since_flush = 0;
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
         match message {
             Message::Flush => {
                 let _ = out.flush();
@@ -229,6 +267,12 @@ fn run(
                 lost - reported_drops
             );
             reported_drops = lost;
+            // Counted like any other line. It was not, which mattered little
+            // when only `FLUSH_EVERY` read this — one uncounted line in a
+            // thousand — but `since_flush` is now also the test for "is there a
+            // tail to flush", and a gap written as the room fell quiet would
+            // have sat in the buffer with nothing left to dislodge it.
+            since_flush += 1;
         }
     }
 

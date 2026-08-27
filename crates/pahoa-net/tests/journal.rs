@@ -71,6 +71,50 @@ fn a_second_run_appends_to_the_first_rather_than_replacing_it() {
     }
 }
 
+/// **A quiet room's tail reaches the disk on its own.**
+///
+/// The count trigger scales the wrong way for anything reading this file. A
+/// busy room passes `FLUSH_EVERY` constantly and is always fresh; a quiet room
+/// used to reach the disk only when the actor called `flush()` on the save
+/// tick, which puna deploys at 30 seconds. So a room with somebody watching the
+/// feed — one check every few seconds, nowhere near a thousand — was the room
+/// whose file was worst: half a minute of nothing, then a burst.
+///
+/// Deliberately no `journal.flush()` and no `writer.finish()` before the read.
+/// Both would flush, and either would make this pass with the timer removed.
+#[test]
+fn a_tail_below_the_batch_size_is_flushed_without_anybody_asking() {
+    let Some((data, names)) = seed() else {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    };
+    let dir = temp_dir("idle-flush");
+
+    let (journal, writer) = Journal::open(&dir, data, names).expect("opens");
+    // Three records: a real room's cadence, and three orders of magnitude
+    // under the batch that would flush them.
+    for i in 0..3 {
+        journal.record(record(5_606_192 + i, 1, 1));
+    }
+
+    // Long enough for the idle tick to fire, and short enough to be nothing
+    // like the save interval this is replacing as the effective cadence.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+
+    let body = std::fs::read_to_string(dir.join(FILE_NAME)).expect("journal exists");
+    let lines = body.lines().count();
+    assert_eq!(
+        lines, 3,
+        "a quiet room's records were still sitting in the writer's buffer, so \
+         anything reading this file is as stale as the save interval: {body}"
+    );
+
+    // The handles are still live, which is the whole point — this is a running
+    // room, not a shutdown.
+    drop(journal);
+    writer.finish();
+}
+
 #[test]
 fn a_record_carries_resolved_names_for_both_sides() {
     let Some((data, names)) = seed() else {
