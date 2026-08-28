@@ -48,12 +48,48 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// What the journal is called inside the save directory.
 pub const FILE_NAME: &str = "history.jsonl";
 
-/// Records buffered between the actor and the writer thread.
+/// The most records this will ever buffer, for the largest seed anyone has.
 ///
-/// Sized to swallow the largest burst the room can produce in one call —
-/// a full release of the biggest seed anyone has — so that the drop path is
-/// reserved for a disk that has genuinely stopped, not for ordinary play.
-const CAPACITY: usize = 1 << 19;
+/// Reached only by a seed that actually has this many locations; see
+/// [`capacity_for`].
+const MAX_CAPACITY: usize = 1 << 19;
+
+/// Headroom above the check burst, for the events that are not checks.
+///
+/// Chat, hints, cheats, connects and admin commands all share this channel and
+/// none of them arrive in bursts, so this is generous rather than calculated.
+const EVENT_HEADROOM: usize = 8192;
+
+/// Records buffered between the actor and the writer thread, for a seed with
+/// this many locations.
+///
+/// # Why this is not a constant any more
+///
+/// It was `1 << 19`, sized — correctly — to swallow the largest burst a room
+/// can produce in one call, since `release_player` feeds every location a slot
+/// owns through the check path at once and that is 341,851 records on a
+/// 2000-slot seed. What it missed is that **the same number was then reserved
+/// for every other room too**, and `std::sync::mpsc::sync_channel` allocates
+/// its whole ring up front and writes a stamp into every slot, so all of it is
+/// resident from the moment the room starts.
+///
+/// Measured: a **1-slot, 97-location** room reserved 524,288 slots of 56 bytes
+/// — 28 MiB, resident, for a seed whose every location together is 97 records.
+/// That was roughly half the process's RSS, and it was the single largest term
+/// in a small room's footprint.
+///
+/// A seed's location count is a genuine hard bound rather than an estimate:
+/// `register_location_checks` filters locations already checked, so no location
+/// can produce a second `check` record however many times a client sends it,
+/// and a whole-room release is therefore the worst case that exists. Sizing to
+/// it keeps the original guarantee exactly — the drop path stays reserved for a
+/// disk that has genuinely stopped — while a small room stops paying for a
+/// burst its seed cannot express.
+pub fn capacity_for(locations: usize) -> usize {
+    // The floor falls out of the addition — an empty seed still gets
+    // `EVENT_HEADROOM` — so there is nothing to clamp against below.
+    locations.saturating_add(EVENT_HEADROOM).min(MAX_CAPACITY)
+}
 
 /// How often the writer flushes to the OS when records are still arriving.
 ///
@@ -111,7 +147,10 @@ impl Journal {
             .append(true)
             .open(&path)?;
 
-        let (tx, rx) = std::sync::mpsc::sync_channel(CAPACITY);
+        // From the seed rather than a constant: the whole ring is allocated and
+        // stamped up front, so a room pays for this at startup whether or not
+        // it ever queues anything. See `capacity_for`.
+        let (tx, rx) = std::sync::mpsc::sync_channel(capacity_for(data.locations.len()));
         let dropped = Arc::new(AtomicU64::new(0));
 
         let handle = std::thread::Builder::new()

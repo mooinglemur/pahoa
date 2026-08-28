@@ -190,3 +190,58 @@ fn a_room_with_no_checks_still_has_a_journal() {
     let body = std::fs::read_to_string(dir.join(FILE_NAME)).expect("journal exists");
     assert!(body.is_empty(), "{body}");
 }
+
+/// **The buffer must still swallow the worst burst the seed can express.**
+///
+/// This is the guarantee the old `1 << 19` constant bought, and the reason it
+/// mattered: `release_player` feeds every location a slot owns through the
+/// check path in one call, so a channel smaller than that would put the drop
+/// path — documented as reserved for a disk that has genuinely stopped — on the
+/// ordinary release of a large room, silently losing history.
+///
+/// Sizing from the seed keeps it exactly, because a location can only ever
+/// produce one `check`: `register_location_checks` filters the ones already
+/// checked, so a whole-room release is the worst case that exists.
+#[test]
+fn the_buffer_always_covers_a_whole_room_release() {
+    for locations in [0usize, 97, 23_404, 120_027, 341_851] {
+        assert!(
+            pahoa_net::journal::capacity_for(locations) > locations,
+            "a seed with {locations} locations could lose records to a release \
+             it can produce itself"
+        );
+    }
+
+    // And the real fixture, since that is what the tests above drive.
+    if let Some((data, _)) = seed() {
+        let locations = data.locations.len();
+        assert!(
+            pahoa_net::journal::capacity_for(locations) > locations,
+            "{locations}"
+        );
+    }
+}
+
+/// **A small room must not reserve a large room's buffer.**
+///
+/// `sync_channel` allocates its whole ring up front and stamps every slot, so
+/// this is resident from startup whether or not anything is ever queued. At the
+/// old flat constant a 1-slot, 97-location room held 524,288 slots of 56 bytes
+/// — 28 MiB, about half the process's RSS, for a seed whose every location
+/// together is 97 records.
+#[test]
+fn a_tiny_seed_does_not_reserve_a_huge_seeds_buffer() {
+    let tiny = pahoa_net::journal::capacity_for(97);
+    let huge = pahoa_net::journal::capacity_for(341_851);
+    assert!(
+        tiny * 8 < huge,
+        "a 97-location seed reserved {tiny} slots against a 341,851-location \
+         seed's {huge}; the buffer is not following the room"
+    );
+
+    // The ceiling still binds, so no seed can ask for an unbounded ring.
+    assert_eq!(
+        pahoa_net::journal::capacity_for(usize::MAX),
+        pahoa_net::journal::capacity_for(1 << 19),
+    );
+}
