@@ -117,7 +117,7 @@ fn a_release_journals_every_remaining_location_once() {
     let checked_first = sink.journal.len();
 
     sink.clear();
-    room.release_player((0, slot), &mut sink);
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
 
     assert_eq!(
         checked_first + sink.journal.len(),
@@ -809,5 +809,268 @@ fn a_link_records_the_authenticated_sender_not_the_clients_claim() {
         row["player"], row["source"],
         "the two fields collapsed into one, so a spoofed source would read as \
          the sender"
+    );
+}
+
+// --- releases and collects ------------------------------------------------
+
+/// **The cause, which the file never carried.**
+///
+/// Both of these produce a flood of `check` records and announce themselves to
+/// clients, and neither wrote anything down — so a reader saw two hundred items
+/// arrive with nothing above them saying why. It was not in `chat` either: that
+/// records what a player *typed*, so an in-game `!release` left the line
+/// `player: !release` and no indication of whether the room allowed it. A
+/// release refused by `release_mode` and one that emptied a world read
+/// identically.
+#[test]
+fn a_release_journals_its_cause_above_the_checks_it_causes() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data.clone(), RoomOptions::default());
+    join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Recorder::default();
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
+
+    let released = sink.journal_events_of("release");
+    assert_eq!(released.len(), 1, "{:?}", sink.journal_events);
+    let row = released[0].as_value();
+    assert_eq!(row["slot"], slot);
+    assert_eq!(row["player"], name.as_str());
+    assert_eq!(row["trigger"], "player");
+    assert_eq!(
+        row["items"],
+        data.locations.for_slot(slot).len(),
+        "an untouched world releases every location it owns"
+    );
+}
+
+/// **`items` is what moved, not the size of the world.**
+///
+/// Computed before any of the checks are registered — which is also what lets
+/// the record precede them — so a world already half finished by hand reports
+/// the remainder rather than its whole location count.
+#[test]
+fn a_release_counts_only_the_locations_it_actually_checks() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data.clone(), RoomOptions::default());
+    join(&mut room, 1, &name, &game, 0b111);
+
+    let all: Vec<i64> = data
+        .locations
+        .for_slot(slot)
+        .iter()
+        .map(|e| e.location)
+        .collect();
+
+    let mut sink = Recorder::default();
+    room.register_location_checks((0, slot), &all[..3], &mut sink);
+
+    sink.clear();
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
+    assert_eq!(
+        sink.journal_events_of("release")[0].as_value()["items"],
+        all.len() - 3,
+        "the three already checked by hand were counted again"
+    );
+
+    // And a world with nothing left reports zero rather than its size.
+    sink.clear();
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
+    assert_eq!(sink.journal_events_of("release")[0].as_value()["items"], 0);
+}
+
+/// **Every path, which is the whole ask.** A record on only the explicit
+/// commands would leave the most common case — goal, then the automatic sweep —
+/// as the one with no line.
+///
+/// The trigger is a parameter rather than something inferred, so a new caller
+/// has to say which it is instead of silently getting a default. This asserts
+/// the three that a player, an operator and the rules produce.
+#[test]
+fn every_path_into_a_release_says_which_one_it_was() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+
+    // The player's own command. `release_mode` has to permit it — the default
+    // is `auto`, which refuses a manual release until the slot has goaled, and
+    // a refused release correctly writes nothing at all.
+    let manual = RoomOptions {
+        release_mode: pahoa_proto::Permission::Enabled,
+        ..Default::default()
+    };
+    let mut room = room_for(data.clone(), manual);
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+    let mut sink = Recorder::default();
+    room.handle(conn, say("!release"), &mut sink);
+    assert_eq!(
+        sink.journal_events_of("release")[0].as_value()["trigger"],
+        "player",
+        "{:?}",
+        sink.journal_events
+    );
+
+    // The operator's.
+    let mut room = room_for(data.clone(), RoomOptions::default());
+    join(&mut room, 1, &name, &game, 0b111);
+    let mut sink = Recorder::default();
+    room.admin(pahoa_room::AdminCommand::Release { slot }, &mut sink);
+    assert_eq!(
+        sink.journal_events_of("release")[0].as_value()["trigger"],
+        "admin",
+        "{:?}",
+        sink.journal_events
+    );
+
+    // And the automatic sweep after a goal, which is the path that was already
+    // explained by the `goal` record and would otherwise be the only one.
+    let mut room = room_for(data, RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+    let mut sink = Recorder::default();
+    room.handle(
+        conn,
+        ClientPacket::StatusUpdate(cmd::StatusUpdate { status: 30 }),
+        &mut sink,
+    );
+    let kinds: Vec<&str> = sink
+        .journal_events
+        .iter()
+        .map(|e| e.kind())
+        .filter(|k| *k == "goal" || *k == "release" || *k == "collect")
+        .collect();
+    assert_eq!(
+        kinds.first(),
+        Some(&"goal"),
+        "the goal must still precede the sweep it triggers: {kinds:?}"
+    );
+    // **Asserted non-empty first, deliberately.** `all()` over an empty
+    // iterator is true, so checking only the trigger would pass just as
+    // happily if the automatic sweep wrote nothing at all — which is the
+    // failure this test exists to catch.
+    let swept = sink.journal_events_of("release");
+    assert_eq!(
+        swept.len(),
+        1,
+        "the automatic release after a goal wrote no record: {:?}",
+        sink.journal_events
+    );
+    assert_eq!(swept[0].as_value()["trigger"], "goal");
+}
+
+/// A collect records the same way, from the same three doors.
+#[test]
+fn a_collect_journals_its_cause_too() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Recorder::default();
+    room.admin(pahoa_room::AdminCommand::Collect { slot }, &mut sink);
+
+    let collected = sink.journal_events_of("collect");
+    assert_eq!(collected.len(), 1, "{:?}", sink.journal_events);
+    assert_eq!(collected[0].as_value()["slot"], slot);
+    assert_eq!(collected[0].as_value()["trigger"], "admin");
+}
+
+/// **A refused release writes nothing, which is what makes the record mean
+/// something.**
+///
+/// This was the sharp end of the gap: `chat` records what a player *typed*, so
+/// an in-game `!release` left the line `player: !release` whether the room
+/// carried it out or turned it down. The two were the same record. Now the
+/// refusal is the absence of one.
+#[test]
+fn a_refused_release_leaves_no_record() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let disabled = RoomOptions {
+        release_mode: pahoa_proto::Permission::Disabled,
+        ..Default::default()
+    };
+    let mut room = room_for(data, disabled);
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Recorder::default();
+    room.handle(conn, say("!release"), &mut sink);
+
+    assert!(
+        sink.journal_events_of("release").is_empty(),
+        "a release the room turned down was recorded as one that happened: {:?}",
+        sink.journal_events
+    );
+    // The typed line is still there, which is exactly why it is not evidence of
+    // a release: it says what was asked for, not what was done.
+    assert_eq!(sink.journal_events_of("chat").len(), 1);
+}
+
+/// **The record has to reach the file above the flood it explains.**
+///
+/// This is the property puna's feed depends on and the reason the `goal` record
+/// was worth adding: a reader seeing two hundred items arrive wants the line
+/// saying why *first*, not three thousand lines later. `Recorder` keeps checks
+/// and events in two separate lists, so their relative order is not observable
+/// through it — hence a sink that keeps one.
+#[test]
+fn the_release_record_precedes_the_checks_it_explains() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+
+    /// Both journal paths into one list, which is what the writer thread
+    /// actually sees: they share a channel, so the order here is the order in
+    /// the file.
+    #[derive(Default)]
+    struct Ordered(Vec<String>);
+
+    impl pahoa_room::EffectSink for Ordered {
+        fn send(&mut self, _: pahoa_room::ConnId, _: &[pahoa_proto::ServerPacket]) {}
+        fn broadcast(&mut self, _: pahoa_room::Recipients, _: &[pahoa_proto::ServerPacket]) {}
+        fn close(&mut self, _: pahoa_room::ConnId, _: pahoa_room::CloseReason) {}
+        fn mark_dirty(&mut self) {}
+        fn journal_check(&mut self, _: pahoa_room::CheckRecord) {
+            self.0.push("check".to_string());
+        }
+        fn journal_event(&mut self, event: pahoa_room::JournalEvent) {
+            self.0.push(event.kind().to_string());
+        }
+    }
+
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Ordered::default();
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
+
+    assert_eq!(
+        sink.0.first().map(String::as_str),
+        Some("release"),
+        "the release record was written under the checks it explains, so a \
+         reader meets the flood before the reason for it"
+    );
+    assert!(
+        sink.0.iter().filter(|k| *k == "check").count() > 1,
+        "the release should have produced checks to sit above: {:?}",
+        sink.0
     );
 }

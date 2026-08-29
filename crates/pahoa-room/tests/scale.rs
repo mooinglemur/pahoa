@@ -198,7 +198,7 @@ fn collecting_scans_the_location_table_once_per_call() {
     let mut sink = Counter::default();
     let started = Instant::now();
     for &slot in &slots {
-        room.collect_player((0, slot), &mut sink);
+        room.collect_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
     }
     let elapsed = started.elapsed();
 

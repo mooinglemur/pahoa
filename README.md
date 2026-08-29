@@ -129,10 +129,18 @@ anyone ever reporting the bug.
 
 `--journal` appends the room's history to `history.jsonl` in the save directory,
 one JSON line per event: checks, cheats, hints with the point balance either
-side, chat, the DeathLink/TrapLink/RingLink conventions, goals, connects and
-disconnects, tag changes, every mutating admin command, option changes, and the
-`started`/`stopped` pair that divides the file into the runs that produced it. It
-needs `--save-dir`, and it is **not** in the log stream.
+side, chat, the DeathLink/TrapLink/RingLink conventions, goals, releases and
+collects with what caused them, connects and disconnects, tag changes, every
+mutating admin command, option changes, and the `started`/`stopped` pair that
+divides the file into the runs that produced it. It needs `--save-dir`, and it is
+**not** in the log stream.
+
+A `release` and a `collect` carry a `trigger` — `goal`, `admin`, `player` or
+`group` — because all three doors into one produce the same flood of checks and
+the same announcement to clients, so nothing downstream can tell a player giving
+up on their own world from an organizer clearing one. Both are written *before*
+the checks they cause, so the line explaining a flood sits above it, and a
+refused release writes nothing at all.
 
 The link records carry **both** the sender the room authenticated and the
 `source` the packet claimed, because the second is client-supplied and nothing

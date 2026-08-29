@@ -293,7 +293,7 @@ fn remaining_lists_item_names_without_saying_where_they_are() {
 
     // Once everything is checked there is nothing left to list.
     sink.clear();
-    room.release_player((0, slot), &mut sink);
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
     sink.clear();
     room.handle(conn, say("!remaining"), &mut sink);
     assert_eq!(results(&sink, conn, &room), ["No remaining items found."]);

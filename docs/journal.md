@@ -16,6 +16,8 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 | `disconnected` | a connection went away | `slot`, `player`, `tags`, `slot_empty` |
 | `tags_changed` | a client's tags actually changed | `slot`, `from`, `to` |
 | `goal` | a slot reached its goal | `slot`, `player`, `game` |
+| `release` | a world's remaining items were sent | `slot`, `player`, `trigger`, `items` |
+| `collect` | a slot's items were pulled in from other worlds | `slot`, `player`, `trigger`, `items` |
 | `admin` | any mutating admin-API command | `command`, `slot`, `detail` |
 | `cheat` | `!getitem` conjured an item | `slot`, `item_name` |
 | `hints` | hints were granted | `granted`, `cost`, `points_before`, `points_after` |
@@ -34,6 +36,8 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 {"type":"connected","at":1787157140.101,"team":0,"slot":1,"player":"amperketBalala",
  "game":"Balatro","version":"0.6.8","tags":["AP"]}
 {"type":"goal","at":1787159999.002,"team":0,"slot":1,"player":"amperketBalala","game":"Balatro"}
+{"type":"release","at":1787159999.010,"team":0,"slot":1,"player":"amperketBalala",
+ "trigger":"goal","items":131}
 {"type":"admin","at":1787160001.500,"command":"send_item","slot":1,
  "detail":{"item":"Archipelago Tarot","amount":3}}
 {"type":"disconnected","at":1787160400.880,"team":0,"slot":1,"player":"amperketBalala",
@@ -182,11 +186,11 @@ not competing with anyone else's retention.
 The remaining gaps are narrow, and all of them are things whose *effect* is already in the file even
 where the cause is not:
 
-- **Which checks came from a release or a collect.** `check` records the movement and not its origin,
-  so a released world's 3,000 lines look like a very fast player. An `admin` record now explains the
-  ones an operator caused, and a `goal` explains an auto-release, but a player's own `!release` does
-  not say so. Fixing it properly means a field on `check`, which is the highest-volume record in the
-  file and the one most worth leaving alone.
+- **Which individual checks came from a release or a collect.** A `release` record now sits directly
+  above the flood it caused and says how many locations it moved, so the *batch* is explained; what a
+  single `check` line still cannot say is whether it was a player finding something or one of the
+  3,000 a release swept up. Fixing that means a field on `check`, which is the highest-volume record
+  in the file and the one most worth leaving alone.
 - **`!countdown` typed by a player.** The admin one is an `admin` record; the chat one is not.
 - **Team completion**, as distinct from the individual `goal` records that imply it.
 - **Datastore writes.** `Set` is client scratch space, unbounded in volume and meaningful only to the
@@ -206,6 +210,22 @@ Several of the events above are worth a note on why they are shaped as they are:
   used to leave no trace at all, so whether an action was recorded depended on which door the
   operator came through. It records the command **as asked for**, so a refused verb still appears;
   what came of it is in the reply the operator got.
+- **`release` and `collect` carry a `trigger`, which only the room knows.** There are three ways into
+  a release — the automatic sweep after a goal, an operator through the admin API, and the slot's own
+  `!release` — and all three produce the same flood of checks and the same announcement to clients,
+  so nothing downstream can tell them apart. A player giving up on their own world is not an
+  organizer clearing one. `group` is the fourth value: a group slot collecting because its last
+  member did, which has no instigator of its own.
+
+  Both records are written **before** the checks they cause, like `goal`, so the line explaining a
+  flood sits above it rather than under three thousand lines of it. `items` counts the locations the
+  batch will *newly* check, computed before any of them are — so a world already half-finished by
+  hand reports the remainder rather than its whole size, and a release with nothing left reports
+  zero.
+
+  **A refused release writes nothing**, which is what makes the record mean something. `chat` records
+  what a player typed, so an in-game `!release` left the line `player: !release` whether the room
+  carried it out or turned it down; the two used to be the same record.
 - **`connected` is per connection, not per player**, and only ever after authentication succeeds. A
   slot running a game, a text client and a tracker produces three. A port scan, a wrong password and
   a refused version produce none, which is what stops the file being somewhere a stranger can write.

@@ -12,7 +12,7 @@ pub use admin::{AdminCommand, AdminOutcome, SEND_MULTIPLE_LIMIT};
 
 use crate::conn::{Client, ConnId, FeedPolicy, non_game_verb, python_list_repr};
 use crate::datapackage::DataPackageCache;
-use crate::effect::{CloseReason, EffectSink, Recipients};
+use crate::effect::{CloseReason, EffectSink, Recipients, Trigger};
 use crate::hints::HintStore;
 use crate::options::RoomOptions;
 use crate::save::{SaveError, Snapshot};
@@ -1243,10 +1243,10 @@ impl Room {
         );
 
         if self.options.collect_mode.is_auto() {
-            self.collect_player(key, out);
+            self.collect_player(key, Trigger::Goal, out);
         }
         if self.options.release_mode.is_auto() {
-            self.release_player(key, out);
+            self.release_player(key, Trigger::Goal, out);
         }
     }
 
@@ -1482,7 +1482,7 @@ impl Room {
 
     /// `release_player` (`MultiServer.py:1091-1098`): give up on the rest of a
     /// world and send everything still in it.
-    pub fn release_player(&mut self, key: SlotKey, out: &mut dyn EffectSink) {
+    pub fn release_player(&mut self, key: SlotKey, trigger: Trigger, out: &mut dyn EffectSink) {
         let text = format!(
             "{} (Team #{}) has released all remaining items from their world.",
             self.slot_name(key),
@@ -1506,6 +1506,26 @@ impl Room {
             .iter()
             .map(|e| e.location)
             .collect();
+
+        // **Before the checks, so the line explaining them sits above them**,
+        // which is what makes a feed readable when two hundred items arrive at
+        // once. Counting first is what lets it be both: these are the locations
+        // this release will newly check, so a world already finished by hand
+        // reports the few that were left rather than its whole size.
+        let already = self.location_checks.get(&key);
+        let items = all
+            .iter()
+            .filter(|loc| already.is_none_or(|c| !c.contains(loc)))
+            .count();
+        out.journal_event(crate::effect::JournalEvent::release_or_collect(
+            self.clock,
+            "release",
+            key,
+            &self.slot_alias(key),
+            trigger,
+            items,
+        ));
+
         self.register_location_checks(key, &all, out);
         self.update_checked_locations(key, out);
     }
@@ -1515,11 +1535,17 @@ impl Room {
     ///
     /// The reverse of a release — it checks *other* players' locations, the
     /// ones that happen to contain this slot's items.
-    pub fn collect_player(&mut self, key: SlotKey, out: &mut dyn EffectSink) {
-        self.collect_inner(key, false, out);
+    pub fn collect_player(&mut self, key: SlotKey, trigger: Trigger, out: &mut dyn EffectSink) {
+        self.collect_inner(key, false, trigger, out);
     }
 
-    fn collect_inner(&mut self, key: SlotKey, is_group: bool, out: &mut dyn EffectSink) {
+    fn collect_inner(
+        &mut self,
+        key: SlotKey,
+        is_group: bool,
+        trigger: Trigger,
+        out: &mut dyn EffectSink,
+    ) {
         let (team, slot) = key;
         let text = format!(
             "{} (Team #{}) has collected their items from other worlds.",
@@ -1548,6 +1574,28 @@ impl Room {
                     .push(entry.location);
             }
         }
+        // Counted across every source world before any of them are registered,
+        // for the same reason a release is: the record has to precede the flood
+        // it explains, and the number worth reporting is what actually moved.
+        let items: usize = by_source
+            .iter()
+            .map(|(source, locations)| {
+                let already = self.location_checks.get(&(team, *source));
+                locations
+                    .iter()
+                    .filter(|loc| already.is_none_or(|c| !c.contains(loc)))
+                    .count()
+            })
+            .sum();
+        out.journal_event(crate::effect::JournalEvent::release_or_collect(
+            self.clock,
+            "collect",
+            key,
+            &self.slot_alias(key),
+            trigger,
+            items,
+        ));
+
         for (source, locations) in by_source {
             let source_key = (team, source);
             self.register_location_checks(source_key, &locations, out);
@@ -1570,7 +1618,11 @@ impl Room {
             let collected = self.group_collected.entry(group).or_default();
             collected.insert(slot);
             if members.iter().all(|m| collected.contains(m)) {
-                self.collect_inner((team, group), true, out);
+                // **Its own trigger, not the member's.** A group slot collects
+                // because its last member did, which is a different event from
+                // whatever caused that member to — and labelling it `player`
+                // would attribute a group's sweep to one person.
+                self.collect_inner((team, group), true, Trigger::Group, out);
             }
         }
     }

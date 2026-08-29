@@ -156,6 +156,43 @@ pub trait EffectSink {
     fn journal_event(&mut self, _event: JournalEvent) {}
 }
 
+/// What caused a release or a collect.
+///
+/// **Only the room knows, and it is not recoverable from the checks.** The three
+/// causes read completely differently to somebody reconstructing what happened
+/// — a player giving up on their own world is not an organizer clearing one,
+/// and neither is the automatic sweep that follows a goal — but all three
+/// produce the identical flood of `check` records and the identical
+/// announcement to clients.
+///
+/// Carried as a parameter to [`Room::release_player`](crate::Room) rather than
+/// inferred, so that a new caller has to say which it is instead of silently
+/// getting a default. That is the same reason the admin record is written at
+/// its dispatch point: the gap this closes was a path nobody remembered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Trigger {
+    /// The `release_mode`/`collect_mode` automatic sweep after a goal.
+    Goal,
+    /// An operator, through the admin API.
+    Admin,
+    /// The slot's own `!release` or `!collect`.
+    Player,
+    /// A group slot collecting because every one of its members now has. It has
+    /// no instigator of its own, which is why it is not one of the three above.
+    Group,
+}
+
+impl Trigger {
+    pub fn as_text(self) -> &'static str {
+        match self {
+            Self::Goal => "goal",
+            Self::Admin => "admin",
+            Self::Player => "player",
+            Self::Group => "group",
+        }
+    }
+}
+
 /// A low-volume journal record, already shaped as the line that will be written.
 ///
 /// Holding the rendered object rather than a typed enum is deliberate: the
@@ -397,6 +434,54 @@ impl JournalEvent {
                 "command": command,
                 "slot": slot,
                 "detail": detail,
+            })
+            .as_object()
+            .expect("json! built an object")
+            .clone(),
+        )
+    }
+
+    /// A world's remaining items being sent, or a slot's items being pulled in
+    /// from the other worlds.
+    ///
+    /// # The consequence was recorded and the cause was not
+    ///
+    /// Both of these produce a flood of `check` records — a release pushes
+    /// every location a slot still owns through the check path — and both
+    /// announce themselves to clients as a `PrintJSON`. Neither wrote anything
+    /// to the file, so a reader saw two hundred items arrive at once with
+    /// nothing above them saying why.
+    ///
+    /// It was not hiding in `chat` either. That records what a player *typed*,
+    /// so an in-game `!release` left the line `player: !release` and no
+    /// indication of whether the room allowed it — a release refused by
+    /// `release_mode` and one that emptied a world read identically.
+    ///
+    /// # Emitted before the checks it causes
+    ///
+    /// Same ordering as [`goal`](Self::goal) and for the same reason: the
+    /// explanation belongs above the flood rather than buried under three
+    /// thousand lines of it. `items` is therefore the count of locations this
+    /// will newly check, computed before any of them are — locations the slot
+    /// had already checked are excluded, so it is what actually moved rather
+    /// than the size of the world.
+    pub fn release_or_collect(
+        at: f64,
+        kind: &str,
+        key: crate::SlotKey,
+        player: &str,
+        trigger: Trigger,
+        items: usize,
+    ) -> Self {
+        Self::new(
+            kind,
+            serde_json::json!({
+                "at": at,
+                "team": key.0,
+                "slot": key.1,
+                "player": player,
+                "trigger": trigger.as_text(),
+                "items": items,
             })
             .as_object()
             .expect("json! built an object")

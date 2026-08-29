@@ -385,7 +385,7 @@ impl Room {
             return Self::unknown_slot(slot);
         };
         let before = self.checked_count(key);
-        self.release_player(key, out);
+        self.release_player(key, crate::effect::Trigger::Admin, out);
         out.mark_dirty();
 
         let released = self.checked_count(key).saturating_sub(before);
@@ -402,7 +402,7 @@ impl Room {
         let Some(key) = self.admin_key(slot) else {
             return Self::unknown_slot(slot);
         };
-        self.collect_player(key, out);
+        self.collect_player(key, crate::effect::Trigger::Admin, out);
         out.mark_dirty();
         AdminOutcome::ok(
             format!("Collected for {}.", self.slot_alias(key)),

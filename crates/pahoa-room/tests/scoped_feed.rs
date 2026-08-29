@@ -119,7 +119,7 @@ fn chat_and_room_wide_events_stay_addressed_to_everyone() {
 
     // As is a release announcement.
     let mut sink = Recorder::default();
-    room.release_player((0, slot), &mut sink);
+    room.release_player((0, slot), pahoa_room::Trigger::Player, &mut sink);
     assert!(
         audiences(&sink).contains(&Recipients::AllText),
         "a release announcement is room-wide: {:?}",

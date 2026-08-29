@@ -24,6 +24,7 @@ pub mod tracker;
 pub use conn::{Client, ConnId, FeedPolicy};
 pub use effect::{
     CheckRecord, CloseReason, Counter, EffectSink, Event, JournalEvent, Recipients, Recorder,
+    Trigger,
 };
 pub use options::RoomOptions;
 pub use room::{AdminCommand, AdminOutcome, Room, SEND_MULTIPLE_LIMIT, SERVER_VERSION, SlotKey};

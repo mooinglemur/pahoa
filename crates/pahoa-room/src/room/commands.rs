@@ -642,7 +642,7 @@ impl Room {
         };
         // An administrator's one-off grant beats the mode entirely.
         if self.release_allowed(key) || self.options.release_mode.allows_manual() {
-            self.release_player(key, out);
+            self.release_player(key, crate::effect::Trigger::Player, out);
             out.mark_dirty();
             return;
         }
@@ -658,7 +658,7 @@ impl Room {
         }
         // auto or goal: allowed once the player has finished.
         if self.status(key) == ClientStatus::Goal {
-            self.release_player(key, out);
+            self.release_player(key, crate::effect::Trigger::Player, out);
             out.mark_dirty();
         } else {
             self.notify(
@@ -676,7 +676,7 @@ impl Room {
             return;
         };
         if self.options.collect_mode.allows_manual() {
-            self.collect_player(key, out);
+            self.collect_player(key, crate::effect::Trigger::Player, out);
             out.mark_dirty();
             return;
         }
@@ -691,7 +691,7 @@ impl Room {
             return;
         }
         if self.status(key) == ClientStatus::Goal {
-            self.collect_player(key, out);
+            self.collect_player(key, crate::effect::Trigger::Player, out);
             out.mark_dirty();
         } else {
             self.notify(
