@@ -48,8 +48,17 @@ fn temp_dir(name: &str) -> PathBuf {
 /// 96-slot seed is not fast, and signaling a room that has not finished its
 /// restore would test the wrong path entirely.
 fn serving_room(dir: &Path) -> Child {
+    serving_room_with_admin(dir, None).0
+}
+
+/// As above, and with an admin token it also returns the address the room bound.
+///
+/// The port is ephemeral and read back off the `serving` event rather than
+/// fixed, so concurrent tests and a busy machine cannot collide.
+fn serving_room_with_admin(dir: &Path, token: Option<&str>) -> (Child, String) {
     let seed = fixture().expect("caller checked");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pahoa"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pahoa"));
+    command
         .arg("serve")
         .arg(&seed)
         .args(["--port", "0"])
@@ -58,9 +67,11 @@ fn serving_room(dir: &Path) -> Child {
         .arg("--journal")
         .args(["--log-format", "json"])
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the binary should start");
+        .stderr(Stdio::piped());
+    if let Some(token) = token {
+        command.env("PAHOA_ADMIN_TOKEN", token);
+    }
+    let mut child = command.spawn().expect("the binary should start");
 
     // **Drained to EOF on its own thread, not read until the announcement and
     // then dropped.** Dropping the reader closes the pipe, and every line the
@@ -72,7 +83,13 @@ fn serving_room(dir: &Path) -> Child {
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             if line.contains("\"serving\"") {
-                let _ = announced.send(());
+                let addr = line
+                    .split("\"addr\":\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = announced.send(addr);
             }
         }
     });
@@ -80,11 +97,42 @@ fn serving_room(dir: &Path) -> Child {
     // Waiting for the announcement rather than sleeping: signaling a room that
     // has not finished its restore would test a different path entirely.
     match ready.recv_timeout(Duration::from_secs(30)) {
-        Ok(()) => child,
+        Ok(addr) => (child, addr),
         Err(_) => {
             let _ = child.kill();
             panic!("the room never announced itself");
         }
+    }
+}
+
+/// `POST /admin/v1/shutdown`, by hand rather than through a client crate.
+fn request_shutdown(addr: &str, token: &str) -> String {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(addr).expect("the room is listening");
+    write!(
+        socket,
+        "POST /admin/v1/shutdown HTTP/1.1\r\nHost: {addr}\r\n\
+         Authorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .expect("request writes");
+    let mut reply = String::new();
+    let _ = socket.read_to_string(&mut reply);
+    reply.lines().next().unwrap_or_default().to_string()
+}
+
+/// Send SIGTERM repeatedly across a window, to land one wherever the shutdown
+/// happens to be.
+fn hammer_sigterm(pid: u32, times: usize) {
+    for _ in 0..times {
+        let sent = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        // A failure means the process is already gone, which is the outcome
+        // being waited for rather than an error.
+        if !sent.map(|s| s.success()).unwrap_or(false) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -208,4 +256,111 @@ fn a_killed_room_leaves_no_closing_record_so_a_crash_is_visible() {
         ["started", "started", "stopped"],
         "the killed incarnation should show as a start with no stop after it"
     );
+}
+
+/// **A SIGTERM arriving after an admin shutdown must not cut the graceful one
+/// short.**
+///
+/// This is the ordinary Kubernetes sequence, not an exotic race: an orchestrator
+/// asks the room to stop through the API and the kubelet then terminates the pod
+/// anyway, so the two arrive within milliseconds of each other and the signal
+/// lands in the middle of the quiesce — after the actor has been told to stop,
+/// while the final save is on a blocking thread, or during the linger that lets
+/// close frames reach the wire.
+///
+/// The graceful path survives it because `shutdown_signal()` has already
+/// installed a SIGTERM handler by the time either branch of the `select!`
+/// resolves, so later signals are caught and have nowhere to go rather than
+/// taking the process's default disposition. **Nothing in the source says that
+/// out loud**, which is exactly why it is worth a test: a refactor that made the
+/// handler conditional, lazy, or scoped to the branch that lost would restore
+/// the default disposition and kill the room mid-save, with the failure showing
+/// up as an occasional lost save on somebody's cluster.
+#[test]
+fn a_sigterm_during_an_admin_shutdown_does_not_abort_the_quiesce() {
+    if fixture().is_none() {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    }
+    let dir = temp_dir("shutdown-race");
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123";
+    let (mut child, addr) = serving_room_with_admin(&dir, Some(TOKEN));
+
+    // Wait for the 202 first, so the admin branch has definitively won the
+    // select. Signalling before that would be a different test — one where
+    // SIGTERM wins and the graceful path never involves the API at all.
+    let status = request_shutdown(&addr, TOKEN);
+    assert!(
+        status.contains("202"),
+        "shutdown was not accepted: {status}"
+    );
+
+    // Across the whole window: actor stop, final save, and the 250ms linger.
+    hammer_sigterm(child.id(), 20);
+    let code = child.wait().expect("the room exits");
+
+    assert!(
+        code.success(),
+        "the room was killed by a signal instead of finishing its shutdown: {code}"
+    );
+
+    // The two things the quiesce exists to produce. Either missing means a
+    // signal cut it short, which is invisible from the exit status alone once
+    // the process has been replaced by a fresh pod.
+    let save = dir.join("room.save");
+    assert!(
+        save.exists() && save.metadata().is_ok_and(|m| m.len() > 0),
+        "the final save never reached disk"
+    );
+
+    let stopped: Vec<_> = records(&dir)
+        .into_iter()
+        .filter(|r| r["type"] == "stopped")
+        .collect();
+    assert_eq!(
+        stopped.len(),
+        1,
+        "expected exactly one closing record; a second would mean the shutdown \
+         path ran twice: {stopped:?}"
+    );
+    assert_eq!(
+        stopped[0]["reason"], "admin request",
+        "the first cause should win — the signals arrived after the room had \
+         already decided why it was stopping"
+    );
+}
+
+/// The same collision the other way round, which is the one an operator hits by
+/// hand: the signal wins and the API request lands against a room that is
+/// already going away.
+///
+/// It must not produce a second closing record, a second save, or a hang. The
+/// request itself may be refused or never answered — the listener is aborted
+/// first, deliberately — and that is fine; what matters is the room's own exit.
+#[test]
+fn an_admin_shutdown_racing_a_sigterm_the_other_way_is_also_clean() {
+    if fixture().is_none() {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    }
+    let dir = temp_dir("shutdown-race-rev");
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef0123";
+    let (mut child, addr) = serving_room_with_admin(&dir, Some(TOKEN));
+
+    let pid = child.id();
+    let asker = std::thread::spawn(move || {
+        // Deliberately unchecked: a room already tearing down may refuse the
+        // connection, and that is a correct outcome rather than a failure.
+        let _ = request_shutdown(&addr, TOKEN);
+    });
+    hammer_sigterm(pid, 20);
+    let code = child.wait().expect("the room exits");
+    let _ = asker.join();
+
+    assert!(code.success(), "{code}");
+    let stopped: Vec<_> = records(&dir)
+        .into_iter()
+        .filter(|r| r["type"] == "stopped")
+        .collect();
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
 }

@@ -425,7 +425,17 @@ impl Router {
     /// race the socket it was going to be written to.
     fn shutdown(&self) -> Response {
         tracing::info!("shutdown requested through the admin API");
-        self.0.shutdown.notify_waiters();
+        // **`notify_one`, not `notify_waiters`.** The listener starts accepting
+        // inside `Server::start`, a few statements before anything awaits this,
+        // so a request landing in that window would find no waiter — and
+        // `notify_waiters` drops a notification nobody is holding. The room
+        // would have answered 202 and kept serving.
+        //
+        // `notify_one` stores a permit instead, so the wait completes
+        // immediately whenever it starts. Safe only because the SIGTERM handler
+        // is installed before that wait rather than by it; see the comment in
+        // `serve::run`.
+        self.0.shutdown.notify_one();
         Response::text(202, "shutting down\n")
     }
 

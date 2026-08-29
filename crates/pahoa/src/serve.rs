@@ -319,8 +319,28 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             tracing::info!(%addr, "serving the scoped feed");
         }
 
+        // **Registered before either way out can win, and that is load-bearing
+        // rather than tidy.** Installing the SIGTERM handler is what replaces
+        // the default disposition — kill the process now — with "catch it", and
+        // the handler outlives this future, so a second SIGTERM arriving *after*
+        // something else has already decided to stop is swallowed instead of
+        // cutting the quiesce short.
+        //
+        // That matters for the ordinary Kubernetes sequence, not an exotic race:
+        // an orchestrator asks through the admin API and the kubelet terminates
+        // the pod anyway, milliseconds apart, so the signal lands in the middle
+        // of the final save or the close linger.
+        //
+        // Registering it *inside* the `select!` below happened to work, because
+        // the admin branch is pending at startup and so the signal branch got
+        // polled too. It was luck: `select!` polls in a randomized order and
+        // returns on the first ready branch, so a branch that is ready on the
+        // first poll can leave the other one never polled at all — and the
+        // notification below can now be ready that early.
+        let mut term = terminate_signal();
+
         let reason = tokio::select! {
-            signal = shutdown_signal() => signal,
+            signal = first_stop_signal(&mut term) => signal,
             () = server.shutdown_requested() => "admin request",
         };
         tracing::info!(reason, "shutting down");
@@ -482,26 +502,40 @@ fn init_logging(level: LevelFilter, format: LogFormat) {
 /// SIGKILLs after the grace period, so a room waiting only on SIGINT never runs
 /// `server.shutdown()` and silently loses up to `--save-interval` of play on
 /// every teardown — a rollout, a node drain, a rescheduled pod.
-async fn shutdown_signal() -> &'static str {
+/// Install the SIGTERM handler, or explain why the room will only answer SIGINT.
+///
+/// Separate from waiting on it so that the registration happens at a point the
+/// caller controls — see the comment at the call site. Must be called inside the
+/// runtime.
+///
+/// Failing to install it is not worth refusing to serve over: the room still
+/// saves on its timer and SIGINT still works, so this says so and carries on.
+fn terminate_signal() -> Option<tokio::signal::unix::Signal> {
     use tokio::signal::unix::{SignalKind, signal};
 
-    // Failing to install the handler is not worth refusing to serve over. The
-    // room still saves on its timer and SIGINT still works; say so and carry on.
-    let mut term = match signal(SignalKind::terminate()) {
-        Ok(term) => term,
+    match signal(SignalKind::terminate()) {
+        Ok(term) => Some(term),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "cannot handle SIGTERM; only SIGINT will stop this room cleanly"
             );
-            tokio::signal::ctrl_c().await.ok();
-            return "SIGINT";
+            None
         }
-    };
+    }
+}
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => "SIGINT",
-        _ = term.recv() => "SIGTERM",
+/// Whichever of the two stop signals arrives first.
+async fn first_stop_signal(term: &mut Option<tokio::signal::unix::Signal>) -> &'static str {
+    match term {
+        Some(term) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = term.recv() => "SIGTERM",
+        },
+        None => {
+            tokio::signal::ctrl_c().await.ok();
+            "SIGINT"
+        }
     }
 }
 
