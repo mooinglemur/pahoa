@@ -34,7 +34,50 @@
 //! process.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
+
+/// Milliseconds a connection may go without a single byte reaching its socket,
+/// while it is holding a backlog, before it is judged to have stopped draining.
+///
+/// # Why a deadline and not a depth
+///
+/// **Queue depth is mostly a statement about what the server just handed the
+/// client, not about the client.** Answering a data-package fetch puts
+/// megabytes into one connection's queue in a handful of frames; faulting it
+/// for not having drained them yet blames the peer for the room's own burst,
+/// and that is precisely what dropped healthy players on a live room — clients
+/// closed moments after connecting, having done nothing but ask which games
+/// were in it.
+///
+/// A client that is *draining* is keeping up however deep its queue is. A
+/// client that is not draining is behind however shallow. This measures the
+/// thing that distinguishes them.
+///
+/// Generous, because it has to exceed the time a single large frame takes to
+/// reach a slow peer — progress is recorded per completed frame, so a client
+/// part-way through a six-megabyte write has legitimately reported nothing yet.
+/// The keepalive catches a peer that is simply gone, in a fifth of this; what
+/// this catches is the rarer case of a peer that answers pings and never reads.
+const STALL_DEADLINE_MS: u64 = 120_000;
+
+/// Monotonic milliseconds since the process started.
+///
+/// A plain counter rather than a timestamp so it fits an atomic and so nothing
+/// here depends on the wall clock, which an operator can move.
+fn now_ms() -> u64 {
+    /// Offset so the counter never starts near zero.
+    ///
+    /// Nothing in production depends on it — stall simply cannot be detected in
+    /// the first `STALL_DEADLINE_MS` of a process either way, because no
+    /// connection has existed long enough to have stalled. It is here so that
+    /// "this connection last moved bytes two minutes ago" is expressible at all
+    /// times, including in a test whose process is a millisecond old.
+    const BASE: u64 = 3_600_000;
+
+    static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+    BASE + START.elapsed().as_millis() as u64
+}
 
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -50,6 +93,41 @@ pub fn peak_bytes() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
 
+/// Why a reservation was refused, so the log can say which bound bit.
+///
+/// **The distinction is the whole point.** Over its own share means one client
+/// is accumulating and the room is fine; out of room budget means the room is
+/// full and this client may be blameless. They are logged the same way today
+/// and they are not the same problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// This connection is holding a full share of ordinary traffic.
+    Share {
+        counted: usize,
+        size: usize,
+        share: usize,
+    },
+    /// The room as a whole is out of outbound budget.
+    RoomBudget {
+        queued: usize,
+        size: usize,
+        limit: usize,
+    },
+    /// This connection has held a backlog without draining any of it. The only
+    /// one of the three that is a statement about the *client*.
+    Stalled { stalled_ms: u64, deadline_ms: u64 },
+}
+
+impl Refused {
+    pub fn as_text(self) -> &'static str {
+        match self {
+            Self::Share { .. } => "over its own share",
+            Self::RoomBudget { .. } => "the room is out of outbound budget",
+            Self::Stalled { .. } => "it has not drained anything in two minutes",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Budget {
     limit: usize,
@@ -57,12 +135,62 @@ pub struct Budget {
 }
 
 /// One connection's share, held by both its shard and its writer task.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ConnBudget {
     queued: AtomicUsize,
     /// Bytes admitted above the per-connection share by the progress guarantee
     /// below, so they do not lock out the traffic queued behind them.
     oversize: AtomicUsize,
+    /// When this connection last got bytes onto its socket, in [`now_ms`].
+    ///
+    /// The only evidence that separates a client which is behind from one which
+    /// was simply handed a lot at once. Updated by the writer as frames
+    /// complete; read here to decide whether a backlog is this client's fault.
+    last_progress: AtomicU64,
+}
+
+impl Default for ConnBudget {
+    /// **A new connection starts having just made progress**, which is not
+    /// merely tidy. Deriving this would leave `last_progress` at zero, and the
+    /// stall test reads `now - last_progress` — so on a process that had been
+    /// up longer than the deadline, every connection would be born already
+    /// stalled and dropped the moment anything queued for it. The failure would
+    /// arrive two minutes after each restart and look exactly like the bug this
+    /// whole mechanism exists to fix.
+    fn default() -> Self {
+        Self {
+            queued: AtomicUsize::new(0),
+            oversize: AtomicUsize::new(0),
+            last_progress: AtomicU64::new(now_ms()),
+        }
+    }
+}
+
+impl ConnBudget {
+    /// Record that bytes reached the socket. Called by the writer.
+    pub fn made_progress(&self) {
+        self.last_progress.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// Pretend the last completed write was `ms` ago.
+    ///
+    /// The stall deadline is minutes long and depends on a monotonic clock, so
+    /// without this a test could only exercise it by waiting. Test-only, so the
+    /// shipped type has no way to lie about its own progress.
+    #[cfg(test)]
+    fn backdate(&self, ms: u64) {
+        self.last_progress
+            .store(now_ms().saturating_sub(ms), Ordering::Relaxed);
+    }
+
+    /// How long this connection has held a backlog without draining any of it.
+    /// `None` when it has nothing queued.
+    fn stalled_for(&self) -> Option<u64> {
+        if self.queued.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        Some(now_ms().saturating_sub(self.last_progress.load(Ordering::Relaxed)))
+    }
 }
 
 impl Budget {
@@ -78,6 +206,17 @@ impl Budget {
     /// Never blocks and never waits: the caller is the shard, on the path that
     /// must not stall for any one client.
     pub fn reserve(&self, conn: &ConnBudget, size: usize) -> bool {
+        self.reserve_reported(conn, size).is_ok()
+    }
+
+    /// As [`reserve`](Self::reserve), but says **why** it refused.
+    ///
+    /// The plain boolean cost three wrong diagnoses in a row on a live room:
+    /// "cannot keep up" is logged identically whether a connection is over its
+    /// own share, whether the room is out of budget, or whether its writer's
+    /// queue is full, and those have completely different fixes. Reading it off
+    /// a log line beats reasoning about which one it must have been.
+    pub fn reserve_reported(&self, conn: &ConnBudget, size: usize) -> Result<(), Refused> {
         // Per-connection first, so one client hitting its own ceiling is
         // attributed to that client rather than to whoever happens to be next
         // when the global budget runs out.
@@ -119,21 +258,41 @@ impl Budget {
         // payload. `counted` excludes those, so a client that stops draining is
         // still caught by its ordinary backlog, and the room is still bounded
         // by `limit` — the cap documented as the one that protects the process.
+        // **The judgement about the client**, as opposed to the two limits
+        // below it, which are judgements about memory. A connection draining
+        // steadily is keeping up no matter how deep its queue; one that has
+        // moved nothing in two minutes is not, however shallow.
+        if let Some(stalled) = conn.stalled_for()
+            && stalled > STALL_DEADLINE_MS
+        {
+            return Err(Refused::Stalled {
+                stalled_ms: stalled,
+                deadline_ms: STALL_DEADLINE_MS,
+            });
+        }
         let oversized = size > self.per_connection && counted < self.per_connection;
         if !oversized && counted + size > self.per_connection {
-            return false;
+            return Err(Refused::Share {
+                counted,
+                size,
+                share: self.per_connection,
+            });
         }
         let total = QUEUED.fetch_add(size, Ordering::Relaxed) + size;
         if total > self.limit {
             QUEUED.fetch_sub(size, Ordering::Relaxed);
-            return false;
+            return Err(Refused::RoomBudget {
+                queued: total - size,
+                size,
+                limit: self.limit,
+            });
         }
         PEAK.fetch_max(total, Ordering::Relaxed);
         conn.queued.fetch_add(size, Ordering::Relaxed);
         if oversized {
             conn.oversize.fetch_add(size, Ordering::Relaxed);
         }
-        true
+        Ok(())
     }
 
     /// Give the room back, once the bytes have reached the socket.
@@ -164,6 +323,9 @@ impl Budget {
                 Some(left)
             });
         QUEUED.fetch_sub(freed, Ordering::Relaxed);
+        if freed > 0 {
+            conn.made_progress();
+        }
         // **The allowance is cleared only when the connection is empty, never
         // drawn down by whatever happened to drain.**
         //
@@ -357,6 +519,157 @@ mod tests {
         assert!(
             !budget.reserve(&conn, 1),
             "the share must still cap ordinary traffic afterwards"
+        );
+    }
+
+    /// **A data package fetched in pieces must not drop the client.**
+    ///
+    /// The failure that survived three fixes, because none of them touched this
+    /// path. Clients ask for the data package per game — 1,825 requests across
+    /// 130 connections on the live room, about fourteen each — and each reply
+    /// is its own frame. None is individually larger than the share, so none
+    /// takes the oversize allowance; they simply add up, pass 256 KiB, and the
+    /// client is dropped moments after connecting having asked for nothing but
+    /// the names of the games.
+    ///
+    /// It needs no item feed, which is what ruled out every earlier
+    /// explanation: the room was quiet and it still happened.
+    #[test]
+    fn a_data_package_fetched_in_pieces_does_not_drop_the_client() {
+        let _guard = exclusive();
+        // The live room: a 6.19 MB package, so this is the share it now gets.
+        let share = crate::per_connection_budget_for(6_193_114);
+        let budget = Budget::new(128 << 20, share);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 9_058), "RoomInfo");
+        // Fourteen replies at the *compressed* size the wire actually carries —
+        // 340 KB of package split fourteen ways. **Each is comfortably under
+        // even the old 256 KiB share**, which is the whole point: none of them
+        // is individually oversize, so none takes the allowance and every one
+        // counts. Nothing drains in between because the writer is still working
+        // through the first.
+        const PIECE: usize = 24_000;
+        const {
+            assert!(
+                PIECE < 256 * 1024,
+                "the test must exercise the ordinary path, not the allowance"
+            );
+        }
+        for piece in 0..14 {
+            assert!(
+                budget.reserve(&conn, PIECE),
+                "data-package piece {piece} refused; the client is dropped for \
+                 asking what games are in the room"
+            );
+        }
+
+        // And uncompressed, which is what a client without deflate receives.
+        let plain = ConnBudget::default();
+        for piece in 0..14 {
+            assert!(
+                budget.reserve(&plain, 442_000),
+                "uncompressed data-package piece {piece} refused"
+            );
+        }
+    }
+
+    /// **A connection is born having just made progress.**
+    ///
+    /// The stall test reads `now - last_progress`, so a zero there would mean
+    /// every connection on a process older than the deadline is born already
+    /// stalled, and dropped the instant anything queued for it. That failure
+    /// would begin two minutes after each restart and look exactly like the bug
+    /// the deadline exists to fix.
+    #[test]
+    fn a_new_connection_is_not_born_stalled() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 256 * 1024);
+        let conn = ConnBudget::default();
+        assert_eq!(conn.stalled_for(), None, "nothing queued yet");
+
+        assert!(budget.reserve(&conn, 4_000));
+        let stalled = conn.stalled_for().expect("now holding a backlog");
+        assert!(
+            stalled < 1_000,
+            "a connection that has only just been created reports {stalled}ms of \
+             stall, so it will be dropped as soon as anything is sent to it"
+        );
+    }
+
+    /// **Depth is not the test; progress is.**
+    ///
+    /// A client handed megabytes in a burst — a data-package fetch — and
+    /// draining every one of them is keeping up, however deep the queue got.
+    /// Judging it on depth blames the peer for the room's own burst.
+    #[test]
+    fn a_client_that_keeps_draining_is_never_judged_behind() {
+        let _guard = exclusive();
+        let budget = Budget::new(128 << 20, crate::per_connection_budget_for(6_193_114));
+        let conn = ConnBudget::default();
+
+        for round in 0..200 {
+            assert!(
+                budget.reserve(&conn, 442_000),
+                "round {round}: refused a client that has drained everything"
+            );
+            Budget::release(&conn, 442_000);
+        }
+        assert_eq!(conn.stalled_for(), None);
+    }
+
+    /// **A client that has genuinely stopped reading is still dropped**, which
+    /// is what keeps the deadline from being a way to hoard the room's budget.
+    ///
+    /// The keepalive catches a peer that is simply gone. This catches the
+    /// rarer one that answers pings — they are written straight to the socket,
+    /// bypassing this queue — while never draining a byte of what it asked for.
+    #[test]
+    fn a_client_that_has_stopped_draining_is_refused_however_shallow_its_queue() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 8 << 20);
+        let conn = ConnBudget::default();
+
+        // A trivial backlog, far under any depth limit: depth is not the test.
+        assert!(budget.reserve(&conn, 100));
+        conn.backdate(STALL_DEADLINE_MS + 1_000);
+
+        let refused = budget
+            .reserve_reported(&conn, 100)
+            .expect_err("a connection that has moved nothing must be refused");
+        assert!(
+            matches!(refused, Refused::Stalled { .. }),
+            "refused for the wrong reason, so the log will mislead: {refused:?}"
+        );
+        assert_eq!(
+            refused.as_text(),
+            "it has not drained anything in two minutes"
+        );
+    }
+
+    /// ...and one byte of progress clears it. The deadline measures movement,
+    /// not how long the connection has been busy.
+    #[test]
+    fn any_progress_clears_the_stall() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 8 << 20);
+        let conn = ConnBudget::default();
+
+        // **Two frames, and only one drains.** The queue must still hold
+        // something afterwards, or this passes for the wrong reason: an empty
+        // queue is never stalled, so a release that empties it would clear the
+        // refusal even if progress were not being recorded at all.
+        assert!(budget.reserve(&conn, 4_000));
+        assert!(budget.reserve(&conn, 4_000));
+        conn.backdate(STALL_DEADLINE_MS + 1_000);
+        assert!(budget.reserve_reported(&conn, 100).is_err());
+
+        // The writer completes one of them; the other is still queued.
+        Budget::release(&conn, 4_000);
+        assert!(conn.stalled_for().is_some(), "still holding a backlog");
+        assert!(
+            budget.reserve(&conn, 100),
+            "a connection that just got bytes onto its socket is not stalled"
         );
     }
 

@@ -470,7 +470,7 @@ async fn run_shard(
                 }
             }
             ShardMsg::Send { conn, msg, tag } => {
-                let mut lagged = Vec::new();
+                let mut lagged: Vec<(ConnId, &'static str)> = Vec::new();
                 let mut gone = Vec::new();
                 if let Some(m) = members.get(&conn)
                     && !m.lagged
@@ -479,7 +479,7 @@ async fn run_shard(
                     let frame = variant(m, &msg, level, &mut deflaters, &mut Vec::new());
                     match deliver(m, frame, &budget) {
                         Delivery::Sent => {}
-                        Delivery::Behind => lagged.push(conn),
+                        Delivery::Behind(why) => lagged.push((conn, why)),
                         Delivery::Gone => gone.push(conn),
                     }
                 }
@@ -544,7 +544,7 @@ async fn run_shard(
                     }
                 }
 
-                let mut lagged = Vec::new();
+                let mut lagged: Vec<(ConnId, &'static str)> = Vec::new();
                 let mut gone = Vec::new();
                 for (conn, m) in recipients {
                     if m.lagged {
@@ -561,7 +561,7 @@ async fn run_shard(
                     let frame = variant(m, &msg, level, &mut deflaters, &mut deflated);
                     match deliver(m, frame, &budget) {
                         Delivery::Sent => {}
-                        Delivery::Behind => lagged.push(*conn),
+                        Delivery::Behind(why) => lagged.push((*conn, why)),
                         Delivery::Gone => gone.push(*conn),
                     }
                 }
@@ -693,9 +693,11 @@ fn variant(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Delivery {
     Sent,
-    /// The client is not keeping up: it is over budget, or its writer's queue
-    /// is full. This is the case the lag policy exists for.
-    Behind,
+    /// The client is not keeping up. **Carries which bound bit**, because
+    /// "over its own share", "the room is out of budget" and "its writer's
+    /// queue is full" have completely different fixes and used to be logged
+    /// identically — which cost three wrong diagnoses in a row on a live room.
+    Behind(&'static str),
     /// The writer task has already exited, so this connection is over — the
     /// peer hung up, or it was closed. Nothing is owed to it and nothing is
     /// wrong with it; the shard has simply not seen its `Remove` yet.
@@ -713,8 +715,11 @@ enum Delivery {
 /// correct state. Only chat scrollback is lost, which any disconnect loses.
 fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> Delivery {
     let size = frame.len();
-    if !budget.reserve(&member.budget, size) {
-        return Delivery::Behind;
+    if let Err(refused) = budget.reserve_reported(&member.budget, size) {
+        // Logged at debug so a busy room does not pay for it, but the *reason*
+        // travels up to the info line that says the connection was dropped.
+        tracing::debug!(?refused, "refusing a frame");
+        return Delivery::Behind(refused.as_text());
     }
     match member.tx.try_send(Outbound::Frame(frame)) {
         Ok(()) => {
@@ -729,7 +734,9 @@ fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> Delivery {
             // the two this was.
             Budget::release(&member.budget, size);
             match e {
-                mpsc::error::TrySendError::Full(_) => Delivery::Behind,
+                mpsc::error::TrySendError::Full(_) => {
+                    Delivery::Behind("its writer's queue is full")
+                }
                 mpsc::error::TrySendError::Closed(_) => Delivery::Gone,
             }
         }
@@ -762,15 +769,15 @@ fn mark_gone(members: &mut HashMap<ConnId, Member>, gone: &[ConnId]) {
 }
 
 /// Close out the connections that could not keep up.
-fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[ConnId]) {
-    for conn in lagged {
+fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[(ConnId, &'static str)]) {
+    for (conn, why) in lagged {
         if let Some(m) = members.get_mut(conn) {
             if m.lagged {
                 continue;
             }
             m.lagged = true;
             crate::metrics::record_lag_disconnect();
-            tracing::info!(%conn, "dropping a connection that cannot keep up");
+            tracing::info!(%conn, reason = why, "dropping a connection that cannot keep up");
             // Out of band, unconditionally. This connection is lagged, so its
             // writer is by definition behind — queuing the close would put it
             // after work that is not moving. See `force_close`.
@@ -1131,7 +1138,7 @@ mod tests {
         let (member, mut close_rx, _out_rx) = wedged();
         let mut members = HashMap::from([(ConnId(1), member)]);
 
-        mark_lagged(&mut members, &[ConnId(1)]);
+        mark_lagged(&mut members, &[(ConnId(1), "test")]);
 
         assert_eq!(
             close_rx.try_recv(),
@@ -1168,7 +1175,7 @@ mod tests {
         };
         let mut members = HashMap::from([(ConnId(1), member)]);
 
-        mark_lagged(&mut members, &[ConnId(1)]);
+        mark_lagged(&mut members, &[(ConnId(1), "test")]);
 
         assert_eq!(
             close_rx.try_recv(),
@@ -1240,7 +1247,7 @@ mod tests {
 
         assert_eq!(
             deliver(&member, Bytes::from_static(b"hello"), &budget),
-            Delivery::Behind,
+            Delivery::Behind("its writer's queue is full"),
             "a full queue is the case the lag policy exists for"
         );
     }
@@ -1252,8 +1259,8 @@ mod tests {
         let (member, mut close_rx, _out_rx) = wedged();
         let mut members = HashMap::from([(ConnId(1), member)]);
 
-        mark_lagged(&mut members, &[ConnId(1)]);
-        mark_lagged(&mut members, &[ConnId(1)]);
+        mark_lagged(&mut members, &[(ConnId(1), "test")]);
+        mark_lagged(&mut members, &[(ConnId(1), "test")]);
 
         assert_eq!(close_rx.try_recv(), Ok("too slow"));
         // One signal is enough; the capacity-1 channel drops the duplicate.
@@ -1300,5 +1307,21 @@ mod tests {
         close_member(&member, "kicked");
 
         assert_eq!(close_rx.try_recv(), Ok("kicked"));
+    }
+
+    /// The log has to name which bound bit, because three of them share one
+    /// message and have different fixes.
+    #[test]
+    fn a_refusal_says_which_bound_it_hit() {
+        let budget = Budget::new(1 << 30, 1024);
+        let conn = ConnHandle::default();
+        assert!(budget.reserve(&conn, 1024));
+        let why = budget.reserve_reported(&conn, 1024).unwrap_err();
+        assert_eq!(why.as_text(), "over its own share");
+
+        let tight = Budget::new(512, 1 << 20);
+        let other = ConnHandle::default();
+        let why = tight.reserve_reported(&other, 4096).unwrap_err();
+        assert_eq!(why.as_text(), "the room is out of outbound budget");
     }
 }

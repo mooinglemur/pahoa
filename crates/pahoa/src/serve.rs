@@ -260,6 +260,12 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         bind: args.bind,
         port: args.port,
         outbound_budget_bytes: budget,
+        // Sized from the same measurement as the budget: a client fetches the
+        // data package in pieces, and every piece shares one connection's
+        // queue. See `per_connection_budget_for`.
+        per_connection_budget_bytes: pahoa_net::per_connection_budget_for(
+            room.datapackage().wire_size_estimate(),
+        ),
         shards: Some(shards),
         shard_queue_depth: Some(shard_queue_depth),
         ping_interval: args.ping_interval,

@@ -425,6 +425,46 @@ pub fn shard_queue_bytes(shards: usize, depth: usize) -> usize {
         .saturating_mul(size_of::<crate::shard::ShardMsg>())
 }
 
+/// One connection's share of the outbound budget, for a room with this much
+/// data package.
+///
+/// # Why a flat 256 KiB was wrong
+///
+/// **The share has to hold a whole data-package fetch, because clients do not
+/// ask for it in one piece.** A live 189-slot, 106-game room answered 1,825
+/// `GetDataPackage` requests across 130 connections — about fourteen each — and
+/// the reply to each is a separate frame. The oversize allowance exempts a
+/// message that is *individually* larger than the share; fourteen frames of
+/// forty kilobytes are each far smaller than that, so every one of them counted
+/// normally and together they passed 256 KiB before the writer had drained any.
+///
+/// The client was then dropped as "cannot keep up", moments after connecting,
+/// having done nothing but ask for the names of the games in the room. It
+/// reconnected, asked again, and was dropped again.
+///
+/// Three earlier fixes missed it because they all addressed the *allowance* —
+/// when a single large payload may jump the share — and this path never touches
+/// the allowance at all. The room needed no item feed for it to happen, which
+/// is what finally ruled the earlier explanations out.
+///
+/// # The number
+///
+/// A full fetch, plus a quarter for the ordinary traffic that shares the queue
+/// with it. Sized against the *uncompressed* package because a client that does
+/// not negotiate deflate receives exactly that, and it is the same client most
+/// likely to be on the slow link that makes the window long.
+///
+/// The global budget remains the real protection, and
+/// [`outbound_budget_for`] sizes it for several of these at once.
+pub fn per_connection_budget_for(datapackage_bytes: usize) -> usize {
+    /// What a room with no data package to speak of keeps.
+    const FLOOR: usize = 256 * 1024;
+
+    datapackage_bytes
+        .saturating_add(datapackage_bytes / 4)
+        .max(FLOOR)
+}
+
 /// Worker-thread count derived from the cgroup CPU quota, not the host.
 ///
 /// `available_parallelism()` reports the *machine's* cores, which in Kubernetes
