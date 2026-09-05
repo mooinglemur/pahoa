@@ -243,6 +243,42 @@ pub struct MergeReport {
 }
 
 impl DataPackage {
+    /// Roughly what this serializes to on the wire, for sizing a send budget.
+    ///
+    /// **The dominant per-connection cost in a game-heavy room**, and the one
+    /// the outbound budget was blind to: it sized itself from the slot count,
+    /// while a client's largest single download scales with the number of
+    /// *games*. A live 189-slot room carrying 106 games answers one
+    /// `GetDataPackage` with 6.19 MB — twenty-four times the per-connection
+    /// share — and thirty clients fetching at once want more than the whole
+    /// budget the slot count produced.
+    ///
+    /// An estimate rather than a serialization: the point is to size a limit,
+    /// and rendering megabytes of JSON at startup to learn its length would
+    /// cost more than being a few percent out. Every name appears once as a
+    /// quoted key against a numeric id, so the name bytes plus a small constant
+    /// per entry is within a few percent of the real thing.
+    pub fn wire_size_estimate(&self) -> usize {
+        /// Quotes, colon, comma and a handful of digits for the id.
+        const PER_ENTRY: usize = 12;
+        /// Braces, the game's own key, and the checksum field.
+        const PER_GAME: usize = 128;
+
+        self.games
+            .iter()
+            .map(|(name, game)| {
+                let names: usize = game
+                    .package
+                    .item_name_to_id
+                    .keys()
+                    .chain(game.package.location_name_to_id.keys())
+                    .map(|n| n.len() + PER_ENTRY)
+                    .sum();
+                name.len() + PER_GAME + names
+            })
+            .sum()
+    }
+
     pub fn get(&self, game: &str) -> Option<&GameNames> {
         self.games.get(game)
     }

@@ -204,9 +204,15 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     // Sized from the seed rather than left at a constant: the cap is there to
     // survive clients that stop reading, and how much that is depends entirely
     // on how many of them there are.
-    let budget = args
-        .outbound_budget_bytes
-        .unwrap_or_else(|| pahoa_net::outbound_budget_for(data.slot_info.len()));
+    let budget = args.outbound_budget_bytes.unwrap_or_else(|| {
+        // The data package is the largest single thing a client downloads
+        // and it scales with games rather than slots, so the budget has to
+        // see both. See `outbound_budget_for`.
+        pahoa_net::outbound_budget_for(
+            data.slot_info.len(),
+            room.datapackage().wire_size_estimate(),
+        )
+    });
     // Sized from the seed for the same reason, and the depth from the width:
     // what a shard must absorb is a burst from the connections it owns, so
     // halving the fan-out doubles what each shard needs to hold. Deriving the

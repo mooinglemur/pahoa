@@ -218,13 +218,27 @@ impl NetConfig {
     }
 }
 
-/// The outbound budget for a room of this many slots.
+/// The outbound budget for a room of this size.
 ///
 /// The cap exists so a room survives clients that stop reading, so the size
 /// that makes sense follows the connection count — which follows the seed, not
 /// a constant. Players commonly run a game client plus a text client plus a
 /// tracker, so this sizes for **three connections per slot**, the same rule the
 /// rest of the design uses.
+///
+/// # It also has to cover the data package, which slots do not predict
+///
+/// **The largest single thing a client downloads scales with the number of
+/// games, not with the number of slots**, and sizing from slots alone missed it
+/// entirely. A live 189-slot room carrying 106 games answers one
+/// `GetDataPackage` with 6.19 MB; the slot count gave that room a 64 MiB
+/// budget, which thirty clients reconnecting after a restart would exhaust
+/// between them before anybody had played a turn.
+///
+/// So the package is budgeted separately, for several clients fetching at once.
+/// Beyond that many the room degrades the way it is designed to — clients that
+/// cannot be served are dropped and reconnect — rather than by exhausting a cap
+/// sized for something else.
 ///
 /// The per-connection allowance below is deliberately *under*
 /// [`NetConfig::per_connection_budget_bytes`]: if the global cap were simply
@@ -239,15 +253,19 @@ impl NetConfig {
 /// times its true worst case. It is a limit, not an allocation — nothing is
 /// reserved — so a generous floor costs nothing and a too-tight one costs
 /// disconnects that the client did not deserve.
-pub fn outbound_budget_for(slots: usize) -> usize {
+pub fn outbound_budget_for(slots: usize, datapackage_bytes: usize) -> usize {
     /// Headroom per expected connection, under the per-connection cap so the
     /// global limit still binds first when many clients stall at once.
     const PER_CONNECTION: usize = 96 * 1024;
+    /// Clients whose data-package download may be in flight together. A restart
+    /// storm exceeds this on purpose; the budget is a backstop, not a promise.
+    const CONCURRENT_FETCHES: usize = 8;
     const FLOOR: usize = 64 * 1024 * 1024;
 
     slots
         .saturating_mul(CONNECTIONS_PER_SLOT)
         .saturating_mul(PER_CONNECTION)
+        .saturating_add(datapackage_bytes.saturating_mul(CONCURRENT_FETCHES))
         .max(FLOOR)
 }
 
@@ -674,18 +692,44 @@ mod tests {
         assert_eq!(shard_queue_bytes(usize::MAX, usize::MAX), usize::MAX);
     }
 
+    /// **The data package has to be in the budget, and slots do not predict it.**
+    ///
+    /// It is the largest single thing a client downloads and it scales with the
+    /// number of games. A live 189-slot room carrying 106 games answers one
+    /// `GetDataPackage` with 6.19 MB; sized from slots alone that room got
+    /// 64 MiB, which a handful of clients reconnecting after a restart would
+    /// exhaust between them before anyone had played a turn.
+    #[test]
+    fn the_budget_covers_several_clients_fetching_the_data_package() {
+        // The live room, measured: 189 slots, 106 games, 6.19 MB per fetch.
+        const PACKAGE: usize = 6_193_114;
+        let sized = outbound_budget_for(189, PACKAGE);
+
+        assert!(
+            sized >= PACKAGE * 8,
+            "a room whose data package is {PACKAGE} bytes was given {sized},              which is fewer than eight concurrent downloads"
+        );
+        assert!(
+            sized > outbound_budget_for(189, 0),
+            "the data package made no difference to the budget"
+        );
+
+        // A game-light room is unaffected, so this cannot inflate every room.
+        assert_eq!(outbound_budget_for(4, 1024), outbound_budget_for(4, 0));
+    }
+
     #[test]
     fn the_budget_follows_the_seed_and_never_drops_below_the_floor() {
         let floor = 64 * 1024 * 1024;
         // A small room cannot reach even its floor: 12 connections at the
         // 256 KiB per-connection cap is 3 MiB, so this can never false-positive.
-        assert_eq!(outbound_budget_for(4), floor);
-        assert_eq!(outbound_budget_for(0), floor);
+        assert_eq!(outbound_budget_for(4, 0), floor);
+        assert_eq!(outbound_budget_for(0, 0), floor);
 
         // The design target. Landing near the hand-picked 512 MiB it replaces
         // is the point: that number was about right for 2000 slots and wrong
         // for everything else.
-        let big = outbound_budget_for(2000);
+        let big = outbound_budget_for(2000, 0);
         assert!(
             (512 * 1024 * 1024..=1024 * 1024 * 1024).contains(&big),
             "2000 slots gave {big} bytes"
@@ -703,7 +747,7 @@ mod tests {
         // Slot counts come from a file on disk. Saturating rather than wrapping
         // matters: a wrapped budget would be a tiny one, and every client would
         // be dropped as too slow.
-        assert!(outbound_budget_for(usize::MAX) > 0);
+        assert!(outbound_budget_for(usize::MAX, usize::MAX) > 0);
     }
 
     #[test]

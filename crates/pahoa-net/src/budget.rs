@@ -103,13 +103,23 @@ impl Budget {
         // what `counted` measures. Anything below that is mid-drain and is
         // exactly who the allowance is for.
         let queued = conn.queued.load(Ordering::Relaxed);
-        let outstanding = conn.oversize.load(Ordering::Relaxed);
-        let counted = queued.saturating_sub(outstanding);
-        // Still one at a time: a second large payload waits for the first to
-        // reach the socket, so a client cannot use this to hold the room's
-        // whole budget by asking twice.
-        let oversized =
-            size > self.per_connection && outstanding == 0 && counted < self.per_connection;
+        let counted = queued.saturating_sub(conn.oversize.load(Ordering::Relaxed));
+        // **Large payloads accumulate; the global cap is what bounds them.**
+        // Requiring the previous one to have drained was the obvious guard and
+        // it was wrong for the traffic that actually exists: a client asks for
+        // the data package once per game and pipelines the requests, so the
+        // second arrives while the first is still on the wire. Measured on a
+        // live 189-slot, 106-game room — 1,825 `GetDataPackage` across 130
+        // connections, one reply of 6.19 MB against a 256 KiB share — that rule
+        // closed healthy clients in a reconnect loop.
+        //
+        // What remains is the rule that was always doing the real work: a
+        // connection may hold one share of *ordinary* traffic, and anything
+        // larger than a share is not accumulation but a single legitimate
+        // payload. `counted` excludes those, so a client that stops draining is
+        // still caught by its ordinary backlog, and the room is still bounded
+        // by `limit` — the cap documented as the one that protects the process.
+        let oversized = size > self.per_connection && counted < self.per_connection;
         if !oversized && counted + size > self.per_connection {
             return false;
         }
@@ -271,24 +281,48 @@ mod tests {
         );
     }
 
-    /// One large payload in flight at a time, so the allowance cannot be used
-    /// to hold the room's budget by asking twice.
+    /// **Pipelined data-package requests, which is what real clients send.**
+    ///
+    /// A client asks per game and does not wait for each reply, so the second
+    /// large payload arrives while the first is still on the wire. This test
+    /// asserted the opposite — one in flight at a time — and that rule closed
+    /// healthy clients in a reconnect loop on a live 189-slot, 106-game room.
     #[test]
-    fn a_second_oversize_message_waits_for_the_first() {
+    fn pipelined_large_payloads_are_all_admitted() {
         let _guard = exclusive();
-        let budget = Budget::new(1 << 20, 1024);
+        let budget = Budget::new(64 << 20, 256 * 1024);
         let conn = ConnBudget::default();
 
-        assert!(budget.reserve(&conn, 4096));
+        assert!(budget.reserve(&conn, 9_058), "RoomInfo");
+        assert!(budget.reserve(&conn, 400_000), "first data package");
         assert!(
-            !budget.reserve(&conn, 4096),
-            "a client asking for the data package twice must not be granted \
-             both before either reaches the socket"
+            budget.reserve(&conn, 380_000),
+            "a second data package, requested before the first drained"
         );
+        assert!(
+            budget.reserve(&conn, 6_193_114),
+            "and the whole-room package"
+        );
+    }
 
-        // Once the first is on the wire, the next is allowed.
-        Budget::release(&conn, 4096);
-        assert!(budget.reserve(&conn, 4096));
+    /// The global cap is now the only thing bounding a client that hoards large
+    /// payloads, so it has to actually bind.
+    #[test]
+    fn the_global_cap_still_stops_a_client_hoarding_large_payloads() {
+        let _guard = exclusive();
+        let budget = Budget::new(4 << 20, 256 * 1024);
+        let conn = ConnBudget::default();
+
+        let mut admitted = 0;
+        for _ in 0..64 {
+            if budget.reserve(&conn, 1 << 20) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(
+            admitted, 4,
+            "one connection took more than the room's whole budget"
+        );
     }
 
     #[test]
