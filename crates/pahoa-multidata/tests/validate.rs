@@ -10,9 +10,10 @@
 use pahoa_multidata::{MultiData, Version};
 use std::path::PathBuf;
 
-/// Matches the version `pahoa_room::SERVER_VERSION` reports. Hardcoded rather
-/// than imported so this crate keeps no dependency on the one above it.
-const SERVER_VERSION: Version = Version::new(0, 6, 7);
+/// The version this crate now owns. It used to be transcribed here from
+/// `pahoa_room`, which is the duplication that made a parser-only caller unable
+/// to check it at all.
+use pahoa_multidata::SERVER_VERSION;
 
 fn fixture_dir() -> PathBuf {
     std::env::var_os("PAHOA_FIXTURE_DIR")

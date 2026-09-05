@@ -26,7 +26,10 @@ mod types;
 pub use datapackage::{DataPackage, GameNames, GamePackage, MergeReport};
 pub use error::{Error, Path, Result};
 pub use locations::{LocationEntry, LocationStore};
-pub use multidata::{MAX_FORMAT_VERSION, MIN_CLIENT_VERSION, MultiData, ONLY_TEAM};
+pub use multidata::{
+    MAX_FORMAT_VERSION, MAX_PICKLE_BYTES, MAX_PRECOLLECTED_ITEMS, MIN_CLIENT_VERSION, MultiData,
+    ONLY_TEAM, SERVER_VERSION,
+};
 pub use types::{
     ClientStatus, Hint, HintIdentity, HintStatus, NetworkItem, NetworkSlot, SlotType, Version,
     item_flags,

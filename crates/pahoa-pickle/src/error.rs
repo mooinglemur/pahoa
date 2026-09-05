@@ -70,6 +70,19 @@ pub enum Error {
 
     #[error("nesting deeper than {limit} at offset {offset}")]
     TooDeep { offset: usize, limit: usize },
+
+    /// The stream asked for more objects than any real one contains.
+    ///
+    /// **The only bound that survives a well-compressed payload.** A caller can
+    /// cap the bytes it hands the reader; it cannot cap what the reader builds
+    /// from them, because cost here is a function of opcode *count* rather than
+    /// input size — a one-byte integer is two bytes of pickle and becomes a
+    /// tree node an order of magnitude larger. See `MAX_OBJECTS`.
+    #[error(
+        "pickle builds more than {limit} objects (reached at offset {offset}); \
+         refusing it as a decompression bomb rather than allocating for it"
+    )]
+    TooManyObjects { offset: usize, limit: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

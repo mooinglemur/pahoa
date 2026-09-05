@@ -36,7 +36,7 @@ pub use allowlist::Allowlist;
 pub use bigint::BigInt;
 pub use canonical::canonical;
 pub use error::{Error, Result};
-pub use reader::Reader;
+pub use reader::{MAX_OBJECTS, Reader};
 pub use value::{ClassId, PyObj};
 
 /// Decode a pickle stream under the given class allowlist.

@@ -12,6 +12,13 @@
 **/tests/fixtures/*.apsave
 **/tests/fixtures/*.zip
 
+# ...with one deliberate exception. The poisoned multidata is an attack sample
+# rather than somebody's seed: 38 KB, no personal data, and the actual file that
+# crashed a host in the wild. `MultiData::parse` has no encoder beside it, so a
+# malicious seed cannot be written back out and holding the real one is the only
+# way to test that it stays refused. See crates/pahoa-multidata/tests/poison.rs.
+!**/tests/fixtures/poisoned_multidata.archipelago
+
 # Python bytecode from the development-time scripts in tools/.
 __pycache__/
 *.pyc

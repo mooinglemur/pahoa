@@ -22,6 +22,54 @@ use std::io::Read;
 /// Highest container format this server understands (`MultiServer.py:490-491`).
 pub const MAX_FORMAT_VERSION: u8 = 3;
 
+/// The Archipelago version this server reports and validates seeds against.
+///
+/// **Here rather than in `pahoa-room`, because this is the crate that checks
+/// it.** `validate` refuses a seed demanding a newer server, and a caller that
+/// links only the parser previously had to transcribe this constant from
+/// another crate — or, more honestly, skip the check entirely rather than rest
+/// it on a number copied across a repository boundary. It is a fact about what
+/// the parser will accept, so it belongs beside the parser.
+///
+/// `pahoa_room::SERVER_VERSION` is derived from this one rather than written
+/// out again, so the wire and the load-time check cannot disagree.
+pub const SERVER_VERSION: Version = Version::new(0, 6, 7);
+
+/// Most decompressed pickle this will inflate before refusing the file.
+///
+/// **Without a ceiling here, `read_to_end` on a zlib stream is a decompression
+/// bomb.** zlib reaches about 1032:1, so the only bound was whatever the caller
+/// was willing to hand over — an orchestrator accepting 256 MiB uploads was
+/// implicitly offering 264 GiB of inflate to one HTTP request.
+///
+/// 64 MiB against a sixteen-seed corpus whose largest member inflates to
+/// **6.94 MiB** (a synthetic 2000-slot seed; the largest *real* one is 5.66
+/// MiB), and whose compression ratios run 2.29:1 to 4.55:1. That is roughly
+/// nine times the biggest thing anyone has, which leaves room for seeds several
+/// times larger than this server is designed for while turning an unbounded
+/// allocation into a bounded one.
+///
+/// A caller may well cap harder — an orchestrator that knows its own upload
+/// limits should — but a constant here is the one every caller gets for free,
+/// and a standalone `pahoa` has no other.
+pub const MAX_PICKLE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Most items a seed may hand out before the room ever starts.
+///
+/// The field the known attack uses, and the one whose cost **outlives the
+/// parse**: `precollected_items` survives typing as `HashMap<u32, Vec<i64>>`
+/// and then becomes items handed to a slot at connect and held for the room's
+/// lifetime. A file carrying 11,422,785 of them cost the reference server about
+/// a gigabyte per room, indefinitely, rather than only during load.
+///
+/// Bytes are the wrong unit for that, which is why this is counted separately
+/// from [`MAX_PICKLE_BYTES`] and from the reader's object budget. The corpus
+/// maximum is **2,975** across all slots, so 100,000 is thirty-three times
+/// anything real — and deliberately the same number the orchestrator upstream
+/// of this uses, so the two cannot disagree about what a room may be asked to
+/// load.
+pub const MAX_PRECOLLECTED_ITEMS: usize = 100_000;
+
 /// Minimum client version the reference server enforces (`MultiServer.py:51`).
 pub const MIN_CLIENT_VERSION: Version = Version::new(0, 5, 0);
 
@@ -76,8 +124,21 @@ impl MultiData {
         if format > MAX_FORMAT_VERSION {
             return Err(Error::UnsupportedFormat(format));
         }
+        // **Bounded, and the bound is checked by overshooting it by one byte.**
+        // `take(N)` alone stops at N and reports success, which would hand a
+        // truncated pickle to the reader and produce a confusing parse error
+        // instead of an honest "this file is too big". Asking for one more byte
+        // than allowed distinguishes "exactly at the limit" from "longer than
+        // the limit" without inflating the rest of a hostile stream.
         let mut pickle = Vec::new();
-        flate2::read::ZlibDecoder::new(&raw[1..]).read_to_end(&mut pickle)?;
+        flate2::read::ZlibDecoder::new(&raw[1..])
+            .take(MAX_PICKLE_BYTES + 1)
+            .read_to_end(&mut pickle)?;
+        if pickle.len() as u64 > MAX_PICKLE_BYTES {
+            return Err(Error::PickleTooLarge {
+                limit: MAX_PICKLE_BYTES,
+            });
+        }
         let obj = pahoa_pickle::from_slice(&pickle, &Allowlist::archipelago())?;
         Self::from_py(&obj)
     }
@@ -148,6 +209,19 @@ impl MultiData {
 
         let precollected_items =
             int_list_map(v.opt("precollected_items"), &root.key("precollected_items"))?;
+        // **In `from_py` rather than in `validate`**, because `validate` is a
+        // policy check a caller opts into and this is a refusal that has to
+        // hold for anyone who types a seed at all — including a tool that only
+        // ever inspects one. The tree is already built by here, so this does
+        // not save the parse; what it bounds is the room afterwards, which is
+        // where this field's cost actually lives.
+        let granted: usize = precollected_items.values().map(Vec::len).sum();
+        if granted > MAX_PRECOLLECTED_ITEMS {
+            return Err(Error::TooManyPrecollectedItems {
+                found: granted,
+                limit: MAX_PRECOLLECTED_ITEMS,
+            });
+        }
 
         let ph_path = root.key("precollected_hints");
         let precollected_hints = match v.opt("precollected_hints") {

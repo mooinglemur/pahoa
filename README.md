@@ -1017,6 +1017,39 @@ Slot, game, location and hint counts, plus what the data package resolved to.
 `tools/inspect-multidata.py` is the reference implementation of this output and
 `crates/pahoa/tests/inspect_differential.rs` compares the two line for line.
 
+### Refusing a hostile seed
+
+A `.archipelago` file is attacker-influenced input — anyone who can upload a
+seed chooses these bytes — so the parser bounds what one can cost. Three limits,
+because each one covers what the others cannot:
+
+| limit | value | bounds |
+|---|---|---|
+| `MAX_PICKLE_BYTES` | 64 MiB | how far the zlib stream may inflate |
+| `MAX_OBJECTS` | 4,000,000 | how many objects the pickle reader may build |
+| `MAX_PRECOLLECTED_ITEMS` | 100,000 | start inventory a room will hold |
+
+**The object budget is the one a caller cannot supply for itself.** Decoding
+cost follows opcode *count*, not input size: an integer is two bytes of pickle
+and becomes a tree node an order of magnitude larger, so even a strict byte cap
+leaves millions of objects reachable. A host can cap what it hands the parser;
+it cannot cap what the parser builds from it.
+
+The limits are calibrated against a sixteen-seed corpus rather than picked: the
+largest member inflates to 6.94 MiB across 2,379,014 opcodes and the largest
+start inventory is 2,975 items, so each limit clears the biggest real seed by
+between 1.7× and 33×. **A limit that refuses a legitimate seed is a worse bug
+than the one it fixes** — and it fails on somebody's upload rather than in CI —
+so `crates/pahoa-multidata/tests/poison.rs` holds those corpus figures as
+compile-time assertions, and lowering a constant past them fails the build.
+
+A real sample drove this: a hand-built file of 38,559 bytes carrying 11,422,785
+copies of the integer zero, which inflates 593:1 where real seeds manage 2.3:1
+to 4.6:1. It cost **1.55 GiB of peak RSS and 0.98s** through this parser and
+crashed the reference server it was uploaded to; it is now refused in 0.17s. The
+file is committed beside that test, because `MultiData::parse` has no encoder
+next to it and a malicious seed therefore cannot be synthesized.
+
 ## Not implemented yet
 
 Phase 1 — the protocol-complete headless server — is done: real clients play a

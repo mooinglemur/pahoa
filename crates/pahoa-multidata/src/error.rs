@@ -47,6 +47,25 @@ pub enum Error {
     #[error("could not decompress multidata: {0}")]
     Decompress(#[from] std::io::Error),
 
+    /// The compressed stream inflates past what any real seed needs.
+    ///
+    /// Named separately from [`Error::Decompress`] because it is a refusal
+    /// rather than a failure: the file decompresses perfectly well, and that is
+    /// the problem.
+    #[error(
+        "multidata inflates past {limit} bytes; refusing it as a decompression \
+         bomb (the largest real seed measured is under 7 MiB)"
+    )]
+    PickleTooLarge { limit: u64 },
+
+    /// More start inventory than a room should ever be asked to hold.
+    #[error(
+        "multidata grants {found} precollected items across all slots, over the \
+         limit of {limit}; a room would hold these for its whole lifetime \
+         (the largest real seed measured grants 2,975)"
+    )]
+    TooManyPrecollectedItems { found: usize, limit: usize },
+
     #[error("could not decode multidata pickle: {0}")]
     Pickle(#[from] pahoa_pickle::Error),
 

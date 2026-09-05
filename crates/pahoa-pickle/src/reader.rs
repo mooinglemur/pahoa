@@ -98,6 +98,41 @@ fn known_unsupported(opcode: u8) -> Option<&'static str> {
 /// that would exhaust memory.
 const MAX_DEPTH: usize = 256;
 
+/// Objects one stream may build before it is refused.
+///
+/// # Why a count and not a byte cap
+///
+/// **This is the only bound that survives a well-compressed payload.** The cost
+/// of decoding is a function of opcode *count*, not of input size: a one-byte
+/// integer is two bytes of pickle and becomes a tree node an order of magnitude
+/// larger, so a caller that caps what it hands us — even strictly — still
+/// leaves millions of objects reachable. A byte cap on the input is a
+/// necessary layer and not a sufficient one.
+///
+/// # The number
+///
+/// A hand-built multidata seen in the wild carried 11,422,785 copies of the
+/// integer zero in `precollected_items`: 38,559 bytes on disk, 22 MB of pickle,
+/// and **1.55 GiB of peak RSS** through this reader before this limit existed.
+/// It crashed the reference server it was uploaded to.
+///
+/// Against that, a sixteen-seed corpus: the largest real seed decodes 1,321,953
+/// opcodes and a synthetic 2000-slot seed — the size this server is designed
+/// for — decodes 2,379,014, costing about 200 MB. Four million leaves that
+/// roughly 1.7× of room while refusing the attack outright.
+///
+/// **The limit is also the memory ceiling**, which is what keeps it from being
+/// set casually high: refusal happens *at* the limit, so the budget is what an
+/// attacker can still make this allocate before being told no. At roughly 80
+/// bytes of tree per object that is around 550 MB — survivable, bounded, and
+/// the price of leaving real seeds room to grow.
+///
+/// **A limit that refuses a legitimate seed is a worse bug than the one it
+/// fixes**, and it fails on somebody's Friday night upload rather than here.
+/// The corpus figures above are what any change to this number has to be
+/// argued against.
+pub const MAX_OBJECTS: usize = 4_000_000;
+
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -111,6 +146,8 @@ pub struct Reader<'a> {
     /// track everything" — the safe fallback when the pre-scan gives up.
     referenced: Option<std::collections::HashSet<u32>>,
     allowlist: &'a Allowlist,
+    /// Objects built so far, against [`MAX_OBJECTS`].
+    objects: usize,
 }
 
 /// Which memo indices the stream ever fetches back.
@@ -256,6 +293,7 @@ impl<'a> Reader<'a> {
             live: Vec::new(),
             referenced: scan_memo_refs(buf),
             allowlist,
+            objects: 0,
         }
     }
 
@@ -337,6 +375,22 @@ impl<'a> Reader<'a> {
             return Err(Error::TooDeep {
                 offset: self.pos,
                 limit: MAX_DEPTH,
+            });
+        }
+        // **Counted here because this is the only door.** Every object this
+        // reader builds is pushed exactly once — elements are pushed before a
+        // container pops them into itself — so one counter on one function
+        // bounds the whole tree, and a new opcode cannot forget to pay.
+        //
+        // Deliberately never decremented: the budget is for the whole decode
+        // rather than for the live stack, because a stream that builds and
+        // discards ten million objects has already cost the allocations. See
+        // `MAX_OBJECTS`.
+        self.objects += 1;
+        if self.objects > MAX_OBJECTS {
+            return Err(Error::TooManyObjects {
+                offset: self.pos,
+                limit: MAX_OBJECTS,
             });
         }
         self.stack.push(v);

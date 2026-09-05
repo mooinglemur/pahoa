@@ -33,7 +33,17 @@ use std::sync::Arc;
 /// itself — but 0.6.8 is unreleased, so a client comparing against it would be
 /// told the room is newer than any Archipelago that exists. The last tagged
 /// release is what a client can actually reason about.
-pub const SERVER_VERSION: Version = Version::new(0, 6, 7);
+///
+/// **Derived from [`pahoa_multidata::SERVER_VERSION`] rather than written out**,
+/// because that crate is the one that validates a seed's `minimum_versions`
+/// against it, and a host linking only the parser needs to read the number
+/// without transcribing it from here. Two spellings of one version is how a
+/// load-time check quietly stops matching the version on the wire.
+pub const SERVER_VERSION: Version = Version::new(
+    pahoa_multidata::SERVER_VERSION.major,
+    pahoa_multidata::SERVER_VERSION.minor,
+    pahoa_multidata::SERVER_VERSION.build,
+);
 
 /// The cross-game *link* conventions carried over `Bounce`, as
 /// `(bounce tag, journal record type, the payload field naming what happened)`.
