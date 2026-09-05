@@ -85,14 +85,31 @@ impl Budget {
         // The oversize allowance is what makes a large *single* message
         // deliverable at all. Without it any packet bigger than the share was
         // undeliverable by construction, and one routinely is: `GetDataPackage`
-        // on a 35-game seed is 2.5 MiB against a 256 KiB share, so a client
-        // that asked for the data package — which every real client does when
-        // its cached checksums miss — was closed as "too slow" while sitting
-        // completely idle. The budget exists to bound *accumulation*; capping
-        // one legitimate payload is a correctness bug wearing its clothes.
+        // on a 35-game seed is 2.5 MiB against a 256 KiB share. The budget
+        // exists to bound *accumulation*; capping one legitimate payload is a
+        // correctness bug wearing its clothes.
+        //
+        // **The gate is "is this connection behind", not "is its queue empty".**
+        // It was the second, and that made the allowance a race against the
+        // writer rather than a rule: a client whose `RoomInfo` had not yet
+        // reached the socket — two kilobytes, against a 256 KiB share — was
+        // refused its data package and dropped as "too slow" while completely
+        // idle. Seen on a live room as a reconnect loop, every client cycling
+        // every few seconds, with room-wide queued bytes never above 3.28 MiB
+        // of a 64 MiB budget. The busier the room the likelier it was, because
+        // the ordinary feed keeps something in the queue.
+        //
+        // A connection that is genuinely behind is one at its share, which is
+        // what `counted` measures. Anything below that is mid-drain and is
+        // exactly who the allowance is for.
         let queued = conn.queued.load(Ordering::Relaxed);
-        let counted = queued.saturating_sub(conn.oversize.load(Ordering::Relaxed));
-        let oversized = queued == 0 && size > self.per_connection;
+        let outstanding = conn.oversize.load(Ordering::Relaxed);
+        let counted = queued.saturating_sub(outstanding);
+        // Still one at a time: a second large payload waits for the first to
+        // reach the socket, so a client cannot use this to hold the room's
+        // whole budget by asking twice.
+        let oversized =
+            size > self.per_connection && outstanding == 0 && counted < self.per_connection;
         if !oversized && counted + size > self.per_connection {
             return false;
         }
@@ -135,9 +152,12 @@ impl Budget {
                 Some(held - freed)
             });
         QUEUED.fetch_sub(freed, Ordering::Relaxed);
-        // An oversize allowance is only ever claimed on an empty queue, so that
-        // message is first in line and the writer drains in order — the first
-        // release is therefore the one that clears it.
+        // The allowance is drawn down by whatever drains, which clears it a
+        // little early when small frames were queued ahead of the large one.
+        // Erring that way is deliberate: the cost is admitting the *next* large
+        // message slightly sooner, still one at a time and still under the
+        // global cap, where erring the other way is refusing a client that is
+        // not behind — which is the bug this whole allowance exists to prevent.
         let _ =
             conn.oversize
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| match held {
@@ -217,18 +237,58 @@ mod tests {
         assert!(!budget.reserve(&conn, 1));
     }
 
-    /// The allowance is for a connection that is *idle*, not one already behind.
+    /// The allowance is for a connection that is not **behind**, which is not
+    /// the same as one that is *empty* — and the difference was a live bug.
+    ///
+    /// This test used to assert the opposite: that 512 bytes in the queue was
+    /// enough to forfeit the allowance. That made admission a race against the
+    /// writer rather than a rule, and on a real room it dropped healthy clients
+    /// in a loop — a `RoomInfo` not yet on the wire was enough to have the data
+    /// package refused and the client closed as "too slow" while idle.
+    ///
+    /// Behind means *at the share*. That is still refused, and that is the
+    /// protection this was reaching for.
     #[test]
-    fn a_backed_up_connection_gets_no_oversize_allowance() {
+    fn only_a_connection_at_its_share_is_refused_the_oversize_allowance() {
+        let _guard = exclusive();
+        let budget = Budget::new(1 << 20, 1024);
+
+        // Mid-drain: a little queued, nowhere near the share.
+        let draining = ConnBudget::default();
+        assert!(budget.reserve(&draining, 512));
+        assert!(
+            budget.reserve(&draining, 4096),
+            "a connection with room left in its share is not behind, and \
+             refusing it here is what dropped live clients in a reconnect loop"
+        );
+
+        // Genuinely behind: nothing of its share remains.
+        let stalled = ConnBudget::default();
+        assert!(budget.reserve(&stalled, 1024));
+        assert!(
+            !budget.reserve(&stalled, 4096),
+            "a connection that has used its whole share must still be refused"
+        );
+    }
+
+    /// One large payload in flight at a time, so the allowance cannot be used
+    /// to hold the room's budget by asking twice.
+    #[test]
+    fn a_second_oversize_message_waits_for_the_first() {
         let _guard = exclusive();
         let budget = Budget::new(1 << 20, 1024);
         let conn = ConnBudget::default();
 
-        assert!(budget.reserve(&conn, 512));
+        assert!(budget.reserve(&conn, 4096));
         assert!(
             !budget.reserve(&conn, 4096),
-            "a connection that is already behind must still be refused"
+            "a client asking for the data package twice must not be granted \
+             both before either reaches the socket"
         );
+
+        // Once the first is on the wire, the next is allowed.
+        Budget::release(&conn, 4096);
+        assert!(budget.reserve(&conn, 4096));
     }
 
     #[test]
@@ -387,6 +447,31 @@ mod tests {
             queued_bytes(),
             0,
             "a dropped connection must not leak budget"
+        );
+    }
+    /// **The live-room failure, in the shape it actually took.**
+    ///
+    /// Every real client requests the data package on connect when its cached
+    /// checksums miss, and the reply is megabytes against a 256 KiB share. The
+    /// allowance exists for exactly that — but gated on an empty queue it only
+    /// fired if the writer had already drained the `RoomInfo` sent moments
+    /// before, which on a busy room it usually had not.
+    ///
+    /// The result was a reconnect loop: connect, ask, get dropped as "cannot
+    /// keep up" while completely idle, reconnect five seconds later. Room-wide
+    /// queued bytes never exceeded 3.28 MiB of a 64 MiB budget, which is what
+    /// ruled out the global cap and pointed here.
+    #[test]
+    fn a_data_package_is_deliverable_behind_an_undrained_room_info() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 256 * 1024);
+        let conn = ConnBudget::default();
+
+        assert!(budget.reserve(&conn, 2_000), "RoomInfo queues fine");
+        assert!(
+            budget.reserve(&conn, 3_200_000),
+            "the data package must reach a client that is not behind; refusing \
+             it here closes an idle client as too slow"
         );
     }
 }
