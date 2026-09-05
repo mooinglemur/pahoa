@@ -155,25 +155,35 @@ impl Budget {
     /// first frees the bytes; the other finds nothing left and frees nothing.
     pub fn release(conn: &ConnBudget, size: usize) {
         let mut freed = 0;
+        let mut left = 0;
         let _ = conn
             .queued
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
                 freed = held.min(size);
-                Some(held - freed)
+                left = held - freed;
+                Some(left)
             });
         QUEUED.fetch_sub(freed, Ordering::Relaxed);
-        // The allowance is drawn down by whatever drains, which clears it a
-        // little early when small frames were queued ahead of the large one.
-        // Erring that way is deliberate: the cost is admitting the *next* large
-        // message slightly sooner, still one at a time and still under the
-        // global cap, where erring the other way is refusing a client that is
-        // not behind — which is the bug this whole allowance exists to prevent.
-        let _ =
-            conn.oversize
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| match held {
-                    0 => None,
-                    held => Some(held.saturating_sub(size)),
-                });
+        // **The allowance is cleared only when the connection is empty, never
+        // drawn down by whatever happened to drain.**
+        //
+        // Subtracting each release from it looks equivalent and is not: the
+        // releases are mostly *ordinary* frames, so a client holding one large
+        // payload watched its allowance erode by the room's feed until
+        // `counted` — which is `queued` minus the allowance — reached the whole
+        // size of the payload it was still being sent. Then it was refused and
+        // dropped, having drained every single frame it was ever given.
+        //
+        // Measured: with a 340 KB compressed data package in flight, 65 feed
+        // frames of 4 KB were enough. That is seconds on a live room, which is
+        // why this looked like the earlier connect-burst bug and was not — it
+        // is steady state, and it is why clients kept cycling after that fix.
+        //
+        // Nothing is left to erode once `queued` is zero, so clearing there is
+        // both correct and the only point at which the allowance is meaningless.
+        if left == 0 {
+            conn.oversize.store(0, Ordering::Relaxed);
+        }
     }
 
     /// Release everything a connection still holds, when it goes away without
@@ -302,6 +312,51 @@ mod tests {
         assert!(
             budget.reserve(&conn, 6_193_114),
             "and the whole-room package"
+        );
+    }
+
+    /// **A client that drains everything it is given is never refused.**
+    ///
+    /// The steady-state failure, and the one that survived two earlier fixes.
+    /// A connection holding one large payload — a compressed data package, say
+    /// — also receives the room's ordinary feed, and each of those releases
+    /// used to draw down the oversize allowance. `counted` is `queued` minus
+    /// that allowance, so it climbed by 4 KB per feed frame until it reached
+    /// the share and the client was dropped, having kept up with every byte.
+    ///
+    /// Measured on a live room: 65 frames of 4 KB was enough. Seconds of play.
+    ///
+    /// The loop runs far past that, and the assertion is about the client's
+    /// *behavior* — it drained everything — rather than about any counter, so
+    /// it holds however the accounting is rearranged underneath.
+    #[test]
+    fn a_client_draining_everything_is_never_refused_behind_a_large_payload() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 256 * 1024);
+        let conn = ConnBudget::default();
+
+        // Still on the wire for the whole test, which is the point: a big
+        // write takes time, and the feed does not stop while it happens.
+        assert!(budget.reserve(&conn, 340_000), "the data package");
+
+        for frame in 0..1_000 {
+            assert!(
+                budget.reserve(&conn, 4_000),
+                "feed frame {frame} refused after {} bytes, every one of which \
+                 this client had already drained",
+                frame * 4_000
+            );
+            Budget::release(&conn, 4_000);
+        }
+
+        // And the allowance is still doing its job at the end rather than
+        // having quietly become permanent: once the payload drains, the
+        // connection is back to an ordinary share.
+        Budget::release(&conn, 340_000);
+        assert!(budget.reserve(&conn, 262_144), "a full ordinary share");
+        assert!(
+            !budget.reserve(&conn, 1),
+            "the share must still cap ordinary traffic afterwards"
         );
     }
 

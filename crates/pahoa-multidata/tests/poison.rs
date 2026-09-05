@@ -122,6 +122,20 @@ fn the_limits_clear_the_largest_seed_anyone_has() {
     const LARGEST_PICKLE: u64 = 7_276_310;
     const LARGEST_OPCODES: usize = 2_379_014;
 
+    // **Where the object budget actually runs out**, measured independently by
+    // the orchestrator's own generator rather than extrapolated: a synthetic
+    // 3000-slot, 250-location seed decodes 3,857,136 opcodes and inflates to
+    // 16.09 MiB. Nobody has generated one for a real game — the largest real
+    // seed either side has seen is 96 slots — but a 2000-slot room is a size
+    // this fleet runs, so 3000 is a plausible stress size rather than a
+    // hypothetical one.
+    //
+    // It clears by 143,000 opcodes, about 28,000 placements. A 3000-slot seed
+    // with slightly more per slot does not clear it, and that is the edge any
+    // change to `MAX_OBJECTS` is trading against.
+    const LARGEST_STRESS_PICKLE: u64 = 16_869_724;
+    const LARGEST_STRESS_OPCODES: usize = 3_857_136;
+
     const {
         assert!(
             pahoa_multidata::MAX_PICKLE_BYTES >= LARGEST_PICKLE * 4,
@@ -131,6 +145,19 @@ fn the_limits_clear_the_largest_seed_anyone_has() {
             pahoa_pickle::MAX_OBJECTS >= LARGEST_OPCODES * 3 / 2,
             "the object budget leaves under 1.5x headroom over the largest known \
              seed; a slightly bigger sync would be refused"
+        );
+        // The stress seed only clears by 4%, so this is a floor rather than
+        // headroom: lowering the budget below it stops a room the fleet's own
+        // tooling can produce, and the build should say so rather than a
+        // stress run failing to start.
+        assert!(
+            pahoa_pickle::MAX_OBJECTS > LARGEST_STRESS_OPCODES,
+            "the object budget would refuse a 3000-slot seed that this fleet's \
+             generator can build"
+        );
+        assert!(
+            pahoa_multidata::MAX_PICKLE_BYTES > LARGEST_STRESS_PICKLE,
+            "the inflate cap would refuse a 3000-slot seed"
         );
         // The corpus maximum for start inventory is 2,975 across all slots.
         assert!(
