@@ -24,6 +24,7 @@ pub struct Connect {
     pub name: String,
     pub uuid: Value,
     pub version: Version,
+    #[serde(deserialize_with = "crate::lenient::u8_")]
     pub items_handling: u8,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -46,25 +47,31 @@ pub struct ConnectUpdate {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LocationChecks {
+    #[serde(deserialize_with = "crate::lenient::i64_vec")]
     pub locations: Vec<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LocationScouts {
+    #[serde(deserialize_with = "crate::lenient::i64_vec")]
     pub locations: Vec<i64>,
     /// 0 scouts only; 1 also creates a persistent hint; 2 creates hints but
     /// only broadcasts the newly created ones.
     #[serde(default)]
+    #[serde(deserialize_with = "crate::lenient::i64_")]
     pub create_as_hint: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CreateHints {
+    #[serde(deserialize_with = "crate::lenient::i64_vec")]
     pub locations: Vec<i64>,
     /// Defaults to the requesting slot.
     #[serde(default)]
+    #[serde(deserialize_with = "crate::lenient::opt_u32")]
     pub player: Option<u32>,
     #[serde(default)]
+    #[serde(deserialize_with = "crate::lenient::opt_i64")]
     pub status: Option<i64>,
 }
 
@@ -72,17 +79,21 @@ pub struct CreateHints {
 pub struct UpdateHint {
     /// The **finding** player, not the receiver — hints are looked up by where
     /// the item sits (`MultiServer.py:2097`).
+    #[serde(deserialize_with = "crate::lenient::u32_")]
     pub player: u32,
+    #[serde(deserialize_with = "crate::lenient::i64_")]
     pub location: i64,
     /// Required, but nullable: an explicit `null` means "leave the status
     /// alone" and is ignored, while omitting the key entirely raises in the
     /// reference and drops the socket. No `#[serde(default)]`, so the two stay
     /// distinguishable.
+    #[serde(deserialize_with = "crate::lenient::opt_i64")]
     pub status: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct StatusUpdate {
+    #[serde(deserialize_with = "crate::lenient::i64_")]
     pub status: i64,
 }
 

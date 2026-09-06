@@ -288,6 +288,25 @@ impl Budget {
             });
         }
         PEAK.fetch_max(total, Ordering::Relaxed);
+        // **An empty queue is proof of health, and has to count as progress.**
+        //
+        // Without this the clock only advances when bytes *drain*, so a client
+        // in a quiet room — an async where a slot hears nothing for an hour —
+        // keeps a progress timestamp from whenever it last received something.
+        // The first frame after that is admitted, because an empty queue is
+        // never stalled; the *second* frame of the same burst sees a non-empty
+        // queue and an hour-old clock, and the client is dropped for being
+        // idle. Every client in the room, on the room's first activity.
+        //
+        // The keepalive does not save it: pings are written straight to the
+        // socket, bypassing this queue, so they never release anything.
+        //
+        // Refreshing here makes the deadline measure what it should — time
+        // since the connection was last empty *or* draining — and cannot
+        // whitewash a genuinely stuck client, whose queue never reaches zero.
+        if queued == 0 {
+            conn.made_progress();
+        }
         conn.queued.fetch_add(size, Ordering::Relaxed);
         if oversized {
             conn.oversize.fetch_add(size, Ordering::Relaxed);
@@ -875,5 +894,61 @@ mod tests {
             "the data package must reach a client that is not behind; refusing \
              it here closes an idle client as too slow"
         );
+    }
+
+    /// **An idle client is not a slow one, and a quiet room must not drop the
+    /// whole population the moment it says something.**
+    ///
+    /// This is the failure the stall deadline introduced and very nearly
+    /// shipped. Nothing queued means no stall — that part was right — but the
+    /// progress clock only advanced when bytes *drained*, so a slot that heard
+    /// nothing for an hour kept an hour-old timestamp. The first frame of the
+    /// next burst was admitted, because the queue was empty; the **second** saw
+    /// a non-empty queue against that stale clock and the client was dropped.
+    ///
+    /// On an async room, where a slot can idle for a long time and then get two
+    /// frames at once, that is every client on the room's first activity.
+    ///
+    /// The keepalive does not cover it: pings are written straight to the
+    /// socket, bypassing this queue, so they release nothing and move no clock.
+    #[test]
+    fn a_client_idle_in_a_quiet_room_survives_the_next_burst() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 8 << 20);
+        let conn = ConnBudget::default();
+
+        // Connected, and told nothing for far longer than the deadline.
+        conn.backdate(STALL_DEADLINE_MS * 10);
+        assert_eq!(conn.stalled_for(), None, "an empty queue is never stalled");
+
+        // The room finally speaks: several frames, closer together than the
+        // writer drains them.
+        for frame in 0..8 {
+            assert!(
+                budget.reserve(&conn, 4_000),
+                "frame {frame} of a burst to a client that has been idle, not slow"
+            );
+        }
+    }
+
+    /// ...and the refresh cannot whitewash a client that is genuinely stuck,
+    /// because its queue never reaches empty for the refresh to fire on.
+    #[test]
+    fn a_stuck_client_is_still_caught_after_the_idle_fix() {
+        let _guard = exclusive();
+        let budget = Budget::new(64 << 20, 8 << 20);
+        let conn = ConnBudget::default();
+
+        assert!(
+            budget.reserve(&conn, 4_000),
+            "first frame, on an empty queue"
+        );
+        // It never drains, so nothing refreshes the clock from here.
+        conn.backdate(STALL_DEADLINE_MS + 1_000);
+
+        let refused = budget
+            .reserve_reported(&conn, 100)
+            .expect_err("a client holding a backlog it never moves is behind");
+        assert!(matches!(refused, Refused::Stalled { .. }), "{refused:?}");
     }
 }

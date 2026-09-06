@@ -19,6 +19,7 @@
 pub mod client;
 pub mod codec;
 pub mod depth;
+mod lenient;
 pub mod server;
 pub mod types;
 

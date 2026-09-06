@@ -258,4 +258,68 @@ mod tests {
             other => panic!("got {other:?}"),
         }
     }
+
+    // --- integers a client spells as floats ------------------------------
+    //
+    // Seen live: a client sending `"locations": [113.0]`. Python's json makes
+    // that a float, `113.0 == 113` with the same hash, and the reference server
+    // indexes its location table with it none the wiser. Rust asked, refused,
+    // and dropped the connection on every location the player checked.
+
+    #[test]
+    fn location_checks_accepts_integral_floats() {
+        let packets = decode(r#"[{"cmd":"LocationChecks","locations":[113.0,221.0,42]}]"#)
+            .expect("the reference accepts this, so we must");
+        match &packets[0] {
+            ClientPacket::LocationChecks(c) => assert_eq!(c.locations, vec![113, 221, 42]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// **Truncating would be worse than refusing.** A fractional location id is
+    /// not a location any seed has, and rounding one into a real id would check
+    /// somebody's location because a client had a rounding bug. The reference
+    /// reaches the same place from the other side: `113.5` simply matches
+    /// nothing in its table.
+    #[test]
+    fn a_fractional_location_is_still_refused() {
+        assert!(decode(r#"[{"cmd":"LocationChecks","locations":[113.5]}]"#).is_err());
+        // And a float too large for the type is refused rather than saturated
+        // into a plausible id.
+        assert!(decode(r#"[{"cmd":"LocationChecks","locations":[1e300]}]"#).is_err());
+    }
+
+    #[test]
+    fn every_inbound_number_tolerates_the_float_spelling() {
+        let cases = [
+            r#"[{"cmd":"LocationScouts","locations":[7.0],"create_as_hint":2.0}]"#,
+            r#"[{"cmd":"CreateHints","locations":[7.0],"player":3.0,"status":20.0}]"#,
+            r#"[{"cmd":"UpdateHint","player":3.0,"location":7.0,"status":20.0}]"#,
+            r#"[{"cmd":"StatusUpdate","status":30.0}]"#,
+        ];
+        for case in cases {
+            decode(case).unwrap_or_else(|e| panic!("{case} -> {e}"));
+        }
+    }
+
+    /// The lenient reader must not quietly relax what was deliberately strict.
+    ///
+    /// `UpdateHint.status` is required but nullable: an explicit `null` means
+    /// "leave it alone", while omitting the key raises in the reference and
+    /// drops the socket. Adding a custom deserializer to an `Option` field is
+    /// exactly where that distinction gets lost, since serde stops treating the
+    /// field as optional unless it is also told to.
+    #[test]
+    fn an_absent_nullable_field_is_still_distinct_from_an_explicit_null() {
+        let with_null = decode(r#"[{"cmd":"UpdateHint","player":3,"location":7,"status":null}]"#)
+            .expect("an explicit null is accepted");
+        match &with_null[0] {
+            ClientPacket::UpdateHint(u) => assert_eq!(u.status, None),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            decode(r#"[{"cmd":"UpdateHint","player":3,"location":7}]"#).is_err(),
+            "omitting the key must still be a decode failure"
+        );
+    }
 }
