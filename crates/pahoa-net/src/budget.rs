@@ -385,21 +385,54 @@ impl Budget {
 /// Shared handle for a connection's accounting.
 pub type ConnHandle = Arc<ConnBudget>;
 
+/// The one lock every test in this binary must hold before touching the
+/// process-wide budget counters.
+///
+/// **`QUEUED` and `PEAK` are process-wide statics**, so `cargo test` — which
+/// runs one binary's tests concurrently — shares them across modules, not just
+/// within one. `budget`'s own tests were serialized; `shard`'s were not, and
+/// they build a `Budget` with a one-megabyte limit that is checked against the
+/// *global* counter. A budget test that reserved several megabytes and did not
+/// release them therefore made every shard test fail with "the room is out of
+/// outbound budget" — but only when the scheduler interleaved them that way,
+/// so it passed locally and failed in CI.
+///
+/// A `tokio` mutex rather than a `std` one because the tests needing it are a
+/// mix: synchronous ones take it with `exclusive`, `#[tokio::test]` ones with
+/// `exclusive_async`, and the async ones hold it across an await, which a `std`
+/// guard must not do.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{PEAK, QUEUED};
+    use std::sync::atomic::Ordering;
+
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn reset() {
+        QUEUED.store(0, Ordering::Relaxed);
+        PEAK.store(0, Ordering::Relaxed);
+    }
+
+    /// For a synchronous `#[test]`.
+    pub(crate) fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = SERIAL.blocking_lock();
+        reset();
+        guard
+    }
+
+    /// For a `#[tokio::test]`, which cannot block to take it.
+    pub(crate) async fn exclusive_async() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = SERIAL.lock().await;
+        reset();
+        guard
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The counters are process-wide and the test runner is threaded, so these
-    /// have to actually exclude each other — a freshly constructed mutex would
-    /// guard nothing.
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        QUEUED.store(0, Ordering::Relaxed);
-        PEAK.store(0, Ordering::Relaxed);
-        guard
-    }
+    use super::testing::exclusive;
 
     /// `GetDataPackage` on a 35-game seed is 2.5 MiB against a 256 KiB share.
     /// Before the progress guarantee it could never be sent, so asking for the

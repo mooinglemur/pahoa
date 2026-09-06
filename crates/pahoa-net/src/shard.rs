@@ -790,14 +790,11 @@ fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[(ConnId, &'stati
 mod tests {
     use super::*;
 
-    /// `SHARD_SWEEPS` is process-wide and the runner is threaded, so the two
-    /// tests that assert an exact number of sweeps have to exclude each other.
-    /// Nothing else in this binary spawns a shard, so this is sufficient.
-    ///
-    /// Tokio's rather than `std`'s because both holders await while holding it,
-    /// and a `std` guard across an await point parks a runtime thread on a lock
-    /// the task that owns it cannot release from another thread.
-    static SWEEPS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // Every test here that builds a `Budget` or reads a process-wide counter
+    // takes `crate::budget::testing`'s lock. **One lock rather than one per
+    // counter**: these tests share `SHARD_SWEEPS` *and* the budget's `QUEUED`,
+    // and two locks would only invite taking them in different orders.
+    use crate::budget::testing::{exclusive, exclusive_async};
 
     /// Fill a depth-1 shard inbox and keep pushing, so the broadcasts past the
     /// first are refused and each asks for a sweep.
@@ -855,7 +852,7 @@ mod tests {
     /// congestion was competing with its own recovery.
     #[tokio::test]
     async fn a_shard_sweeps_once_however_many_broadcasts_it_drops() {
-        let _guard = SWEEPS.lock().await;
+        let _guard = exclusive_async().await;
         let budget = Budget::new(1 << 20, 1 << 16);
         let conn = ConnId(0);
         let (tx, mut out_rx, close_tx, mut close_rx) = member_channels();
@@ -903,7 +900,7 @@ mod tests {
     /// only thing that can.
     #[tokio::test]
     async fn a_connection_that_arrives_after_a_sweep_is_still_closed_by_the_next() {
-        let _guard = SWEEPS.lock().await;
+        let _guard = exclusive_async().await;
         let budget = Budget::new(1 << 20, 1 << 16);
         let shards = Shards::spawn(1, 1, 0, budget);
         let sweeps = crate::metrics::shard_sweeps();
@@ -1002,6 +999,7 @@ mod tests {
     /// no memory at all, on a pod that looks perfectly healthy.
     #[tokio::test]
     async fn a_removal_that_cannot_be_delivered_does_not_strand_the_budget() {
+        let _guard = exclusive_async().await;
         let budget = Budget::new(1 << 20, 1 << 16);
         let conn = ConnId(0);
         let handle = ConnHandle::default();
@@ -1073,6 +1071,7 @@ mod tests {
     /// Before this, the frame was discarded and nothing else happened at all.
     #[tokio::test]
     async fn a_frame_the_shard_cannot_accept_closes_the_connection_it_was_for() {
+        let _guard = exclusive_async().await;
         let budget = Budget::new(1 << 20, 1 << 16);
         let conn = ConnId(0);
         let (tx, mut held) = mpsc::channel(4);
@@ -1200,6 +1199,7 @@ mod tests {
     /// straight up, hiding the real congestion it exists to report.
     #[test]
     fn a_closed_writer_is_not_a_lagging_client() {
+        let _guard = exclusive();
         let (close_tx, mut close_rx) = mpsc::channel(1);
         let (tx, rx) = mpsc::channel(64);
         drop(rx); // The writer task has exited; this is every clean disconnect.
@@ -1242,6 +1242,7 @@ mod tests {
     /// that is not keeping up, and must still be treated as one.
     #[test]
     fn a_full_writer_queue_is_still_a_lagging_client() {
+        let _guard = exclusive();
         let (member, _close_rx, _tx) = wedged();
         let budget = Budget::new(1 << 20, 1 << 16);
 
@@ -1313,6 +1314,7 @@ mod tests {
     /// message and have different fixes.
     #[test]
     fn a_refusal_says_which_bound_it_hit() {
+        let _guard = exclusive();
         let budget = Budget::new(1 << 30, 1024);
         let conn = ConnHandle::default();
         assert!(budget.reserve(&conn, 1024));
