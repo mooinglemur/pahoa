@@ -111,7 +111,7 @@ fn connected() {
             checked_locations: vec![1, 2],
             slot_info: BTreeMap::from([
                 (
-                    "1".to_string(),
+                    1,
                     NetworkSlot {
                         name: "Alice".into(),
                         game: "Timespinner".into(),
@@ -120,7 +120,7 @@ fn connected() {
                     },
                 ),
                 (
-                    "2".to_string(),
+                    2,
                     NetworkSlot {
                         name: "Link".into(),
                         game: "Archipelago".into(),
@@ -149,6 +149,43 @@ fn connected_omits_slot_data_entirely_when_not_requested() {
             missing_locations: vec![],
             checked_locations: vec![],
             slot_info: BTreeMap::new(),
+            hint_points: 0,
+            slot_data: None,
+        })),
+    );
+}
+
+/// `slot_info` keys must come out in ascending slot order, not sorted as text.
+///
+/// The reference sends a `Dict[int, NetworkSlot]` in the multidata's own
+/// insertion order, and clients have been written against that for years —
+/// Dracomino builds a positional array from the object and indexes it as
+/// `slots[id-1]`, so any other order silently pairs each slot with another
+/// slot's game. Ten is the smallest room where the two orderings differ.
+#[test]
+fn connected_orders_slot_info_numerically() {
+    let slot_info = (1..=12)
+        .map(|n| {
+            (
+                n,
+                NetworkSlot {
+                    name: format!("Player{n}"),
+                    game: format!("Game{n}"),
+                    slot_type: 1,
+                    group_members: vec![],
+                },
+            )
+        })
+        .collect();
+    check(
+        "connected_many_slots",
+        ServerPacket::Connected(Box::new(Connected {
+            team: 0,
+            slot: 12,
+            players: vec![],
+            missing_locations: vec![],
+            checked_locations: vec![],
+            slot_info,
             hint_points: 0,
             slot_data: None,
         })),
@@ -433,5 +470,5 @@ fn every_vector_is_exercised() {
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .filter_map(|l| l.split_once('\t').map(|(n, _)| n))
         .collect();
-    assert_eq!(cases.len(), 19, "vector count changed: {cases:?}");
+    assert_eq!(cases.len(), 20, "vector count changed: {cases:?}");
 }

@@ -2554,11 +2554,11 @@ impl Room {
             .collect()
     }
 
-    fn slot_info_package(&self) -> BTreeMap<String, NetworkSlot> {
+    fn slot_info_package(&self) -> BTreeMap<u32, NetworkSlot> {
         self.data
             .slot_info
             .iter()
-            .map(|(slot, info)| (slot.to_string(), NetworkSlot::from_multidata(info)))
+            .map(|(slot, info)| (*slot, NetworkSlot::from_multidata(info)))
             .collect()
     }
 

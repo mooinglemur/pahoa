@@ -145,7 +145,23 @@ pub struct Connected {
     pub players: Vec<NetworkPlayer>,
     pub missing_locations: Vec<i64>,
     pub checked_locations: Vec<i64>,
-    pub slot_info: BTreeMap<String, NetworkSlot>,
+    /// Keyed on the slot number, **not** its string form.
+    ///
+    /// JSON has no integer keys, so this still goes out as
+    /// `{"1": …, "2": …}` — but a `BTreeMap<String, _>` would order those
+    /// keys lexicographically, emitting `"1","10","11",…,"2"`. The reference
+    /// holds `Dict[int, NetworkSlot]` straight from the multidata
+    /// (`MultiServer.py:551`, sent at `:1961`) and Python preserves insertion
+    /// order, so upstream has always emitted ascending slot order.
+    ///
+    /// **A client is entitled to rely on that**, and at least one does:
+    /// Dracomino's `godot_ap` builds a positional array from the object's
+    /// iteration order and then indexes it as `slots[id-1]`, ignoring the
+    /// keys. Under lexicographic order every slot past nine resolved to the
+    /// wrong game, so every item and location name it rendered came out of the
+    /// wrong name table. Ordering by the number costs nothing and produces
+    /// byte-identical output otherwise.
+    pub slot_info: BTreeMap<u32, NetworkSlot>,
     pub hint_points: i64,
     /// Omitted entirely when the client sent `slot_data: false`.
     ///

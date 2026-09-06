@@ -153,12 +153,31 @@ CASES["connected"] = {
     ],
     "missing_locations": [10, 20, 30],
     "checked_locations": [1, 2],
+    # Int keys, as `ctx.slot_info` is `Dict[int, NetworkSlot]`
+    # (`MultiServer.py:276`, sent verbatim at `:1961`). json turns them into
+    # strings without reordering, so the wire keys follow insertion order —
+    # which for multidata is ascending slot number.
     "slot_info": {
-        "1": network_slot("Alice", "Timespinner", 1),
-        "2": network_slot("Link", "Archipelago", 2, [1, 3]),
+        1: network_slot("Alice", "Timespinner", 1),
+        2: network_slot("Link", "Archipelago", 2, [1, 3]),
     },
     "hint_points": 42,
     "slot_data": {"nested": {"a": [1, 2, 3]}, "flag": True},
+}
+
+# Twelve slots, because two-digit slot numbers are where ordering stops being a
+# matter of taste: sorted as strings these come out 1,10,11,12,2,3,... and a
+# client that walks the object positionally then reads every slot past nine
+# against the wrong game.
+CASES["connected_many_slots"] = {
+    "cmd": "Connected",
+    "team": 0,
+    "slot": 12,
+    "players": [],
+    "missing_locations": [],
+    "checked_locations": [],
+    "slot_info": {n: network_slot("Player%d" % n, "Game%d" % n, 1) for n in range(1, 13)},
+    "hint_points": 0,
 }
 
 CASES["connected_no_slot_data"] = {
