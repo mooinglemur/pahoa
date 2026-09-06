@@ -29,7 +29,7 @@ const SERVER_PASSWORD: &str = "hunter2";
 
 fn say(text: &str) -> ClientPacket {
     ClientPacket::Say(cmd::Say {
-        text: text.to_string(),
+        text: pahoa_proto::Arg::Ok(text.to_string()),
     })
 }
 

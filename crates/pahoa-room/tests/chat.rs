@@ -9,14 +9,14 @@ mod common;
 
 use common::*;
 use pahoa_proto::server::{PrintJson, PrintJsonType};
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn say(text: &str) -> ClientPacket {
     ClientPacket::Say(cmd::Say {
-        text: text.to_string(),
+        text: Arg::Ok(text.to_string()),
     })
 }
 
@@ -314,7 +314,7 @@ fn missing_lists_unchecked_locations_and_checked_lists_the_rest() {
     room.handle(
         conn,
         ClientPacket::LocationChecks(cmd::LocationChecks {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
         }),
         &mut sink,
     );
@@ -474,7 +474,9 @@ fn hinting_an_item_costs_points_and_grants_exactly_one() {
     let mut sink = Recorder::default();
     room.handle(
         conn,
-        ClientPacket::LocationChecks(cmd::LocationChecks { locations }),
+        ClientPacket::LocationChecks(cmd::LocationChecks {
+            locations: cmd::ids(locations),
+        }),
         &mut sink,
     );
     assert_eq!(room.slot_points((0, slot)), cost);

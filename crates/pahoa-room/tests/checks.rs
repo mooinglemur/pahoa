@@ -3,14 +3,16 @@
 mod common;
 
 use common::*;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 use std::sync::Arc;
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn checks(locations: Vec<i64>) -> ClientPacket {
-    ClientPacket::LocationChecks(cmd::LocationChecks { locations })
+    ClientPacket::LocationChecks(cmd::LocationChecks {
+        locations: cmd::ids(locations),
+    })
 }
 
 fn received<'a>(
@@ -258,12 +260,12 @@ fn a_tracker_may_not_check_locations() {
     room.handle(
         conn,
         ClientPacket::Connect(Box::new(cmd::Connect {
-            password: None,
-            game: None,
-            name: name.clone(),
+            password: Arg::Ok(None),
+            game: Arg::Ok(None),
+            name: Arg::Ok(name.clone()),
             uuid: serde_json::json!(null),
             version: pahoa_proto::types::Version::new(0, 6, 8),
-            items_handling: 0,
+            items_handling: Arg::Ok(pahoa_proto::lenient::U8(0)),
             tags: vec!["Tracker".to_string()],
             slot_data: false,
         })),

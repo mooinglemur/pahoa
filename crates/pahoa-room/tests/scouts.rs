@@ -11,7 +11,7 @@ mod common;
 
 use common::*;
 use pahoa_multidata::HintStatus;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{CloseReason, ConnId, Event, Recorder, Room, RoomOptions};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
@@ -62,7 +62,7 @@ fn closed(sink: &Recorder, conn: ConnId) -> bool {
 
 fn scouts(locations: Vec<i64>, create_as_hint: i64) -> ClientPacket {
     ClientPacket::LocationScouts(cmd::LocationScouts {
-        locations,
+        locations: cmd::ids(locations),
         create_as_hint,
     })
 }
@@ -192,7 +192,7 @@ fn a_scout_remembers_a_hint_even_for_a_location_already_checked() {
     room.handle(
         conn,
         ClientPacket::LocationChecks(cmd::LocationChecks {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
         }),
         &mut sink,
     );
@@ -235,9 +235,9 @@ fn create_hints_rejects_an_empty_location_list() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![],
+            locations: cmd::ids(vec![]),
             player: None,
-            status: None,
+            status: Arg::Missing,
         }),
         &mut sink,
     );
@@ -259,9 +259,9 @@ fn create_hints_rejects_an_unknown_status() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
             player: None,
-            status: Some(35),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(35))),
         }),
         &mut sink,
     );
@@ -286,9 +286,9 @@ fn create_hints_lets_a_slot_prioritize_inside_its_own_world() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
             player: None,
-            status: Some(HintStatus::Avoid as i64),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(HintStatus::Avoid as i64))),
         }),
         &mut sink,
     );
@@ -319,9 +319,9 @@ fn create_hints_refuses_to_editorialize_about_someone_elses_item() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
             player: None,
-            status: Some(HintStatus::Priority as i64),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(HintStatus::Priority as i64))),
         }),
         &mut sink,
     );
@@ -335,9 +335,9 @@ fn create_hints_refuses_to_editorialize_about_someone_elses_item() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
             player: None,
-            status: None,
+            status: Arg::Missing,
         }),
         &mut sink,
     );
@@ -361,9 +361,9 @@ fn create_hints_refuses_an_off_world_location_that_does_not_exist() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![i64::MAX],
+            locations: cmd::ids(vec![i64::MAX]),
             player: Some(other),
-            status: None,
+            status: Arg::Missing,
         }),
         &mut sink,
     );
@@ -387,9 +387,9 @@ fn create_hints_drops_the_socket_on_an_unknown_own_location() {
     room.handle(
         conn,
         ClientPacket::CreateHints(cmd::CreateHints {
-            locations: vec![i64::MAX],
+            locations: cmd::ids(vec![i64::MAX]),
             player: None,
-            status: None,
+            status: Arg::Missing,
         }),
         &mut sink,
     );
@@ -422,9 +422,9 @@ fn update_hint_changes_the_status_for_every_slot_holding_a_copy() {
     room.handle(
         receiver_conn,
         ClientPacket::UpdateHint(cmd::UpdateHint {
-            player: slot,
-            location,
-            status: Some(HintStatus::Priority as i64),
+            player: Arg::Ok(pahoa_proto::lenient::U32(slot)),
+            location: Arg::Ok(pahoa_proto::lenient::I64(location)),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(HintStatus::Priority as i64))),
         }),
         &mut sink,
     );
@@ -464,9 +464,9 @@ fn only_the_receiving_player_may_reprioritize() {
     room.handle(
         conn,
         ClientPacket::UpdateHint(cmd::UpdateHint {
-            player: slot,
-            location,
-            status: Some(HintStatus::Priority as i64),
+            player: Arg::Ok(pahoa_proto::lenient::U32(slot)),
+            location: Arg::Ok(pahoa_proto::lenient::I64(location)),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(HintStatus::Priority as i64))),
         }),
         &mut sink,
     );
@@ -494,9 +494,9 @@ fn update_hint_refuses_to_set_found_by_hand() {
     room.handle(
         conn,
         ClientPacket::UpdateHint(cmd::UpdateHint {
-            player: slot,
-            location,
-            status: Some(HintStatus::Found as i64),
+            player: Arg::Ok(pahoa_proto::lenient::U32(slot)),
+            location: Arg::Ok(pahoa_proto::lenient::I64(location)),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(HintStatus::Found as i64))),
         }),
         &mut sink,
     );
@@ -510,9 +510,9 @@ fn update_hint_refuses_to_set_found_by_hand() {
     room.handle(
         conn,
         ClientPacket::UpdateHint(cmd::UpdateHint {
-            player: slot,
-            location,
-            status: Some(99),
+            player: Arg::Ok(pahoa_proto::lenient::U32(slot)),
+            location: Arg::Ok(pahoa_proto::lenient::I64(location)),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(99))),
         }),
         &mut sink,
     );
@@ -533,9 +533,9 @@ fn update_hint_ignores_a_hint_that_does_not_exist() {
     room.handle(
         conn,
         ClientPacket::UpdateHint(cmd::UpdateHint {
-            player: slot,
-            location: i64::MAX,
-            status: Some(HintStatus::Priority as i64),
+            player: Arg::Ok(pahoa_proto::lenient::U32(slot)),
+            location: Arg::Ok(pahoa_proto::lenient::I64(i64::MAX)),
+            status: Arg::Ok(Some(pahoa_proto::lenient::I64(HintStatus::Priority as i64))),
         }),
         &mut sink,
     );
@@ -564,9 +564,9 @@ fn a_null_status_leaves_the_hint_alone() {
     room.handle(
         conn,
         ClientPacket::UpdateHint(cmd::UpdateHint {
-            player: slot,
-            location,
-            status: None,
+            player: Arg::Ok(pahoa_proto::lenient::U32(slot)),
+            location: Arg::Ok(pahoa_proto::lenient::I64(location)),
+            status: Arg::Ok(None),
         }),
         &mut sink,
     );

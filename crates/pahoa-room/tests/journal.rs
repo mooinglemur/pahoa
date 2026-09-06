@@ -151,11 +151,11 @@ fn unknown_locations_are_not_journaled() {
 
 // --- everything that is not a check --------------------------------------
 
-use pahoa_proto::{ClientPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, client as cmd};
 
 fn say(text: &str) -> ClientPacket {
     ClientPacket::Say(cmd::Say {
-        text: text.to_string(),
+        text: Arg::Ok(text.to_string()),
     })
 }
 
@@ -360,9 +360,9 @@ fn a_deathlink_is_journaled_and_an_ordinary_bounce_is_not() {
     let bounce = |tags: &[&str]| {
         ClientPacket::Bounce(
             cmd::Bounce {
-                games: None,
-                slots: Some(vec![slot]),
-                tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+                games: Arg::Missing,
+                slots: Arg::Ok(vec![slot]),
+                tags: Arg::Ok(tags.iter().map(|t| t.to_string()).collect()),
                 data: serde_json::json!({"cause": "fell in a pit", "source": "someone"}),
             },
             serde_json::Map::new(),
@@ -495,7 +495,7 @@ fn only_a_real_tag_change_reaches_the_journal() {
 
     let retag = |tags: &[&str]| {
         ClientPacket::ConnectUpdate(cmd::ConnectUpdate {
-            items_handling: None,
+            items_handling: Arg::Missing,
             tags: Some(tags.iter().map(|t| t.to_string()).collect()),
         })
     };
@@ -701,9 +701,9 @@ fn every_link_convention_is_journaled_not_only_deathlink() {
     let bounce = |tag: &str, data: serde_json::Value| {
         ClientPacket::Bounce(
             cmd::Bounce {
-                games: None,
-                slots: Some(vec![slot]),
-                tags: Some(vec![tag.to_string()]),
+                games: Arg::Missing,
+                slots: Arg::Ok(vec![slot]),
+                tags: Arg::Ok(vec![tag.to_string()]),
                 data,
             },
             serde_json::Map::new(),
@@ -783,9 +783,9 @@ fn a_link_records_the_authenticated_sender_not_the_clients_claim() {
         conn,
         ClientPacket::Bounce(
             cmd::Bounce {
-                games: None,
-                slots: Some(vec![slot]),
-                tags: Some(vec!["DeathLink".to_string()]),
+                games: Arg::Missing,
+                slots: Arg::Ok(vec![slot]),
+                tags: Arg::Ok(vec!["DeathLink".to_string()]),
                 // A client naming somebody who is not the sender, which nothing
                 // in the protocol prevents.
                 data: serde_json::json!({"cause": "a falling anvil", "source": "NotThisPlayer"}),

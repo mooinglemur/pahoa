@@ -144,7 +144,7 @@ fn item_delivery_does_not_sweep_unaffected_clients() {
     room.handle(
         sender,
         ClientPacket::LocationChecks(cmd::LocationChecks {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
         }),
         &mut sink,
     );

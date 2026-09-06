@@ -9,7 +9,7 @@ mod common;
 
 use common::*;
 use pahoa_multidata::{Hint, HintStatus};
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::save::{FORMAT_VERSION, SaveError, Snapshot};
 use pahoa_room::{Recorder, Room, RoomOptions};
 use serde_json::{Map, json};
@@ -44,14 +44,14 @@ fn played_room() -> (Room, u32, String, String) {
     room.handle(
         conn,
         ClientPacket::Say(cmd::Say {
-            text: "!alias Nickname".to_string(),
+            text: Arg::Ok("!alias Nickname".to_string()),
         }),
         &mut sink,
     );
     room.handle(
         conn,
         ClientPacket::Say(cmd::Say {
-            text: format!("!hint {hintable}"),
+            text: Arg::Ok(format!("!hint {hintable}")),
         }),
         &mut sink,
     );
@@ -62,13 +62,10 @@ fn played_room() -> (Room, u32, String, String) {
         conn,
         ClientPacket::Set(
             Box::new(cmd::Set {
-                key: "tracker".to_string(),
+                key: Arg::Ok("tracker".to_string()),
                 default: None,
                 want_reply: false,
-                operations: vec![cmd::DataStorageOperation {
-                    operation: "replace".to_string(),
-                    value: value.clone(),
-                }],
+                operations: Arg::Ok(vec![json!({"operation": "replace", "value": value})]),
             }),
             Map::from_iter([
                 ("cmd".to_string(), json!("Set")),
@@ -160,7 +157,7 @@ fn the_hint_prng_resumes_where_it_left_off() {
         room.handle(
             conn,
             ClientPacket::Say(cmd::Say {
-                text: format!("!hint {hintable}"),
+                text: Arg::Ok(format!("!hint {hintable}")),
             }),
             &mut sink,
         );
@@ -373,7 +370,7 @@ fn tracker_timestamps_survive_a_restart() {
     room.handle(
         conn,
         pahoa_proto::ClientPacket::LocationChecks(pahoa_proto::client::LocationChecks {
-            locations: vec![first_location],
+            locations: pahoa_proto::client::ids(vec![first_location]),
         }),
         &mut sink,
     );

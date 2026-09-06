@@ -528,7 +528,7 @@ fn first_item_name(room: &Room, game: &str) -> Option<String> {
 
 fn say(text: &str) -> pahoa_proto::ClientPacket {
     pahoa_proto::ClientPacket::Say(pahoa_proto::client::Say {
-        text: text.to_string(),
+        text: pahoa_proto::Arg::Ok(text.to_string()),
     })
 }
 
@@ -1351,7 +1351,7 @@ fn a_lock_survives_a_save_and_restore() {
 fn with_password(name: &str, game: &str, password: &str) -> pahoa_proto::ClientPacket {
     match connect(name, game, 0b111) {
         pahoa_proto::ClientPacket::Connect(mut c) => {
-            c.password = Some(password.to_string());
+            c.password = pahoa_proto::Arg::Ok(Some(password.to_string()));
             pahoa_proto::ClientPacket::Connect(c)
         }
         other => other,
@@ -1492,9 +1492,9 @@ mod filters {
     fn bounce(tags: &[&str]) -> pahoa_proto::ClientPacket {
         pahoa_proto::ClientPacket::Bounce(
             pahoa_proto::client::Bounce {
-                games: None,
-                slots: Some(vec![]),
-                tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+                games: pahoa_proto::Arg::Missing,
+                slots: pahoa_proto::Arg::Ok(vec![]),
+                tags: pahoa_proto::Arg::Ok(tags.iter().map(|t| t.to_string()).collect()),
                 data: serde_json::json!({"time": 1.0, "cause": "test", "source": "test"}),
             },
             serde_json::Map::new(),

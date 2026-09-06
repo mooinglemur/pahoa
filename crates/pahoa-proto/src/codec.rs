@@ -126,7 +126,13 @@ fn decode_one(index: usize, map: Map<String, Value>) -> Result<ClientPacket, Dec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Arg;
     use crate::server::{LocationInfo, RoomUpdate};
+
+    /// The raw `operations` list of a decoded `Set`.
+    fn ops(s: &Set) -> &[Value] {
+        s.operations.as_ok().expect("operations decoded")
+    }
     use crate::types::Version;
 
     #[test]
@@ -177,11 +183,11 @@ mod tests {
         let packets = decode(frame).unwrap();
         match &packets[0] {
             ClientPacket::Connect(c) => {
-                assert_eq!(c.name, "Alice");
+                assert_eq!(c.name, Arg::Ok("Alice".into()));
                 assert_eq!(c.version, Version::new(0, 6, 8));
-                assert_eq!(c.items_handling, 7);
+                assert_eq!(c.items_handling, Arg::Ok(crate::lenient::U8(7)));
                 assert!(c.slot_data, "slot_data defaults to true");
-                assert_eq!(c.password, None);
+                assert_eq!(c.password, Arg::Ok(None));
             }
             other => panic!("got {other:?}"),
         }
@@ -193,7 +199,7 @@ mod tests {
         let frame = r#"[{"cmd":"Get","keys":["a"],"client_tag":7}]"#;
         match &decode(frame).unwrap()[0] {
             ClientPacket::Get(g, raw) => {
-                assert_eq!(g.keys, ["a"]);
+                assert_eq!(g.keys, Arg::Ok(vec![serde_json::json!("a")]));
                 assert_eq!(raw.get("client_tag"), Some(&serde_json::json!(7)));
                 // Order is preserved for byte-identical echoes.
                 assert_eq!(
@@ -253,7 +259,7 @@ mod tests {
         match &decode(frame).unwrap()[0] {
             ClientPacket::Set(s, _) => {
                 assert!(!s.want_reply);
-                assert_eq!(s.operations[0].operation, "add");
+                assert_eq!(ops(s)[0]["operation"], "add");
             }
             other => panic!("got {other:?}"),
         }
@@ -271,22 +277,62 @@ mod tests {
         let packets = decode(r#"[{"cmd":"LocationChecks","locations":[113.0,221.0,42]}]"#)
             .expect("the reference accepts this, so we must");
         match &packets[0] {
-            ClientPacket::LocationChecks(c) => assert_eq!(c.locations, vec![113, 221, 42]),
+            ClientPacket::LocationChecks(c) => {
+                // Held raw, so the room can drop what does not resolve rather
+                // than lose the whole batch; `lenient::as_int` reads them.
+                let ids: Vec<i64> = c
+                    .locations
+                    .iter()
+                    .filter_map(crate::lenient::as_int)
+                    .collect();
+                assert_eq!(ids, vec![113, 221, 42]);
+            }
             other => panic!("{other:?}"),
         }
     }
 
-    /// **Truncating would be worse than refusing.** A fractional location id is
+    /// **Truncating would be worse than dropping.** A fractional location id is
     /// not a location any seed has, and rounding one into a real id would check
     /// somebody's location because a client had a rounding bug. The reference
     /// reaches the same place from the other side: `113.5` simply matches
     /// nothing in its table.
     #[test]
-    fn a_fractional_location_is_still_refused() {
-        assert!(decode(r#"[{"cmd":"LocationChecks","locations":[113.5]}]"#).is_err());
-        // And a float too large for the type is refused rather than saturated
-        // into a plausible id.
-        assert!(decode(r#"[{"cmd":"LocationChecks","locations":[1e300]}]"#).is_err());
+    fn a_fractional_location_resolves_to_nothing() {
+        for junk in ["113.5", "1e300", r#""113""#, "null"] {
+            let frame = format!(r#"[{{"cmd":"LocationChecks","locations":[{junk},42]}}]"#);
+            let packets = decode(&frame).unwrap_or_else(|e| panic!("{junk} -> {e}"));
+            match &packets[0] {
+                ClientPacket::LocationChecks(c) => {
+                    let ids: Vec<i64> = c
+                        .locations
+                        .iter()
+                        .filter_map(crate::lenient::as_int)
+                        .collect();
+                    assert_eq!(
+                        ids,
+                        vec![42],
+                        "{junk} must resolve to nothing, and 42 survive"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// `LocationScouts` is the one that reports the junk instead of ignoring
+    /// it, because the reference checks that list element by element with its
+    /// own message — so the element has to survive decoding either way.
+    #[test]
+    fn a_scouted_list_keeps_its_junk_for_the_handler_to_report() {
+        let packets = decode(r#"[{"cmd":"LocationScouts","locations":[113.5]}]"#)
+            .expect("the handler answers this, so decoding must not refuse it");
+        match &packets[0] {
+            ClientPacket::LocationScouts(s) => {
+                assert_eq!(s.locations.len(), 1);
+                assert_eq!(crate::lenient::as_int(&s.locations[0]), None);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -302,6 +348,87 @@ mod tests {
         }
     }
 
+    // --- booleans a client spells as something else -----------------------
+    //
+    // Seen live: `Set: invalid type: integer 0, expected a boolean`, repeatedly,
+    // on a room's ordinary data-storage traffic. The reference writes
+    // `if args.get("want_reply", False):` — a truth test on whatever `json`
+    // produced, so `0` is simply false there and the packet is unremarkable.
+
+    #[test]
+    fn want_reply_accepts_anything_python_would_test_for_truth() {
+        let set = r#"[{"cmd":"Set","key":"k","operations":[],"want_reply":WR}]"#;
+        for (spelling, expected) in [
+            ("0", false),
+            ("1", true),
+            ("2", true),
+            ("-1", true),
+            ("0.0", false),
+            ("0.5", true),
+            (r#""""#, false),
+            (r#""no""#, true), // a non-empty string is true, however it reads
+            ("[]", false),
+            ("[1,2]", true),
+            ("{}", false),
+            (r#"{"a":1}"#, true),
+            ("null", false),
+            ("false", false),
+            ("true", true),
+        ] {
+            let json = set.replace("WR", spelling);
+            let packets = decode(&json).unwrap_or_else(|e| panic!("{spelling} -> {e}"));
+            match &packets[0] {
+                ClientPacket::Set(s, _) => {
+                    assert_eq!(s.want_reply, expected, "want_reply: {spelling}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// A container has to be drained, not peeked at, or the fields after it
+    /// fail to parse.
+    #[test]
+    fn a_container_spelling_does_not_derail_the_rest_of_the_packet() {
+        let packets = decode(
+            r#"[{"cmd":"Set","key":"k","want_reply":[1,2,3],"operations":[{"operation":"add","value":1}]}]"#,
+        )
+        .expect("decodes");
+        match &packets[0] {
+            ClientPacket::Set(s, _) => {
+                assert!(s.want_reply);
+                assert_eq!(ops(s).len(), 1, "the field after it survived");
+                assert_eq!(ops(s)[0]["operation"], "add");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `slot_data` is the other truth test (`MultiServer.py:1973`), and its
+    /// default is the interesting half: absent means *yes*, while an explicit
+    /// null is falsy and means no.
+    #[test]
+    fn slot_data_defaults_to_true_but_an_explicit_null_is_false() {
+        let connect = r#"[{"cmd":"Connect","password":null,"game":"G","name":"n","uuid":"u",
+            "version":{"major":0,"minor":6,"build":8,"class":"Version"},"items_handling":0 EXTRA}]"#;
+        for (extra, expected) in [
+            ("", true),
+            (r#","slot_data":0"#, false),
+            (r#","slot_data":null"#, false),
+            (r#","slot_data":1"#, true),
+            (r#","slot_data":false"#, false),
+        ] {
+            let json = connect.replace("EXTRA", extra);
+            let packets = decode(&json).unwrap_or_else(|e| panic!("{extra:?} -> {e}"));
+            match &packets[0] {
+                ClientPacket::Connect(c) => {
+                    assert_eq!(c.slot_data, expected, "slot_data: {extra:?}")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     /// The lenient reader must not quietly relax what was deliberately strict.
     ///
     /// `UpdateHint.status` is required but nullable: an explicit `null` means
@@ -314,7 +441,7 @@ mod tests {
         let with_null = decode(r#"[{"cmd":"UpdateHint","player":3,"location":7,"status":null}]"#)
             .expect("an explicit null is accepted");
         match &with_null[0] {
-            ClientPacket::UpdateHint(u) => assert_eq!(u.status, None),
+            ClientPacket::UpdateHint(u) => assert_eq!(u.status, Arg::Ok(None)),
             other => panic!("{other:?}"),
         }
         assert!(

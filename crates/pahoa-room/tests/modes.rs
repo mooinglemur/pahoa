@@ -10,14 +10,14 @@ mod common;
 
 use common::*;
 use pahoa_proto::server::{PrintJson, PrintJsonType};
-use pahoa_proto::{ClientPacket, ClientStatus, Permission, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ClientStatus, Permission, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 fn say(text: &str) -> ClientPacket {
     ClientPacket::Say(cmd::Say {
-        text: text.to_string(),
+        text: Arg::Ok(text.to_string()),
     })
 }
 

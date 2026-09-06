@@ -18,7 +18,7 @@ mod common;
 use common::*;
 use pahoa_proto::server::{PrintJson, PrintJsonType};
 use pahoa_proto::types::Version;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
@@ -38,12 +38,12 @@ fn two_players(data: &pahoa_multidata::MultiData) -> [Player; 2] {
 
 fn connect_tagged(name: &str, game: &str, tags: &[&str]) -> ClientPacket {
     ClientPacket::Connect(Box::new(cmd::Connect {
-        password: None,
-        game: Some(game.to_string()),
-        name: name.to_string(),
+        password: Arg::Ok(None),
+        game: Arg::Ok(Some(game.to_string())),
+        name: Arg::Ok(name.to_string()),
         uuid: serde_json::json!("test-uuid"),
         version: Version::new(0, 6, 8),
-        items_handling: 0b111,
+        items_handling: Arg::Ok(pahoa_proto::lenient::U8(0b111)),
         tags: tags.iter().map(|t| t.to_string()).collect(),
         slot_data: false,
     }))

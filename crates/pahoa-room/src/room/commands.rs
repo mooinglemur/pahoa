@@ -147,11 +147,14 @@ impl Room {
     // --- entry point -----------------------------------------------------
 
     pub(super) fn handle_say(&mut self, conn: ConnId, args: cmd::Say, out: &mut dyn EffectSink) {
-        if !is_printable(&args.text) {
+        // One guard, three ways to fail it: absent, not a string, or not
+        // printable (`MultiServer.py:2176-2180`).
+        let Some(text) = args.text.as_ok().filter(|t| is_printable(t)) else {
             self.bad_arguments(conn, "Say", "Say".into(), out);
             return;
-        }
-        self.process_message(conn, &args.text, out);
+        };
+        let text = text.clone();
+        self.process_message(conn, &text, out);
     }
 
     /// `ClientMessageProcessor.__call__`: broadcast, then dispatch.

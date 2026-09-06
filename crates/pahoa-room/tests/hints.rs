@@ -11,7 +11,7 @@ mod common;
 
 use common::*;
 use pahoa_multidata::{Hint, HintStatus};
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 use serde_json::Value;
 
@@ -339,7 +339,7 @@ fn subscribers_are_pushed_the_whole_hint_list() {
     room.handle(
         a,
         ClientPacket::SetNotify(cmd::SetNotify {
-            keys: vec![key.clone()],
+            keys: Arg::Ok(vec![key.clone().into()]),
         }),
         &mut sink,
     );
@@ -402,7 +402,7 @@ fn reading_the_hints_key_returns_the_slots_hints() {
         a,
         ClientPacket::Get(
             cmd::Get {
-                keys: vec![key.clone()],
+                keys: Arg::Ok(vec![key.clone().into()]),
             },
             raw,
         ),
@@ -437,7 +437,7 @@ fn checking_a_hinted_location_marks_the_hint_found_and_tells_subscribers() {
         room.handle(
             conn,
             ClientPacket::SetNotify(cmd::SetNotify {
-                keys: vec![key.clone()],
+                keys: Arg::Ok(vec![key.clone().into()]),
             }),
             &mut sink,
         );
@@ -455,7 +455,7 @@ fn checking_a_hinted_location_marks_the_hint_found_and_tells_subscribers() {
     room.handle(
         a,
         ClientPacket::LocationChecks(cmd::LocationChecks {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
         }),
         &mut sink,
     );

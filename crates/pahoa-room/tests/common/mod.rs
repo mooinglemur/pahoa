@@ -6,7 +6,7 @@
 
 use pahoa_multidata::MultiData;
 use pahoa_proto::types::Version;
-use pahoa_proto::{ClientPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, client as cmd};
 use pahoa_room::{ConnId, Room, RoomOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -91,12 +91,12 @@ pub fn most_owed_item(room: &Room, slot: u32) -> Option<String> {
 /// A `Connect` for a slot, with sensible defaults.
 pub fn connect(name: &str, game: &str, items_handling: u8) -> ClientPacket {
     ClientPacket::Connect(Box::new(cmd::Connect {
-        password: None,
-        game: Some(game.to_string()),
-        name: name.to_string(),
+        password: Arg::Ok(None),
+        game: Arg::Ok(Some(game.to_string())),
+        name: Arg::Ok(name.to_string()),
         uuid: serde_json::json!("test-uuid"),
         version: Version::new(0, 6, 8),
-        items_handling,
+        items_handling: Arg::Ok(pahoa_proto::lenient::U8(items_handling)),
         tags: vec!["AP".to_string()],
         slot_data: true,
     }))

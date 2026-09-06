@@ -16,13 +16,15 @@
 //! assert_eq!(out, r#"[{"cmd":"LocationInfo","locations":[]}]"#);
 //! ```
 
+pub mod arg;
 pub mod client;
 pub mod codec;
 pub mod depth;
-mod lenient;
+pub mod lenient;
 pub mod server;
 pub mod types;
 
+pub use arg::Arg;
 pub use client::ClientPacket;
 pub use codec::{DecodeError, decode, encode};
 pub use depth::{DepthError, MAX_DEPTH, check_depth};

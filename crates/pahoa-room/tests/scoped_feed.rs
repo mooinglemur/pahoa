@@ -7,7 +7,7 @@
 mod common;
 
 use common::*;
-use pahoa_proto::client as cmd;
+use pahoa_proto::{Arg, client as cmd};
 use pahoa_room::{ConnId, Event, FeedPolicy, Recipients, Recorder, Room, RoomOptions, SlotKey};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
@@ -64,7 +64,7 @@ fn a_connect_update_cannot_lower_the_feed_policy() {
     room.handle(
         conn,
         pahoa_proto::ClientPacket::ConnectUpdate(cmd::ConnectUpdate {
-            items_handling: Some(0b111),
+            items_handling: Arg::Ok(Some(pahoa_proto::lenient::U8(0b111))),
             tags: Some(vec!["DeathLink".to_string()]),
         }),
         &mut sink,
@@ -95,7 +95,7 @@ fn chat_and_room_wide_events_stay_addressed_to_everyone() {
     room.handle(
         conn,
         pahoa_proto::ClientPacket::Say(cmd::Say {
-            text: "hello everyone".to_string(),
+            text: Arg::Ok("hello everyone".to_string()),
         }),
         &mut sink,
     );
@@ -181,7 +181,9 @@ fn item_sends_are_routed_to_the_slots_they_concern() {
     let mut sink = Recorder::default();
     room.handle(
         ConnId(1),
-        pahoa_proto::ClientPacket::LocationChecks(cmd::LocationChecks { locations }),
+        pahoa_proto::ClientPacket::LocationChecks(cmd::LocationChecks {
+            locations: cmd::ids(locations),
+        }),
         &mut sink,
     );
 
@@ -222,7 +224,9 @@ fn no_scoped_connections_means_no_scoped_traffic() {
     let mut sink = Recorder::default();
     room.handle(
         ConnId(1),
-        pahoa_proto::ClientPacket::LocationChecks(cmd::LocationChecks { locations }),
+        pahoa_proto::ClientPacket::LocationChecks(cmd::LocationChecks {
+            locations: cmd::ids(locations),
+        }),
         &mut sink,
     );
 

@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 use serde_json::{Map, Value, json};
 
@@ -22,30 +22,23 @@ fn get(keys: &[&str]) -> ClientPacket {
     let list: Vec<Value> = keys.iter().map(|k| json!(k)).collect();
     ClientPacket::Get(
         cmd::Get {
-            keys: keys.iter().map(|k| k.to_string()).collect(),
+            keys: Arg::Ok(keys.iter().map(|k| json!(k)).collect()),
         },
         raw("Get", &[("keys", Value::Array(list))]),
     )
 }
 
 fn set(key: &str, ops: &[(&str, Value)], want_reply: bool) -> ClientPacket {
-    let operations: Vec<cmd::DataStorageOperation> = ops
-        .iter()
-        .map(|(o, v)| cmd::DataStorageOperation {
-            operation: o.to_string(),
-            value: v.clone(),
-        })
-        .collect();
     let ops_json: Vec<Value> = ops
         .iter()
         .map(|(o, v)| json!({"operation": o, "value": v}))
         .collect();
     ClientPacket::Set(
         Box::new(cmd::Set {
-            key: key.to_string(),
+            key: Arg::Ok(key.to_string()),
             default: None,
             want_reply,
-            operations,
+            operations: Arg::Ok(ops_json.clone()),
         }),
         raw(
             "Set",
@@ -105,7 +98,7 @@ fn retrieved_carries_unknown_client_fields_through() {
     // correlation tag has to survive.
     let packet = ClientPacket::Get(
         cmd::Get {
-            keys: vec!["k".into()],
+            keys: Arg::Ok(vec![json!("k")]),
         },
         raw("Get", &[("keys", json!(["k"])), ("my_tag", json!(99))]),
     );
@@ -169,7 +162,7 @@ fn subscribers_are_told_even_when_the_value_is_unchanged() {
     room.handle(
         watcher,
         ClientPacket::SetNotify(cmd::SetNotify {
-            keys: vec!["shared".into()],
+            keys: Arg::Ok(vec![json!("shared")]),
         }),
         &mut Recorder::default(),
     );
@@ -340,7 +333,7 @@ fn a_bounce_reaches_everyone_carrying_the_tag_including_the_sender() {
         room.handle(
             conn,
             ClientPacket::ConnectUpdate(cmd::ConnectUpdate {
-                items_handling: None,
+                items_handling: Arg::Missing,
                 tags: Some(vec!["AP".into(), "DeathLink".into()]),
             }),
             &mut Recorder::default(),
@@ -353,9 +346,9 @@ fn a_bounce_reaches_everyone_carrying_the_tag_including_the_sender() {
         a,
         ClientPacket::Bounce(
             cmd::Bounce {
-                games: None,
-                slots: None,
-                tags: Some(vec!["DeathLink".into()]),
+                games: Arg::Missing,
+                slots: Arg::Missing,
+                tags: Arg::Ok(vec!["DeathLink".into()]),
                 data: data_payload.clone(),
             },
             raw(
@@ -396,9 +389,9 @@ fn a_bounce_with_no_filters_reaches_nobody() {
         conn,
         ClientPacket::Bounce(
             cmd::Bounce {
-                games: None,
-                slots: None,
-                tags: None,
+                games: Arg::Missing,
+                slots: Arg::Missing,
+                tags: Arg::Missing,
                 data: json!({}),
             },
             raw("Bounce", &[("data", json!({}))]),
@@ -424,7 +417,7 @@ fn subscriptions_are_dropped_when_a_connection_goes() {
     room.handle(
         watcher,
         ClientPacket::SetNotify(cmd::SetNotify {
-            keys: vec!["k".into()],
+            keys: Arg::Ok(vec![json!("k")]),
         }),
         &mut Recorder::default(),
     );

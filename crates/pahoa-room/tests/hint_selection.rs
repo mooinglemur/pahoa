@@ -25,7 +25,7 @@ mod common;
 
 use common::*;
 use pahoa_proto::server::PrintJsonType;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{Recorder, RoomOptions};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -137,7 +137,7 @@ fn selection_and_pricing_match_archipelago() {
         room.handle(
             conn,
             ClientPacket::Say(cmd::Say {
-                text: command.trim_end().to_string(),
+                text: Arg::Ok(command.trim_end().to_string()),
             }),
             &mut sink,
         );
@@ -404,7 +404,7 @@ fn hint_order_is_reproducible_for_a_given_seed() {
         room.handle(
             conn,
             ClientPacket::Say(cmd::Say {
-                text: format!("!hint {item}"),
+                text: Arg::Ok(format!("!hint {item}")),
             }),
             &mut sink,
         );

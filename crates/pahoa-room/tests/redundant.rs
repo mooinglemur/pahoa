@@ -13,7 +13,7 @@
 mod common;
 
 use common::*;
-use pahoa_proto::{ClientPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, client as cmd};
 use pahoa_room::redundant::{self, Kind};
 use pahoa_room::{Recorder, RoomOptions};
 
@@ -119,8 +119,8 @@ fn a_hint_created_twice_is_counted_as_redundant() {
     let create = || {
         ClientPacket::CreateHints(cmd::CreateHints {
             player: None,
-            locations: vec![location],
-            status: None,
+            locations: cmd::ids(vec![location]),
+            status: Arg::Missing,
         })
     };
 
@@ -166,7 +166,7 @@ fn only_a_scout_asking_for_new_hints_counts_repeats() {
     let location = data.locations.for_slot(slot)[0].location;
     let scout = |create_as_hint: u8| {
         ClientPacket::LocationScouts(cmd::LocationScouts {
-            locations: vec![location],
+            locations: cmd::ids(vec![location]),
             create_as_hint: create_as_hint as i64,
         })
     };

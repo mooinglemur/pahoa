@@ -5,7 +5,7 @@ mod common;
 use common::*;
 use pahoa_proto::server::ConnectionRefusedReason as Refused;
 use pahoa_proto::types::Version;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd};
 use pahoa_room::{ConnId, Recorder, Room, RoomOptions};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
@@ -155,7 +155,7 @@ fn a_wrong_password_is_refused() {
 fn connect_with(name: &str, game: &str, password: &str) -> ClientPacket {
     match connect(name, game, 0b001) {
         ClientPacket::Connect(mut args) => {
-            args.password = Some(password.to_string());
+            args.password = Arg::Ok(Some(password.to_string()));
             ClientPacket::Connect(args)
         }
         other => other,
@@ -437,14 +437,14 @@ fn a_tracker_may_connect_without_naming_a_game() {
     room.handle(
         conn,
         ClientPacket::Connect(Box::new(cmd::Connect {
-            password: None,
-            game: None,
-            name: name.clone(),
+            password: Arg::Ok(None),
+            game: Arg::Ok(None),
+            name: Arg::Ok(name.clone()),
             uuid: serde_json::json!(null),
             // Below the per-slot floor, but a game-less tracker is held only to
             // the global minimum.
             version: Version::new(0, 5, 0),
-            items_handling: 0,
+            items_handling: Arg::Ok(pahoa_proto::lenient::U8(0)),
             tags: vec!["Tracker".to_string()],
             slot_data: false,
         })),

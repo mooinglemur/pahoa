@@ -19,7 +19,7 @@ use crate::save::{SaveError, Snapshot};
 use pahoa_multidata::{DataPackage as NameTables, Hint, MultiData, SlotType};
 use pahoa_proto::server::*;
 use pahoa_proto::types::*;
-use pahoa_proto::{ClientPacket, ServerPacket, client as cmd};
+use pahoa_proto::{Arg, ClientPacket, ServerPacket, client as cmd, lenient};
 use pahoa_pyrandom::PyRandom;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -448,7 +448,7 @@ impl Room {
             ClientPacket::ConnectUpdate(u) => self.handle_connect_update(conn, u, out),
             ClientPacket::Get(g, raw) => self.handle_get(conn, g, raw, out),
             ClientPacket::Set(s, raw) => self.handle_set(conn, *s, raw, out),
-            ClientPacket::SetNotify(s) => self.handle_set_notify(conn, s),
+            ClientPacket::SetNotify(s) => self.handle_set_notify(conn, s, out),
             ClientPacket::Bounce(b, raw) => self.handle_bounce(conn, b, raw, out),
             ClientPacket::LocationScouts(s) => self.handle_location_scouts(conn, s, out),
             ClientPacket::CreateHints(c) => self.handle_create_hints(conn, c, out),
@@ -481,16 +481,31 @@ impl Room {
     // --- Connect ---------------------------------------------------------
 
     fn handle_connect(&mut self, conn: ConnId, args: cmd::Connect, out: &mut dyn EffectSink) {
+        // The reference's one precondition, ahead of everything else
+        // (`MultiServer.py:1904-1907`): `password` present and a string or
+        // null, `game` present. Both are answered, not closed on — and note
+        // `game` is only checked for *presence*, so a non-string one carries on
+        // to be compared below.
+        if args.password.is_bad() || matches!(args.game, Arg::Missing) {
+            self.bad_arguments(conn, "Connect", "Connect".into(), out);
+            return;
+        }
+        let password = args.password.as_ok().and_then(Option::as_deref);
+        let game = args.game.as_ok().and_then(Option::as_deref);
+        // A present name of the wrong type is not an error of its own: it
+        // simply matches no slot, which is `InvalidSlot`.
+        let name = args.name.as_ok().map(String::as_str);
+
         let mut errors: Vec<ConnectionRefusedReason> = Vec::new();
 
         // The room-wide password can be checked before anything about the
         // client is known. A per-slot one cannot, so it waits until the name has
         // resolved, below.
-        if !crate::secret::ct_eq_opt(self.options.password.as_deref(), args.password.as_deref()) {
+        if !crate::secret::ct_eq_opt(self.options.password.as_deref(), password) {
             errors.push(ConnectionRefusedReason::InvalidPassword);
         }
 
-        let resolved = self.data.connect_names.get(&args.name).copied();
+        let resolved = name.and_then(|n| self.data.connect_names.get(n)).copied();
         let mut items_handling = ItemsHandling::new(0).expect("0 is valid");
 
         match resolved {
@@ -518,18 +533,23 @@ impl Room {
                 // clearing a password is a way to bar a slot mid-async.
                 if let Some(slot_passwords) = &self.options.slot_passwords {
                     let expected = slot_passwords.get(&slot).map(String::as_str);
-                    let ok = expected.is_some_and(|expected| {
-                        crate::secret::ct_eq_opt(Some(expected), args.password.as_deref())
-                    });
+                    let ok = expected
+                        .is_some_and(|expected| crate::secret::ct_eq_opt(Some(expected), password));
                     if !ok {
                         errors.push(ConnectionRefusedReason::InvalidPassword);
                     }
                 }
 
-                let ignore_game = Client::ignores_game(&args.game, &args.tags);
+                // A present but non-string game is truthy in Python, so it
+                // never opens the game-less tracker path, and it equals no
+                // game name. `Arg::Wrong` reproduces both halves.
+                let ignore_game = match &args.game {
+                    Arg::Wrong => false,
+                    g => Client::ignores_game(g.as_ok().unwrap_or(&None), &args.tags),
+                };
                 let expected_game = self.slot_game(slot);
 
-                if !ignore_game && args.game.as_deref() != Some(expected_game.as_str()) {
+                if !ignore_game && game != Some(expected_game.as_str()) {
                     errors.push(ConnectionRefusedReason::InvalidGame);
                 }
 
@@ -544,9 +564,15 @@ impl Room {
                     errors.push(ConnectionRefusedReason::IncompatibleVersion);
                 }
 
-                match ItemsHandling::new(args.items_handling) {
-                    Ok(h) => items_handling = h,
-                    Err(_) => errors.push(ConnectionRefusedReason::InvalidItemsHandling),
+                // A wrong type is the same refusal as a bad flag combination,
+                // not a decode failure: it reaches the reference's setter,
+                // whose `value & 0b001` raises `TypeError` into the `except`
+                // that adds `InvalidItemsHandling` (`MultiServer.py:1927-1930`).
+                match args.items_handling.as_ok().map(|b| ItemsHandling::new(b.0)) {
+                    Some(Ok(h)) => items_handling = h,
+                    Some(Err(_)) | None => {
+                        errors.push(ConnectionRefusedReason::InvalidItemsHandling)
+                    }
                 }
             }
         }
@@ -567,8 +593,8 @@ impl Room {
             // they cannot get in. The password itself is not among the fields.
             tracing::info!(
                 %conn,
-                name = %args.name,
-                game = args.game.as_deref().unwrap_or("-"),
+                name = name.unwrap_or("-"),
+                game = game.unwrap_or("-"),
                 version = %args.version,
                 reasons = ?errors,
                 "connection refused"
@@ -778,15 +804,24 @@ impl Room {
             let Some(client) = self.clients.get_mut(&conn) else {
                 return;
             };
-            if let Some(bits) = args.items_handling {
-                match ItemsHandling::new(bits) {
+            // Absent *or* null means "leave it alone"
+            // (`args.get('items_handling', None) is not None`); a wrong type
+            // joins the bad-flags case, which the reference answers rather
+            // than closing on (`MultiServer.py:2005-2020`).
+            let bits = match &args.items_handling {
+                Arg::Missing | Arg::Ok(None) => None,
+                Arg::Ok(Some(b)) => Some(Ok(b.0)),
+                Arg::Wrong => Some(Err(())),
+            };
+            if let Some(bits) = bits {
+                match bits.and_then(|b| ItemsHandling::new(b).map_err(|_| ())) {
                     Ok(h) => {
                         if h != client.items_handling {
                             client.items_handling = h;
                             resend = true;
                         }
                     }
-                    Err(_) => {
+                    Err(()) => {
                         out.send(
                             conn,
                             &[ServerPacket::InvalidPacket(InvalidPacket {
@@ -934,8 +969,29 @@ impl Room {
         raw: Map<String, Value>,
         out: &mut dyn EffectSink,
     ) {
+        // Absent or not a list is answered — and answered as `"Retrieve"`,
+        // which is the reference's own spelling here and not the command's
+        // name (`MultiServer.py:2246-2249`).
+        let Some(keys) = args.keys.as_ok() else {
+            self.bad_arguments(conn, "Get", "Retrieve".into(), out);
+            return;
+        };
+        // A non-string *inside* the list is a different matter: it reaches
+        // `key.startswith("_read_")` and raises, taking the socket with it.
+        let keys: Vec<String> = match keys
+            .iter()
+            .map(|k| k.as_str().map(str::to_string))
+            .collect()
+        {
+            Some(keys) => keys,
+            None => {
+                self.protocol_error(conn, "Get: keys must be strings".into(), out);
+                return;
+            }
+        };
+
         let mut values = Map::new();
-        for key in &args.keys {
+        for key in &keys {
             let value = if key.starts_with(Self::READ_PREFIX) {
                 self.read_data(key).unwrap_or(Value::Null)
             } else {
@@ -962,30 +1018,59 @@ impl Room {
         raw: Map<String, Value>,
         out: &mut dyn EffectSink,
     ) {
-        if args.key.starts_with(Self::READ_PREFIX) {
+        // An absent `key`, or `operations` missing or not a list, are one
+        // guard with one answer (`MultiServer.py:2260-2264`).
+        if matches!(args.key, Arg::Missing) || args.operations.is_bad() {
+            self.bad_arguments(conn, "Set", "Set".into(), out);
+            return;
+        }
+        // A *present* key that is not a string reaches `.startswith` and
+        // raises, which is a closed socket rather than an answer.
+        let Some(key) = args.key.as_ok().cloned() else {
+            self.protocol_error(conn, "Set: key must be a string".into(), out);
+            return;
+        };
+
+        // Before the operations are looked at, as upstream's guard is: a
+        // `_read_` key with a malformed operation in it must still be answered
+        // rather than closed on. The text is pahoa's own — upstream says only
+        // "Set", which tells the author of a tracker nothing.
+        if key.starts_with(Self::READ_PREFIX) {
             out.send(
                 conn,
                 &[ServerPacket::InvalidPacket(InvalidPacket {
                     problem_type: "arguments".into(),
                     original_cmd: Some("Set".into()),
-                    text: format!("cannot write to the read-only key {:?}", args.key),
+                    text: format!("cannot write to the read-only key {key:?}"),
                 })],
             );
             return;
         }
 
+        // Entries stayed raw because `operation["operation"]` on something that
+        // is not a mapping raises, which is a close rather than an answer.
+        let mut operations = Vec::with_capacity(args.operations.as_ok().map_or(0, Vec::len));
+        for entry in args.operations.as_ok().into_iter().flatten() {
+            let Some(op) = entry.get("operation").and_then(Value::as_str) else {
+                self.protocol_error(
+                    conn,
+                    "Set: each operation needs a string `operation`".into(),
+                    out,
+                );
+                return;
+            };
+            operations.push((
+                op.to_string(),
+                entry.get("value").cloned().unwrap_or(Value::Null),
+            ));
+        }
+
         // An absent key falls back to the packet's `default`, or 0 — not null
         // (`MultiServer.py:2183`).
-        let original = self.stored_data.get(&args.key).map_or_else(
+        let original = self.stored_data.get(&key).map_or_else(
             || args.default.clone().unwrap_or(Value::from(0)),
             |v| (**v).clone(),
         );
-
-        let operations: Vec<(String, Value)> = args
-            .operations
-            .iter()
-            .map(|o| (o.operation.clone(), o.value.clone()))
-            .collect();
 
         let value = match pahoa_datastore::apply_all(original.clone(), &operations) {
             Ok(v) => v,
@@ -1005,7 +1090,7 @@ impl Room {
         };
 
         self.stored_data
-            .insert(args.key.clone(), Arc::new(value.clone()));
+            .insert(key.clone(), Arc::new(value.clone()));
         out.mark_dirty();
 
         let slot = self.clients.get(&conn).map(|c| c.slot).unwrap_or(0);
@@ -1023,7 +1108,7 @@ impl Room {
         // a SetReply is sent even when the value did not change.
         let mut targets: Vec<ConnId> = self
             .stored_data_subscriptions
-            .get(&args.key)
+            .get(&key)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
         if args.want_reply && !targets.contains(&conn) {
@@ -1038,10 +1123,17 @@ impl Room {
     /// Subscriptions are never explicitly removed — Python uses a `WeakSet` and
     /// lets garbage collection do it. Holding connection ids and pruning on
     /// disconnect is the same behavior without the GC timing dependency.
-    fn handle_set_notify(&mut self, conn: ConnId, args: cmd::SetNotify) {
-        for key in args.keys {
+    fn handle_set_notify(&mut self, conn: ConnId, args: cmd::SetNotify, out: &mut dyn EffectSink) {
+        let Some(keys) = args.keys.as_ok() else {
+            self.bad_arguments(conn, "SetNotify", "SetNotify".into(), out);
+            return;
+        };
+        // A non-string key is stored by the reference under a `defaultdict`
+        // entry that no `Set` can ever name, since `Set.key` has to survive its
+        // own `startswith`. Skipping it is the same outcome without the entry.
+        for key in keys.iter().filter_map(Value::as_str) {
             self.stored_data_subscriptions
-                .entry(key)
+                .entry(key.to_string())
                 .or_default()
                 .insert(conn);
         }
@@ -1065,9 +1157,32 @@ impl Room {
         };
         let (team, sender_slot) = (sender.team, sender.slot);
 
-        let games = args.games.unwrap_or_default();
-        let slots = args.slots.unwrap_or_default();
-        let tags = args.tags.unwrap_or_default();
+        // Each filter is validated whole, with its own message, and a bad one
+        // is answered rather than fatal (`MultiServer.py:2185-2211`). The
+        // reference does not distinguish "not a list" from "an element of the
+        // wrong type", so neither does this.
+        // Checked in the reference's own order, since only the first is
+        // reported.
+        let malformed = [
+            (args.games.is_wrong(), "Games"),
+            (args.tags.is_wrong(), "Tags"),
+            (args.slots.is_wrong(), "Slots"),
+        ]
+        .into_iter()
+        .find_map(|(wrong, which)| wrong.then_some(which));
+        if let Some(which) = malformed {
+            self.bad_arguments(
+                conn,
+                "Bounce",
+                format!("Bounce: {which} list provided did not have the correct format."),
+                out,
+            );
+            return;
+        }
+        // An absent filter is an empty one (`args.get("games", [])`).
+        let games = args.games.ok().unwrap_or_default();
+        let slots = args.slots.ok().unwrap_or_default();
+        let tags = args.tags.ok().unwrap_or_default();
         // No filters at all matches nobody, which is what an empty `any()` does.
         let targets: Vec<ConnId> = self
             .clients
@@ -1290,7 +1405,13 @@ impl Room {
             return;
         }
         let key = (client.team, client.slot);
-        self.register_location_checks(key, &args.locations, out);
+        // Junk entries are dropped rather than fatal. The reference intersects
+        // the list with the slot's locations (`MultiServer.py:2042-2045`), so
+        // an id of the wrong type matches nothing and costs nobody anything —
+        // and the *other* ids in the same batch still register, which is the
+        // point: one bad element must not lose a player their checks.
+        let locations: Vec<i64> = args.locations.iter().filter_map(lenient::as_int).collect();
+        self.register_location_checks(key, &locations, out);
     }
 
     /// The hot path.
@@ -2168,7 +2289,18 @@ impl Room {
 
         let mut locations = Vec::with_capacity(args.locations.len());
         let mut hints = Vec::new();
-        for &location in &args.locations {
+        for raw in &args.locations {
+            // Unlike `LocationChecks`, this one checks each element and says so
+            // (`MultiServer.py:2052-2058`).
+            let Some(location) = lenient::as_int(raw) else {
+                self.bad_arguments(
+                    conn,
+                    "LocationScouts",
+                    "Locations has to be a list of integers".into(),
+                    out,
+                );
+                return;
+            };
             // The reference indexes its location table directly, so an id this
             // slot does not own raises and drops the socket.
             let Some(entry) = self.data.locations.get(slot, location) else {
@@ -2249,29 +2381,46 @@ impl Room {
             return;
         }
 
-        // An absent status means "unspecified". An explicit null is a
-        // divergence we accept: Python rejects it as an unknown status, but the
-        // decoded form cannot tell the two apart and no client sends null here.
-        let status = match args.status {
-            None => HintStatus::Unspecified,
-            Some(raw) => match HintStatus::from_i64(raw, &pahoa_multidata::Path::root()) {
-                Ok(s) => s,
-                Err(_) => {
-                    self.bad_arguments(
-                        conn,
-                        "CreateHints",
-                        format!("Unknown Status: {raw} is not a valid HintStatus"),
-                        out,
-                    );
-                    return;
+        // An absent status means "unspecified"
+        // (`args.get("status", HINT_UNSPECIFIED)`). Anything else present goes
+        // through `HintStatus(...)`, so a null and a value of the wrong type
+        // both raise `ValueError` into the same answer as an out-of-range one.
+        let status = match &args.status {
+            Arg::Missing => HintStatus::Unspecified,
+            Arg::Ok(None) | Arg::Wrong => {
+                self.bad_arguments(
+                    conn,
+                    "CreateHints",
+                    "Unknown Status: not a valid HintStatus".into(),
+                    out,
+                );
+                return;
+            }
+            Arg::Ok(Some(raw)) => {
+                match HintStatus::from_i64(raw.0, &pahoa_multidata::Path::root()) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        self.bad_arguments(
+                            conn,
+                            "CreateHints",
+                            format!("Unknown Status: {} is not a valid HintStatus", raw.0),
+                            out,
+                        );
+                        return;
+                    }
                 }
-            },
+            }
         };
 
         let mut hints = Vec::new();
-        for &location in &args.locations {
-            let entry = match self.data.locations.get(location_player, location) {
-                Some(e) => *e,
+        for raw in &args.locations {
+            // A non-integer id is simply not one of that player's locations,
+            // which is what the reference's `location not in ctx.locations[…]`
+            // concludes about it too.
+            let found = lenient::as_int(raw)
+                .and_then(|l| self.data.locations.get(location_player, l).map(|e| (l, *e)));
+            let (location, entry) = match found {
+                Some(pair) => pair,
                 None if location_player != slot => {
                     self.bad_arguments(
                         conn,
@@ -2288,7 +2437,7 @@ impl Room {
                 None => {
                     self.protocol_error(
                         conn,
-                        format!("slot {slot}: CreateHints for unknown location {location}"),
+                        format!("slot {slot}: CreateHints for unknown location {raw}"),
                         out,
                     );
                     return;
@@ -2347,13 +2496,20 @@ impl Room {
         };
         let (team, slot) = (client.team, client.slot);
 
+        // All three are `isinstance`-checked together and answered as one
+        // (`MultiServer.py:2126-2131`). An *absent* one never reaches here:
+        // the reference indexes it, so the decode already closed the socket.
+        let (Arg::Ok(player), Arg::Ok(location), Arg::Ok(status)) =
+            (&args.player, &args.location, &args.status)
+        else {
+            self.bad_arguments(conn, "UpdateHint", "UpdateHint".into(), out);
+            return;
+        };
+        let (player, location, status) = (player.0, location.0, *status);
+
         // Missing hints are ignored rather than refused: a client may be
         // working from a stale list.
-        let Some(hint) = self
-            .hints
-            .find((team, args.player), args.player, args.location)
-            .cloned()
-        else {
+        let Some(hint) = self.hints.find((team, player), player, location).cloned() else {
             return;
         };
 
@@ -2362,10 +2518,11 @@ impl Room {
             return;
         }
 
-        let Some(raw) = args.status else {
+        // An explicit null means "leave the status alone".
+        let Some(raw) = status else {
             return;
         };
-        let Ok(status) = HintStatus::from_i64(raw, &pahoa_multidata::Path::root()) else {
+        let Ok(status) = HintStatus::from_i64(raw.0, &pahoa_multidata::Path::root()) else {
             self.bad_arguments(conn, "UpdateHint", "UpdateHint: Invalid Status".into(), out);
             return;
         };
@@ -3046,7 +3203,7 @@ fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<Str
     match packet {
         // Every tag, not the first: a bounce routinely carries `["AP",
         // "DeathLink"]`, and a rule naming `DeathLink` must match it.
-        ClientPacket::Bounce(b, _) => Some((Kind::Bounce, b.tags.clone().unwrap_or_default())),
+        ClientPacket::Bounce(b, _) => Some((Kind::Bounce, b.tags.clone().ok().unwrap_or_default())),
         ClientPacket::Set(..) => Some((Kind::Set, Vec::new())),
         ClientPacket::StatusUpdate(_) => Some((Kind::StatusUpdate, Vec::new())),
         // Mutes the slot. Note this catches `!` commands too, because a `Say`
