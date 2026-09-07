@@ -13,7 +13,7 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 | `stopped` | it stopped cleanly | `reason`, `version`, `build_rev` |
 | `check` | a location became checked, including via release and collect | `finder`, `receiver`, `item_name`, `location_name`, `flags` |
 | `connected` | a connection finished authenticating | `slot`, `player`, `game`, `version`, `tags` |
-| `disconnected` | a connection went away | `slot`, `player`, `tags`, `slot_empty` |
+| `disconnected` | a connection went away | `slot`, `player`, `tags`, `slot_empty`, `reason` |
 | `tags_changed` | a client's tags actually changed | `slot`, `from`, `to` |
 | `goal` | a slot reached its goal | `slot`, `player`, `game` |
 | `release` | a world's remaining items were sent | `slot`, `player`, `trigger`, `items` |
@@ -30,6 +30,17 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 | `slot_password_changed` | the admin API set or cleared one | `slot`, `set` |
 | `gap` | the writer had to drop records | `dropped` |
 
+`disconnected.reason` distinguishes a player who quit from a player whose
+connection kept dying, which are otherwise the same record. It is a short
+server-supplied string, never client text: `peer closed`, `closed by the
+server`, `protocol error`, `no pong within the keepalive timeout`, or the
+wording of whatever close the room ordered. Treat the set as open.
+
+The keepalive one is the reason this field exists. That timeout is noticed by a
+connection's writer task, which knows a `ConnId` and nothing else — so the log
+line for it names no slot and never could. The actor, which does know the slot,
+writes it here.
+
 ```json
 {"type":"started","at":1787844931.943,"version":"0.1.0","build_rev":"497b5e1"}
 {"type":"stopped","at":1787845029.761,"reason":"SIGTERM","version":"0.1.0","build_rev":"497b5e1"}
@@ -41,7 +52,7 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 {"type":"admin","at":1787160001.500,"command":"send_item","slot":1,
  "detail":{"item":"Archipelago Tarot","amount":3}}
 {"type":"disconnected","at":1787160400.880,"team":0,"slot":1,"player":"amperketBalala",
- "tags":["AP","DeathLink"],"slot_empty":true}
+ "tags":["AP","DeathLink"],"slot_empty":true,"reason":"peer closed"}
 {"type":"check","at":1787157141.420,"finder":1,"finder_name":"amperketBalala",
  "receiver":1,"receiver_name":"amperketBalala","item":5606235,"item_name":"Archipelago Tarot",
  "location":5606192,"location_name":"Green Deck Ante 1 White Stake","flags":1}

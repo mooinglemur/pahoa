@@ -57,6 +57,14 @@ pub enum ActorMsg {
     },
     Disconnected {
         conn: ConnId,
+        /// How the connection ended, in the words of whichever task decided.
+        ///
+        /// Carried here because the two halves of that sentence live in
+        /// different places: only the writer knows a peer stopped answering
+        /// pings, and only the actor knows which slot the connection belonged
+        /// to. Joining them is the difference between `conn16131` and
+        /// `slot=147 player=…`.
+        reason: String,
     },
     /// The live figures the HTTP surface reports.
     ///
@@ -542,7 +550,11 @@ pub async fn run_with_saves(
             }
             ActorMsg::DecodeFailed { conn, detail } => {
                 tracing::info!(%conn, %detail, "dropping connection after a bad frame");
-                room.on_disconnect(conn, &mut sink);
+                // The *detail* deliberately does not travel into the journal.
+                // It is a serde message that quotes the offending value, and a
+                // malformed `Connect` would put a password in a file an
+                // organizer hands to people. The operator log already has it.
+                room.on_disconnect(conn, "protocol error", &mut sink);
                 shards.tell(
                     conn,
                     ShardMsg::Close {
@@ -552,8 +564,9 @@ pub async fn run_with_saves(
                 );
                 shards.tell(conn, ShardMsg::Remove { conn });
             }
-            ActorMsg::Disconnected { conn } => {
-                room.on_disconnect(conn, &mut sink);
+            ActorMsg::Disconnected { conn, reason } => {
+                log_disconnect(room, conn, &reason);
+                room.on_disconnect(conn, &reason, &mut sink);
                 shards.tell(conn, ShardMsg::Remove { conn });
             }
             ActorMsg::Live { reply } => {
@@ -749,6 +762,42 @@ pub async fn run_with_saves(
 }
 
 /// Tell the owning shard what it needs to filter broadcasts for this connection.
+/// Say who a connection belonged to, now that it has gone.
+///
+/// **This is the only place that can.** The writer task decides that a peer
+/// stopped answering pings, and it holds a `ConnId` and a socket half; the slot
+/// is the actor's. So a keepalive timeout logged where it was noticed reads
+/// `conn16131` and nothing else, and no other line in the room pairs a `ConnId`
+/// with a slot — leaving an operator to guess whether a real player dropped.
+///
+/// Called *before* `on_disconnect`, which removes the client.
+///
+/// Only a dead peer earns `info`. Ordinary hang-ups are the most common event a
+/// busy room has, they are already journaled, and `serve_connection` logs each
+/// one at `debug` with its reason.
+fn log_disconnect(room: &Room, conn: ConnId, reason: &str) {
+    if reason != crate::server::KEEPALIVE_TIMEOUT {
+        return;
+    }
+    // An unauthenticated connection has no slot, and saying so is the useful
+    // half: a keepalive timeout with no slot is a scanner or a half-open
+    // socket, not a player who lost their game.
+    match room.client(conn).filter(|c| c.auth) {
+        Some(client) => tracing::info!(
+            %conn,
+            team = client.team,
+            slot = client.slot,
+            reason,
+            "dropping a connection whose peer stopped answering"
+        ),
+        None => tracing::info!(
+            %conn,
+            reason,
+            "dropping an unauthenticated connection whose peer stopped answering"
+        ),
+    }
+}
+
 fn push_membership(room: &Room, conn: ConnId, sink: &mut Dispatcher<'_>) {
     if let Some(client) = room.client(conn) {
         sink.updates.push((

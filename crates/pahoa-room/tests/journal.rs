@@ -432,7 +432,7 @@ fn a_connection_is_journaled_when_it_joins_and_when_it_goes() {
     );
 
     sink.clear();
-    room.on_disconnect(conn, &mut sink);
+    room.on_disconnect(conn, "peer closed", &mut sink);
     let left = sink.journal_events_of("disconnected");
     assert_eq!(left.len(), 1, "{:?}", sink.journal_events);
     assert_eq!(left[0].as_value()["slot"], slot);
@@ -441,6 +441,60 @@ fn a_connection_is_journaled_when_it_joins_and_when_it_goes() {
         true,
         "the slot's last connection went away, so it is dark now"
     );
+    assert_eq!(left[0].as_value()["reason"], "peer closed");
+}
+
+/// **Why the reason is recorded at all.**
+///
+/// The two events are otherwise the same line, and they mean opposite things to
+/// whoever reads the history: a player who closed their client is fine, and a
+/// player whose connection kept dying is a support ticket. Only the writer task
+/// knows a peer stopped answering pings, so the reason has to travel from there
+/// to here — see `pahoa_net::actor::log_disconnect` for the other half.
+#[test]
+fn how_a_connection_ended_is_recorded_with_it() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+
+    for (id, reason) in [
+        (1u64, "peer closed"),
+        (2, "no pong within the keepalive timeout"),
+        (3, "protocol error"),
+    ] {
+        let conn = join(&mut room, id, &name, &game, 0b111);
+        let mut sink = Recorder::default();
+        room.on_disconnect(conn, reason, &mut sink);
+        let left = sink.journal_events_of("disconnected");
+        assert_eq!(left.len(), 1, "{:?}", sink.journal_events);
+        assert_eq!(left[0].as_value()["reason"], reason);
+    }
+}
+
+/// A decode failure must not carry its detail into the journal.
+///
+/// The detail is a serde message that quotes the offending value, so a
+/// malformed `Connect` would put a password into a file an organizer hands to
+/// people — the same hazard `!admin` masking exists for. The actor passes a
+/// fixed string instead; this pins that the record has somewhere to put one and
+/// that it is not the client's own text.
+#[test]
+fn a_protocol_error_records_no_client_supplied_text() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Recorder::default();
+    room.on_disconnect(conn, "protocol error", &mut sink);
+    let row = sink.journal_events_of("disconnected")[0].as_value();
+    assert_eq!(row["reason"], "protocol error");
 }
 
 /// `slot_empty` is about the slot, not the connection.
@@ -461,7 +515,7 @@ fn a_slot_is_only_empty_once_its_last_connection_leaves() {
     let second = join(&mut room, 2, &name, &game, 0b111);
 
     let mut sink = Recorder::default();
-    room.on_disconnect(first, &mut sink);
+    room.on_disconnect(first, "peer closed", &mut sink);
     assert_eq!(
         sink.journal_events_of("disconnected")[0].as_value()["slot_empty"],
         false,
@@ -469,7 +523,7 @@ fn a_slot_is_only_empty_once_its_last_connection_leaves() {
     );
 
     sink.clear();
-    room.on_disconnect(second, &mut sink);
+    room.on_disconnect(second, "peer closed", &mut sink);
     assert_eq!(
         sink.journal_events_of("disconnected")[0].as_value()["slot_empty"],
         true

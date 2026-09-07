@@ -172,7 +172,7 @@ fn a_departure_is_announced_even_when_the_slot_still_has_connections() {
     }
 
     let mut sink = Recorder::default();
-    room.on_disconnect(tracking, &mut sink);
+    room.on_disconnect(tracking, "peer closed", &mut sink);
 
     let parts = of_type(&sink, observer, &room, PrintJsonType::Part);
     assert_eq!(
@@ -198,7 +198,7 @@ fn a_game_client_leaving_reads_as_left_rather_than_stopped() {
     room.handle(conn, connect_tagged(name, game, &["AP"]), &mut sink);
 
     let mut sink = Recorder::default();
-    room.on_disconnect(conn, &mut sink);
+    room.on_disconnect(conn, "peer closed", &mut sink);
 
     assert_eq!(
         of_type(&sink, observer, &room, PrintJsonType::Part),

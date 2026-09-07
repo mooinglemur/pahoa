@@ -321,12 +321,16 @@ impl JournalEvent {
     ///
     /// Pairs with [`connected`](Self::connected), so an unauthenticated
     /// connection that drops writes neither.
+    /// `reason` distinguishes a player who quit from one whose connection
+    /// died — the same record either way without it, and the difference is
+    /// exactly what someone reading a history months later wants to know.
     pub fn disconnected(
         at: f64,
         key: crate::SlotKey,
         player: &str,
         tags: &[String],
         slot_empty: bool,
+        reason: &str,
     ) -> Self {
         Self::new(
             "disconnected",
@@ -337,6 +341,7 @@ impl JournalEvent {
                 "player": player,
                 "tags": tags,
                 "slot_empty": slot_empty,
+                "reason": reason,
             })
             .as_object()
             .expect("json! built an object")

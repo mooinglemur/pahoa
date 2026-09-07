@@ -565,7 +565,7 @@ fn disconnecting_removes_the_connection() {
     let conn = join(&mut room, 1, &name, &game, 0b001);
     let mut sink = Recorder::default();
 
-    room.on_disconnect(conn, &mut sink);
+    room.on_disconnect(conn, "peer closed", &mut sink);
 
     assert!(room.client(conn).is_none());
     assert!(room.all_conns().is_empty());

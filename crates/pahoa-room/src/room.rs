@@ -329,7 +329,10 @@ impl Room {
         out.send(conn, &[ServerPacket::RoomInfo(self.room_info())]);
     }
 
-    pub fn on_disconnect(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
+    /// `reason` is how the connection ended, in the words of whichever task
+    /// decided it — recorded so a history can tell "this player quit" from
+    /// "this player's connection died", which are otherwise the same line.
+    pub fn on_disconnect(&mut self, conn: ConnId, reason: &str, out: &mut dyn EffectSink) {
         // Before the `auth` guard below, and unconditionally: an administrator
         // that has gone away must not leave the room holding a `ConnId` that
         // now names nothing. The reference keeps a client object here and never
@@ -405,6 +408,7 @@ impl Room {
             &self.slot_alias(key),
             &client.tags,
             self.by_slot.get(&key).is_none_or(Vec::is_empty),
+            reason,
         ));
     }
 

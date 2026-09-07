@@ -421,7 +421,7 @@ fn subscriptions_are_dropped_when_a_connection_goes() {
         }),
         &mut Recorder::default(),
     );
-    room.on_disconnect(watcher, &mut Recorder::default());
+    room.on_disconnect(watcher, "peer closed", &mut Recorder::default());
 
     let mut sink = Recorder::default();
     room.handle(writer, set("k", &[("replace", json!(1))], false), &mut sink);

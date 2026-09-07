@@ -248,7 +248,7 @@ fn a_disconnect_ends_the_session_rather_than_leaving_it_open() {
     login(&mut room, conn);
 
     let mut sink = Recorder::default();
-    room.on_disconnect(conn, &mut sink);
+    room.on_disconnect(conn, "peer closed", &mut sink);
 
     // The same id again, which is the case worth being sure about: a session
     // that outlived its connection would be inherited by whoever landed on that

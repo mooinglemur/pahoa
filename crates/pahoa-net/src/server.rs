@@ -275,6 +275,14 @@ impl Keepalive {
 /// invisible against a pod's termination grace period.
 const CLOSE_LINGER: Duration = Duration::from_millis(250);
 
+/// Why the writer gave up on a peer that stopped answering pings.
+///
+/// A constant because it travels: the writer decides it, the actor logs it
+/// against the slot, and the journal records it. An operator reading a history
+/// wants to tell "this player quit" from "this player's connection died", and
+/// those two are otherwise the same line.
+pub const KEEPALIVE_TIMEOUT: &str = "no pong within the keepalive timeout";
+
 /// Everything every connection on one listener shares.
 ///
 /// Cloned per connection, and cheap to clone: the acceptor and the router are
@@ -578,6 +586,13 @@ where
     // Writer: owns the socket's write half for this connection's lifetime, and
     // writes pre-built frames verbatim. It does no framing and no compression —
     // that already happened once, in the shard, for every recipient at once.
+    //
+    // **It returns why it stopped**, because it is the only task that knows.
+    // The keepalive lives here, so "no pong" is a fact only this task holds —
+    // and the slot it belongs to is a fact only the actor holds. Handing the
+    // reason back lets the two be put together where the log line is worth
+    // reading; without it every writer-decided close reached the actor as an
+    // undifferentiated disconnect. See `ActorMsg::Disconnected`.
     let mut writer = {
         let conn_budget = Arc::clone(&conn_budget);
         let pongs = Arc::clone(&pongs);
@@ -592,20 +607,17 @@ where
                     biased;
                     Some(reason) = close_rx.recv() => {
                         tracing::debug!(%conn, reason, "closing out of band");
-                        break;
+                        break reason;
                     }
                     () = keepalive.wait() => {
                         // Written straight to the socket rather than queued: a
                         // liveness probe that waits behind a backlog measures
                         // the backlog, not the peer.
                         match keepalive.due() {
-                            Due::Dead => {
-                                tracing::info!(%conn, "no pong within the keepalive timeout");
-                                break;
-                            }
+                            Due::Dead => break KEEPALIVE_TIMEOUT,
                             Due::Ping(frame) => {
                                 if write_half.write_all(&frame).await.is_err() {
-                                    break;
+                                    break "the socket rejected a keepalive ping";
                                 }
                                 continue;
                             }
@@ -614,7 +626,7 @@ where
                     }
                     frame = out_rx.recv() => match frame {
                         Some(frame) => frame,
-                        None => break,
+                        None => break "the room stopped sending",
                     },
                 };
                 let result = match out {
@@ -631,7 +643,7 @@ where
                             Some(reason) = close_rx.recv() => {
                                 tracing::debug!(%conn, reason, "closing mid-write");
                                 crate::budget::Budget::release(&conn_budget, size);
-                                break;
+                                break reason;
                             }
                             written = write_half.write_all(&bytes) => written,
                         };
@@ -647,11 +659,11 @@ where
                             .write_all(&ws::frame::close(CLOSE_GOING_AWAY, reason))
                             .await;
                         let _ = write_half.flush().await;
-                        break;
+                        break reason;
                     }
                 };
                 if result.is_err() {
-                    break;
+                    break "the socket rejected a write";
                 }
             }
         })
@@ -702,7 +714,14 @@ where
         // has to learn about a close the writer decided on.
         tokio::select! {
             biased;
-            _ = &mut writer => break "closed by the server".to_string(),
+            // The writer's own reason, not a summary of it: this is the only
+            // path a keepalive timeout can take to somewhere that knows the
+            // slot. An aborted or panicked writer has none, so it keeps the
+            // generic wording.
+            reason = &mut writer => break match reason {
+                Ok(reason) => reason.to_string(),
+                Err(_) => "closed by the server".to_string(),
+            },
             read = read_half.read_buf(&mut buf) => match read {
                 Ok(0) => break "peer closed".to_string(),
                 Ok(_) => {}
@@ -712,7 +731,12 @@ where
     };
     tracing::debug!(%conn, %peer, outcome, "connection ended");
 
-    let _ = actor.send(ActorMsg::Disconnected { conn }).await;
+    let _ = actor
+        .send(ActorMsg::Disconnected {
+            conn,
+            reason: outcome,
+        })
+        .await;
     writer.abort();
     Ok(())
 }
