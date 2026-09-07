@@ -611,24 +611,24 @@ impl JournalEvent {
     /// # DeathLink is not the only one
     ///
     /// The server relays all of them identically — they are ordinary `Bounce`
-    /// traffic with a well-known tag — and upstream has three: `DeathLink`
-    /// (implemented by 98 worlds), `TrapLink` (5) and `RingLink` (4). Recording
-    /// only the first was a reasonable guess at what matters and an incomplete
-    /// one: "why did I get a trap I never earned" is precisely the question an
-    /// organizer gets asked, and it was the one thing the history could not
-    /// answer.
+    /// traffic with a well-known tag — and recording only `DeathLink` was a
+    /// reasonable guess at what matters and an incomplete one: "why did I get a
+    /// trap I never earned" is precisely the question an organizer gets asked,
+    /// and it was the one thing the history could not answer.
     ///
     /// **What separates these from an arbitrary `Bounce` is volume, not
     /// importance.** A link fires on a discrete game event, so its rate is
     /// bounded by play. A fork's or a tracker's own relay traffic is bounded by
     /// nothing, and journaling all of it would let one chatty client dominate
-    /// a file somebody else has to read.
+    /// a file somebody else has to read. That test is what keeps `RingLink`
+    /// out, upstream calling it a link notwithstanding — see [`crate::LINKS`]
+    /// for which conventions are recorded and why.
     ///
-    /// `kind` is the record type, so a reader dispatches on `deathlink`,
-    /// `traplink` or `ringlink`, and `extra` carries the convention's own
-    /// payload — `cause`, `trap_name`, `amount` — beside the fields they share.
-    /// It is merged at the top level rather than nested so that the `deathlink`
-    /// record keeps the exact shape it already had.
+    /// `kind` is the record type, so a reader dispatches on `deathlink` or
+    /// `traplink`, and `extra` carries the convention's own payload — `cause`,
+    /// `trap_name` — beside the fields they share. It is merged at the top
+    /// level rather than nested so that the `deathlink` record keeps the exact
+    /// shape it already had, and so a fourth convention needs no new shape.
     ///
     /// # `source` is the client's claim; `slot` is the fact
     ///
@@ -643,9 +643,9 @@ impl JournalEvent {
     /// thing it is for: an organizer asked "who killed me" needs the answer the
     /// server knows, not the one the packet asserted.
     ///
-    /// `source` is absent for `RingLink`, and honestly so: that convention puts
-    /// a client instance id there rather than a player name, so there is no
-    /// name to record — another reason not to lean on it.
+    /// A convention that puts something other than a player name in `source`
+    /// records `null` rather than a wrong name, which is why the parameter is
+    /// an `Option` rather than a `&str`.
     pub fn link(
         at: f64,
         kind: &str,

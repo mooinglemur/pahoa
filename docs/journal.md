@@ -24,7 +24,6 @@ Every line has a `type`, and a reader is expected to dispatch on it and ignore w
 | `chat` | anything said in the room | `slot`, `text` |
 | `deathlink` | a `Bounce` tagged DeathLink | `slot`, `cause`, `source`, `recipients` |
 | `traplink` | a `Bounce` tagged TrapLink | `slot`, `trap_name`, `source`, `recipients` |
-| `ringlink` | a `Bounce` tagged RingLink | `slot`, `amount`, `source`, `recipients` |
 | `options` | room start, and after any option change | every option, plus `password_mode` |
 | `option_changed` | `!admin /option` | `option`, `value` |
 | `slot_password_changed` | the admin API set or cleared one | `slot`, `set` |
@@ -249,14 +248,20 @@ Several of the events above are worth a note on why they are shaped as they are:
 - **The link records carry both who sent it and who the packet said sent it.** `source` is copied
   straight out of the bounce payload, so it is the client's unvalidated claim and nothing stops one
   naming somebody else; `team`, `slot` and `player` come from the authenticated connection the packet
-  arrived on. An organizer asked "who killed me" needs the second. `RingLink` has no `source` at all
-  — that convention puts a client instance id where the others put a name.
+  arrived on. An organizer asked "who killed me" needs the second. A convention that puts something
+  other than a player name there records `null` rather than a wrong name.
 - **Links are journaled and other bounces are not, and the reason is volume rather than
   importance.** A link fires on a discrete game event, so its rate is bounded by play; a fork's or a
   tracker's own relay traffic is bounded by nothing and would let one chatty client dominate the
-  file. The three conventions live in one table (`LINKS`), so a fourth is a row rather than a branch
-  — only `DeathLink` was recorded at first, which left the history unable to answer "why did I get a
-  trap I never earned".
+  file. The conventions that qualify live in one table (`LINKS`), so another is a row rather than a
+  branch — only `DeathLink` was recorded at first, which left the history unable to answer "why did
+  I get a trap I never earned".
+- **`RingLink` is not journaled, though upstream counts it as a link.** It shares a running currency
+  balance, so it fires on every coin picked up or spent: a continuous delta rather than a discrete
+  event anybody later asks about. It fails the volume test above, which is the test that decides
+  this table, and it was only ever in it for symmetry with the other two. **Relaying is unchanged**
+  — RingLink bounces reach every client that asked for them, exactly as before; this is about what
+  reaches the file.
 
 - **`hints` carries both balances, not just the cost.** Hint price is a percentage of a slot's own
   location count and can be changed mid-room with `!admin /option hint_cost`, so a cost recorded in

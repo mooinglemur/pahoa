@@ -737,13 +737,16 @@ fn an_admin_option_change_cannot_write_a_password() {
 /// **DeathLink was not the only link convention, only the popular one.**
 ///
 /// The server relays every `Bounce` identically, so singling out one tag was a
-/// guess about what matters rather than a property of the protocol. Upstream
-/// has three — `DeathLink` in 98 worlds, `TrapLink` in 5, `RingLink` in 4 — and
-/// they are the same kind of thing: a discrete, player-affecting, cross-game
-/// effect. "Why did I get a trap I never earned" is exactly what an organizer
-/// is asked, and it was the one question the history could not answer.
+/// guess about what matters rather than a property of the protocol. `TrapLink`
+/// is the same kind of thing as `DeathLink` — a discrete, player-affecting,
+/// cross-game effect — and "why did I get a trap I never earned" is exactly
+/// what an organizer is asked, which was the one question the history could not
+/// answer.
+///
+/// Not every tag upstream calls a link qualifies; see
+/// [`a_ringlink_is_relayed_but_never_journaled`] for the one that does not.
 #[test]
-fn every_link_convention_is_journaled_not_only_deathlink() {
+fn a_traplink_is_journaled_beside_deathlink() {
     if skip_without(FIXTURE) {
         return;
     }
@@ -778,24 +781,21 @@ fn every_link_convention_is_journaled_not_only_deathlink() {
     assert_eq!(traps[0].as_value()["trap_name"], "Ice Trap");
     assert_eq!(traps[0].as_value()["slot"], slot);
 
-    // **The payload keeps its own type.** RingLink counts rings, so `amount` is
-    // a number; flattening every convention's field to a string would make a
-    // reader parse it back out.
+    // **The payload keeps its own type**, so a reader does not have to parse a
+    // number back out of a string. `DeathLink` puts a string here.
     sink.clear();
     room.handle(
         conn,
         bounce(
-            "RingLink",
-            serde_json::json!({"source": 1787157140.5, "amount": -25}),
+            "DeathLink",
+            serde_json::json!({"source": "amperketBalala", "cause": "fell in a pit"}),
         ),
         &mut sink,
     );
-    let rings = sink.journal_events_of("ringlink");
-    assert_eq!(rings.len(), 1, "{:?}", sink.journal_events);
-    assert_eq!(rings[0].as_value()["amount"], -25);
-    // RingLink puts a client instance id where the others put a player name, so
-    // there is no name to record and the field is absent rather than wrong.
-    assert!(rings[0].as_value()["source"].is_null(), "{:?}", rings[0]);
+    let deaths = sink.journal_events_of("deathlink");
+    assert_eq!(deaths.len(), 1, "{:?}", sink.journal_events);
+    assert_eq!(deaths[0].as_value()["cause"], "fell in a pit");
+    assert_eq!(deaths[0].as_value()["source"], "amperketBalala");
 
     // And the boundary still holds: an arbitrary bounce is unbounded in volume
     // and stays out of the file.
@@ -810,6 +810,65 @@ fn every_link_convention_is_journaled_not_only_deathlink() {
         "an unrelated bounce was journaled: {:?}",
         sink.journal_events
     );
+}
+
+/// **`RingLink` is a link by name and a firehose by behavior.**
+///
+/// It shares a running currency balance, so it fires on every coin picked up or
+/// spent — a continuous delta, not the discrete player-affecting event the
+/// other two are. Recording it buries a room's real history under thousands of
+/// lines that answer no question anybody asks, which is the volume rule the
+/// table already turns on; it was added for symmetry with `DeathLink` and
+/// `TrapLink`, and the symmetry was the wrong reading.
+///
+/// **Relaying is a separate question and the answer there is unchanged**: the
+/// bounce still reaches everyone who asked for it. This is only about what
+/// lands in a file somebody reads later, which is why the test asserts both.
+#[test]
+fn a_ringlink_is_relayed_but_never_journaled() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Recorder::default();
+    room.handle(
+        conn,
+        ClientPacket::Bounce(
+            cmd::Bounce {
+                games: Arg::Missing,
+                slots: Arg::Ok(vec![slot]),
+                tags: Arg::Ok(vec!["RingLink".to_string()]),
+                data: serde_json::json!({"source": 1787157140.5, "amount": -25}),
+            },
+            serde_json::Map::from_iter([
+                ("cmd".to_string(), serde_json::json!("Bounce")),
+                ("tags".to_string(), serde_json::json!(["RingLink"])),
+                (
+                    "data".to_string(),
+                    serde_json::json!({"source": 1787157140.5, "amount": -25}),
+                ),
+            ]),
+        ),
+        &mut sink,
+    );
+
+    assert!(
+        sink.journal_events.is_empty(),
+        "a RingLink reached the history: {:?}",
+        sink.journal_events
+    );
+    // The control. Without it this passes on a room that dropped the bounce
+    // entirely, which would be a protocol regression wearing the right result.
+    let relayed: Vec<_> = sink
+        .broadcasts()
+        .flat_map(|(_, msgs)| msgs.iter())
+        .filter(|p| matches!(p, pahoa_proto::ServerPacket::Echo(m) if m["cmd"] == "Bounced"))
+        .collect();
+    assert_eq!(relayed.len(), 1, "the bounce must still be forwarded");
 }
 
 /// **`source` is what the client said; `slot` is what the server knows.**

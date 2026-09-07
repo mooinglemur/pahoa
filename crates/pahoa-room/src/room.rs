@@ -56,16 +56,23 @@ pub const SERVER_VERSION: Version = Version::new(
 ///
 /// The server relays all `Bounce` traffic identically and none of these are
 /// server semantics; what earns them a line is that a link fires on a discrete
-/// game event, while a fork's own relay traffic is bounded by nothing. Counts
-/// upstream at the time of writing: `DeathLink` in 98 worlds, `TrapLink` in 5,
-/// `RingLink` in 4.
+/// game event, while a fork's own relay traffic is bounded by nothing.
+///
+/// **`RingLink` is deliberately not here**, though upstream counts it among the
+/// conventions. It shares a running *currency balance*, so it fires on every
+/// coin picked up or spent rather than on an event anybody would later ask
+/// about — a continuous delta wearing a link's clothes. Journaling it buries a
+/// room's real history under thousands of lines that answer no question, which
+/// is the volume rule this table already turns on; it was added on the
+/// symmetry with `DeathLink` and `TrapLink` and the symmetry was wrong.
+/// Relaying is untouched: this table decides what is *recorded*, and RingLink
+/// bounces are forwarded exactly as before.
 ///
 /// A bounce naming two of them takes the first match, which is deterministic
 /// and good enough for a combination no client sends — the payloads differ.
 const LINKS: &[(&str, &str, &str)] = &[
     ("DeathLink", "deathlink", "cause"),
     ("TrapLink", "traplink", "trap_name"),
-    ("RingLink", "ringlink", "amount"),
 ];
 
 /// `PrintJSON` packets per broadcast frame.
