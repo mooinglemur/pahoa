@@ -1,9 +1,19 @@
 //! Values a client spells in some other type than the protocol says.
 //!
-//! Two families so far, and they resolve differently: an integer spelled as a
-//! float is accepted only when it is exactly one, while a boolean spelled as
-//! anything at all is accepted and read the way Python would. The difference is
-//! what a wrong guess costs, which the two sections below spell out.
+//! Three families so far, and they resolve differently because the reference
+//! reaches each one by a different route:
+//!
+//! - an integer spelled as a **float** is accepted only when it is exactly one;
+//! - a boolean spelled as **anything** is accepted and read the way Python's
+//!   truthiness would;
+//! - an integer spelled as a **boolean** is accepted, because in Python it
+//!   already is one.
+//!
+//! Each has its own section below. The common thread is that none of these are
+//! judgement calls about what a client "probably meant" — every one of them is
+//! something CPython does silently, so refusing it makes pahoa stricter than
+//! the server it replaces and costs a player their connection for a packet
+//! nobody upstream would look at twice.
 //!
 //! # Integers a client may spell as floats
 //!
@@ -58,6 +68,25 @@
 //! location. So these two accept every JSON type and apply Python's own
 //! truthiness: `0`, `0.0`, `""`, `[]`, `{}` and `null` are false, everything
 //! else is true.
+//!
+//! # Integers a client may spell as booleans
+//!
+//! The reverse of the above, and it needs no tolerance at all: **`bool` is a
+//! subclass of `int` in Python.** `int(False)` is 0, `True & 0b001` is 1,
+//! `isinstance(True, int)` is true, and `{1: x}[True]` finds the entry. A
+//! client sending `"create_as_hint": false` has sent the integer 0 as far as
+//! the reference is concerned, and it is the ordinary "scout, do not hint"
+//! request — which pahoa was closing sockets over.
+//!
+//! So every reader here takes a boolean as 0 or 1.
+//!
+//! **[`as_int`] deliberately does not**, and the difference is upstream's, not
+//! ours. `LocationScouts` checks its ids with `type(location) is not int`
+//! (`MultiServer.py:2054`) rather than `isinstance`, and `type(True)` is
+//! `bool` — so a boolean id is refused there, by the reference, with its own
+//! `InvalidPacket`. Two Python idioms that look interchangeable and are not;
+//! pahoa mirrors both, which is why the raw-list reader and the field readers
+//! disagree about booleans on purpose.
 
 use serde::de::{self, Deserializer, IgnoredAny, Unexpected, Visitor};
 use std::fmt;
@@ -69,11 +98,23 @@ impl Visitor<'_> for IntVisitor {
     type Value = i64;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("an integer, or a float with no fractional part")
+        f.write_str("an integer, a boolean, or a float with no fractional part")
     }
 
     fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
         Ok(v)
+    }
+
+    /// **`bool` is a subclass of `int` in Python**, so `int(False)` is 0 and
+    /// `True & 0b001` is 1 — no conversion, no warning, nothing upstream would
+    /// even call lenient.
+    ///
+    /// Seen live: `"create_as_hint": false`, which the reference reads through
+    /// `int(args.get("create_as_hint", 0))` (`MultiServer.py:2053`) as plain 0,
+    /// the ordinary "scout, do not hint" request. Rust asked, refused, and
+    /// dropped the socket on the most common scout there is.
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<i64, E> {
+        Ok(v.into())
     }
 
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
@@ -198,8 +239,14 @@ lenient_int!(I64, i64, "`i64`, accepting the float spelling.");
 lenient_int!(U32, u32, "`u32`, accepting the float spelling.");
 lenient_int!(U8, u8, "`u8`, accepting the float spelling.");
 
-/// The same rule applied to an already-parsed value, for the id lists the
+/// The float rule applied to an already-parsed value, for the id lists the
 /// reference leaves raw and inspects element by element.
+///
+/// **Booleans are not integers here**, unlike everywhere else in this module.
+/// `LocationScouts` tests its ids with `type(location) is not int`
+/// (`MultiServer.py:2054`), and `type(True)` is `bool` — so the reference
+/// refuses a boolean id with its own `InvalidPacket`, where `isinstance` two
+/// lines away would have accepted it. The module docs have the pair.
 pub fn as_int(v: &serde_json::Value) -> Option<i64> {
     match v {
         serde_json::Value::Number(n) => n.as_i64().or_else(|| {

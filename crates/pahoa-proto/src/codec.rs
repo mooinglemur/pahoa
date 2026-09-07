@@ -335,6 +335,64 @@ mod tests {
         }
     }
 
+    // --- integers a client spells as booleans -----------------------------
+    //
+    // Seen live: `"create_as_hint": false`, dropping a socket every time. The
+    // reference reads it through `int(args.get("create_as_hint", 0))`, and
+    // `int(False)` is 0 — the ordinary "scout, do not hint" request — because
+    // `bool` is a subclass of `int` in Python.
+
+    #[test]
+    fn create_as_hint_accepts_the_boolean_spelling() {
+        for (spelling, expected) in [("false", 0), ("true", 1), ("2", 2)] {
+            let frame = format!(
+                r#"[{{"cmd":"LocationScouts","locations":[7],"create_as_hint":{spelling}}}]"#
+            );
+            let packets = decode(&frame).unwrap_or_else(|e| panic!("{spelling} -> {e}"));
+            match &packets[0] {
+                ClientPacket::LocationScouts(s) => {
+                    assert_eq!(s.create_as_hint, expected, "create_as_hint: {spelling}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_inbound_number_tolerates_the_boolean_spelling() {
+        // Each of these reaches Python arithmetic, an `isinstance(_, int)`, or
+        // a dict lookup — all of which take a bool without comment.
+        let cases = [
+            r#"[{"cmd":"LocationScouts","locations":[7],"create_as_hint":true}]"#,
+            r#"[{"cmd":"CreateHints","locations":[7],"player":true,"status":false}]"#,
+            r#"[{"cmd":"UpdateHint","player":true,"location":true,"status":false}]"#,
+            r#"[{"cmd":"StatusUpdate","status":false}]"#,
+            r#"[{"cmd":"Connect","password":null,"game":"G","name":"n","uuid":"u",
+                 "version":{"major":0,"minor":6,"build":8,"class":"Version"},
+                 "items_handling":true,"tags":[]}]"#,
+        ];
+        for case in cases {
+            decode(case).unwrap_or_else(|e| panic!("{case} -> {e}"));
+        }
+    }
+
+    /// **The one place a boolean is *not* an integer**, and it is upstream's
+    /// distinction rather than ours: `LocationScouts` screens its ids with
+    /// `type(location) is not int`, and `type(True)` is `bool`. Two lines away
+    /// `isinstance` would have said yes.
+    #[test]
+    fn a_boolean_location_id_is_not_an_integer() {
+        let packets = decode(r#"[{"cmd":"LocationScouts","locations":[true,7]}]"#)
+            .expect("the handler answers this, so decoding must not refuse it");
+        match &packets[0] {
+            ClientPacket::LocationScouts(s) => {
+                assert_eq!(crate::lenient::as_int(&s.locations[0]), None, "a bool id");
+                assert_eq!(crate::lenient::as_int(&s.locations[1]), Some(7));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn every_inbound_number_tolerates_the_float_spelling() {
         let cases = [
