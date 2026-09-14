@@ -33,9 +33,49 @@ impl PyNum {
     pub fn to_value(self) -> Option<Value> {
         match self {
             PyNum::Int(i) => Some(Value::from(i)),
-            PyNum::Float(f) => serde_json::Number::from_f64(f).map(Value::Number),
+            PyNum::Float(f) => py_repr_f64(f)
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .map(Value::Number),
         }
     }
+}
+
+/// Render a finite `f64` the way CPython's `repr` does.
+///
+/// The *digits* already agree — serde_json and CPython both emit the shortest
+/// string that round-trips — but the layout differs in two places, and with
+/// `arbitrary_precision` those differences survive onto the wire instead of
+/// being flattened back into an `f64` by the next thing to touch them:
+///
+/// - CPython goes exponential below `1e-4`, where serde_json keeps writing
+///   zeros: `1e-05` against `0.00001`.
+/// - CPython pads an exponent to two digits: `1e-06` against `1e-6`. Only
+///   single-digit exponents differ — `1e+100` and `5e-324` already agree, as
+///   does every positive exponent, since serde_json writes the `+` too.
+///
+/// Returns `None` for a non-finite float, which has no JSON spelling at all.
+pub fn py_repr_f64(f: f64) -> Option<String> {
+    if !f.is_finite() {
+        return None;
+    }
+    // `f != 0.0` is false for `-0.0` as well as `0.0`, which is what we want:
+    // both render as CPython renders them, and neither wants exponent form.
+    let s = if f != 0.0 && f.abs() < 1e-4 {
+        // Rust's `LowerExp` is shortest round-trip too, so this is the same
+        // digits laid out the other way rather than a reformatting.
+        format!("{f:e}")
+    } else {
+        serde_json::Number::from_f64(f)?.to_string()
+    };
+
+    let Some((mantissa, exponent)) = s.split_once('e') else {
+        return Some(s);
+    };
+    let (sign, digits) = match exponent.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("+", exponent.trim_start_matches('+')),
+    };
+    Some(format!("{mantissa}e{sign}{digits:0>2}"))
 }
 
 /// Interpret a JSON value as a number, treating booleans as ints.
@@ -84,11 +124,15 @@ pub fn floor_mod_f64(a: f64, b: f64) -> Option<f64> {
         return None;
     }
     let m = a % b;
-    Some(if m != 0.0 && ((m < 0.0) != (b < 0.0)) {
-        m + b
-    } else {
-        m
-    })
+    // A zero remainder takes the sign of the **divisor**, not whatever `fmod`
+    // happened to return — CPython does this explicitly because platforms
+    // disagree about signed zero here (`Objects/floatobject.c`, `float_rem`).
+    // So `0 % -2.5` is `-0.0`, and that is a different four bytes on the wire
+    // from `0.0` now that numbers keep the text they were written with.
+    if m == 0.0 {
+        return Some(0.0f64.copysign(b));
+    }
+    Some(if (m < 0.0) != (b < 0.0) { m + b } else { m })
 }
 
 /// Python's `==` across JSON types.
@@ -154,6 +198,82 @@ pub fn is_hashable(v: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Every right-hand side is `repr(v)` from CPython 3, pasted verbatim.
+    ///
+    /// The interesting rows are the ones serde_json alone gets differently:
+    /// `1e-05` (it writes `0.00001`) and the single-digit exponents (it writes
+    /// `1e-6`). The rest are here to pin that the fix did not disturb them.
+    #[test]
+    fn floats_render_as_cpython_reprs_them() {
+        for (value, want) in [
+            (1e16, "1e+16"),
+            (1e15, "1000000000000000.0"),
+            (1e-5, "1e-05"),
+            (1e-4, "0.0001"),
+            (1e100, "1e+100"),
+            (1e-100, "1e-100"),
+            (1.2142656789020123e-6, "1.2142656789020123e-06"),
+            (0.1, "0.1"),
+            (1.0, "1.0"),
+            (-0.0, "-0.0"),
+            (0.0, "0.0"),
+            (2.5, "2.5"),
+            (1e17, "1e+17"),
+            (1.5e-7, "1.5e-07"),
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (-9.9e-5, "-9.9e-05"),
+            (0.00012, "0.00012"),
+            (-1e-6, "-1e-06"),
+            (3.0, "3.0"),
+        ] {
+            assert_eq!(py_repr_f64(value).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn a_rendered_float_still_reads_back_as_itself() {
+        // The layout changed; the value must not have. A shortest-round-trip
+        // string that no longer round-trips would be a silent corruption of
+        // every computed float, which is the failure this whole change exists
+        // to stop happening to integers.
+        for value in [1e-5, 1.2142656789020123e-6, 5e-324, -9.9e-5, 0.1, 2.5] {
+            let text = py_repr_f64(value).unwrap();
+            assert_eq!(text.parse::<f64>().unwrap(), value, "{text}");
+        }
+    }
+
+    #[test]
+    fn non_finite_floats_have_no_rendering() {
+        assert_eq!(py_repr_f64(f64::NAN), None);
+        assert_eq!(py_repr_f64(f64::INFINITY), None);
+        assert_eq!(py_repr_f64(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn a_zero_remainder_takes_the_divisors_sign() {
+        // CPython's own special case, and invisible until numbers kept their
+        // text: `0.0` and `-0.0` compare equal as `f64`.
+        assert_eq!(
+            floor_mod_f64(0.0, -2.5).map(f64::is_sign_negative),
+            Some(true)
+        );
+        assert_eq!(
+            floor_mod_f64(2.5, -2.5).map(f64::is_sign_negative),
+            Some(true)
+        );
+        assert_eq!(
+            floor_mod_f64(-2.5, 2.5).map(f64::is_sign_negative),
+            Some(false)
+        );
+        assert_eq!(
+            floor_mod_f64(2.0, -1.0).map(f64::is_sign_negative),
+            Some(true)
+        );
+        // A nonzero remainder is untouched by the rule.
+        assert_eq!(floor_mod_f64(-7.0, 3.0), Some(2.0));
+    }
 
     #[test]
     fn booleans_are_integers() {

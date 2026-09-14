@@ -8,5 +8,14 @@ repository.workspace = true
 description = "Python-compatible data storage operations for Archipelago"
 
 [dependencies]
-serde_json = { version = "1", features = ["preserve_order"] }
+# Both features carry protocol meaning rather than being preferences, and both
+# are explained at length in `pahoa-proto/Cargo.toml`. Repeated here rather than
+# inherited through feature unification because this crate does not depend on
+# `pahoa-proto`: `cargo test -p pahoa-datastore` would otherwise compile a
+# serde_json that rounds a client's bitfield to a float, and the vectors here
+# would be measuring a build nothing ships.
+serde_json = { version = "1", features = [
+    "preserve_order",
+    "arbitrary_precision",
+] }
 thiserror.workspace = true

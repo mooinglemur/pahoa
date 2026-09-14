@@ -9,9 +9,16 @@
 //! 1. **Bounded integers.** Python's ints are arbitrary precision, so
 //!    `pow(2, 10**9)` does not error — it hangs and exhausts memory. That is a
 //!    remote denial of service in the reference server. Arithmetic here is
-//!    checked `i64`; overflow becomes an error, which produces the same
-//!    *observable shape* as Python (exception → connection dropped) for every
-//!    input a real client sends.
+//!    checked `i64`; overflow becomes an error, which drops the connection as
+//!    Python's exception would.
+//!
+//!    **This bound is too tight, and a live room proved it.** The claim it used
+//!    to carry — that no real client sends anything wider — was wrong: a world
+//!    storing its location checks as a 71-bit bitfield hit it, and every `or`
+//!    setting a bit cost that player their connection. Values that wide now
+//!    survive being *stored* and echoed exactly (see `docs/numbers.md`), so
+//!    what is left is the arithmetic, and the fix is an arbitrary-precision
+//!    integer here with a width bound to keep `pow(2, 10**9)` refused.
 //! 2. **Bounded sequences.** `"x" * 10**9` likewise. Results larger than
 //!    [`MAX_RESULT_LEN`] are refused.
 //! 3. **No non-finite floats.** Python emits bare `Infinity`/`NaN`, which are

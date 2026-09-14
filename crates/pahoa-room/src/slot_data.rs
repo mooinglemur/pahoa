@@ -92,11 +92,12 @@ fn key(k: &PyObj, out: &mut String) {
 /// does this, but slot_data is world-controlled, so the case has to be decided
 /// rather than left to chance.
 ///
-/// Finite floats use shortest round-trip formatting, as does Python's `repr`.
+/// Finite floats go through the same renderer the data store uses, so the two
+/// halves of the server spell a float the same way Python does and as each
+/// other — shortest round-trip digits, exponent form below `1e-4`, exponents
+/// padded to two digits.
 fn float(f: f64) -> String {
-    serde_json::Number::from_f64(f)
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "null".to_string())
+    pahoa_datastore::pyvalue::py_repr_f64(f).unwrap_or_else(|| "null".to_string())
 }
 
 fn escape(s: &str, out: &mut String) {

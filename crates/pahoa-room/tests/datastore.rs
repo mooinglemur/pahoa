@@ -430,3 +430,108 @@ fn subscriptions_are_dropped_when_a_connection_goes() {
         "a departed subscriber must not be addressed"
     );
 }
+
+// --- integers wider than 64 bits -----------------------------------------
+//
+// Python's ints are unbounded, and a world packing its location checks into one
+// number is not a thought experiment — a 71-bit bitfield reached a live room and
+// came back mangled. Two separate failures, and the quieter one was worse: the
+// value was *stored* as `2.3611832414348226e+21` with no error raised anywhere,
+// so the client's own state was corrupted by reading it back.
+//
+// These drive whole frames through `decode`, because the digits were being lost
+// in the JSON parser — before the room, before the data store, before anything
+// that could have complained.
+
+/// The 71-bit value from the report: `1 << 71` plus a low bit set.
+const WIDE: &str = "2361183241434822606849";
+
+/// Feed a raw frame to the room and hand back what it emitted.
+fn feed(room: &mut Room, conn: ConnId, frame: &str) -> Recorder {
+    let mut sink = Recorder::default();
+    for packet in pahoa_proto::decode(frame).expect("frame is well-formed") {
+        room.handle(conn, packet, &mut sink);
+    }
+    sink
+}
+
+#[test]
+fn a_bitfield_wider_than_64_bits_survives_being_stored() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, conn) = setup().unwrap();
+
+    let sink = feed(
+        &mut room,
+        conn,
+        &format!(
+            r#"[{{"cmd":"Set","key":"bits","want_reply":true,
+                 "operations":[{{"operation":"replace","value":{WIDE}}}]}}]"#
+        ),
+    );
+
+    let reply = echoes(&sink, conn, &room);
+    assert_eq!(reply.len(), 1, "want a SetReply");
+    assert_eq!(
+        reply[0]["value"].to_string(),
+        WIDE,
+        "the digits must survive exactly, not to the nearest double"
+    );
+}
+
+#[test]
+fn a_wide_value_reads_back_through_get_unchanged() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // The half that matters to the client: whatever it wrote is what it gets.
+    let (mut room, conn) = setup().unwrap();
+    feed(
+        &mut room,
+        conn,
+        &format!(
+            r#"[{{"cmd":"Set","key":"bits",
+                 "operations":[{{"operation":"replace","value":{WIDE}}}]}}]"#
+        ),
+    );
+
+    let sink = feed(&mut room, conn, r#"[{"cmd":"Get","keys":["bits"]}]"#);
+    let retrieved = echoes(&sink, conn, &room);
+    assert_eq!(retrieved.len(), 1);
+    assert_eq!(retrieved[0]["keys"]["bits"].to_string(), WIDE);
+}
+
+#[test]
+fn a_wide_value_survives_a_save_and_restore() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // The save encoder is a separate path from the wire, and a room that
+    // restored a rounded bitfield would corrupt the client's state on the next
+    // restart rather than in the reply it could have noticed.
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let mut room = room_for(data.clone(), RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b001);
+    feed(
+        &mut room,
+        conn,
+        &format!(
+            r#"[{{"cmd":"Set","key":"bits",
+                 "operations":[{{"operation":"replace","value":{WIDE}}}]}}]"#
+        ),
+    );
+
+    let encoded = room.snapshot().encode(false);
+    let mut restored = room_for(data, RoomOptions::default());
+    restored
+        .restore(pahoa_room::Snapshot::decode(&encoded).expect("snapshot decodes"))
+        .expect("snapshot restores");
+
+    let conn = join(&mut restored, 1, &name, &game, 0b001);
+    let sink = feed(&mut restored, conn, r#"[{"cmd":"Get","keys":["bits"]}]"#);
+    let retrieved = echoes(&sink, conn, &restored);
+    assert_eq!(retrieved.len(), 1);
+    assert_eq!(retrieved[0]["keys"]["bits"].to_string(), WIDE);
+}
