@@ -179,6 +179,28 @@ struct Dispatcher<'a> {
     /// Where checks go when the room is keeping a history. `None` is the
     /// common case and costs one branch per check.
     journal: Option<&'a crate::journal::Journal>,
+    /// What the room refused while handling the packet in hand, held for the
+    /// same reason `updates` is: the room is borrowed mutably for as long as
+    /// this sink lives, and the slot these belong to is inside it.
+    refusals: Vec<(ConnId, Refusal)>,
+}
+
+/// A refusal the room produced, on its way to the operator log.
+///
+/// Both halves were invisible before this existed. An `InvalidPacket` went out
+/// to the client and nowhere else, and [`CloseReason::ProtocolError`] carries a
+/// sentence the room wrote about *why* it dropped a socket that
+/// [`Dispatcher::close`] then flattened to the static `"protocol error"`. So a
+/// client refused for a reason pahoa already knew produced no server-side
+/// evidence at all, and diagnosis started from a player saying "it disconnects".
+enum Refusal {
+    /// `InvalidPacket`: the client keeps its socket and is told what was wrong.
+    Answered {
+        original_cmd: Option<String>,
+        text: String,
+    },
+    /// The reference would have raised here, so the socket goes with it.
+    Fatal { detail: String },
 }
 
 impl<'a> Dispatcher<'a> {
@@ -188,6 +210,7 @@ impl<'a> Dispatcher<'a> {
             dirty: false,
             updates: Vec::new(),
             journal,
+            refusals: Vec::new(),
         }
     }
 }
@@ -201,6 +224,17 @@ impl EffectSink for Dispatcher<'_> {
         // last point at which these are packets rather than bytes.
         for msg in msgs {
             crate::metrics::record_packet_out(msg.cmd());
+            // Only `send` looks: an `InvalidPacket` answers the one connection
+            // that earned it, so it never travels by `broadcast`.
+            if let ServerPacket::InvalidPacket(p) = msg {
+                self.refusals.push((
+                    to,
+                    Refusal::Answered {
+                        original_cmd: p.original_cmd.clone(),
+                        text: p.text.clone(),
+                    },
+                ));
+            }
         }
         // Tagged from the packets, before they become bytes — the shard sees
         // only a frame and cannot tell a chat line from an item delivery.
@@ -257,6 +291,18 @@ impl EffectSink for Dispatcher<'_> {
     }
 
     fn close(&mut self, conn: ConnId, reason: CloseReason) {
+        // The client is told only the static half. The detail is the room's own
+        // account of which argument of which command it could not survive, and
+        // it is worth exactly as much to an operator as it would be to an
+        // attacker probing for one — so it goes to the log and not the wire.
+        if let CloseReason::ProtocolError(detail) = &reason {
+            self.refusals.push((
+                conn,
+                Refusal::Fatal {
+                    detail: detail.clone(),
+                },
+            ));
+        }
         let text = match reason {
             CloseReason::ProtocolError(_) => "protocol error",
             CloseReason::TooSlow => "client too slow",
@@ -543,8 +589,13 @@ pub async fn run_with_saves(
                         .client(conn)
                         .filter(|c| c.auth)
                         .map(|c| (c.team, c.slot));
-                    crate::metrics::record_packet(slot, packet.cmd());
+                    let cmd = packet.cmd();
+                    crate::metrics::record_packet(slot, cmd);
                     room.handle(conn, packet, &mut sink);
+                    // Once per packet, because naming the command that caused a
+                    // refusal is most of its value, and after `handle` returns
+                    // because that is when the room is readable again.
+                    log_refusals(room, cmd, &mut sink.refusals);
                 }
                 push_membership(room, conn, &mut sink);
             }
@@ -775,6 +826,49 @@ pub async fn run_with_saves(
 /// Only a dead peer earns `info`. Ordinary hang-ups are the most common event a
 /// busy room has, they are already journaled, and `serve_connection` logs each
 /// one at `debug` with its reason.
+/// Say what the room refused, and who sent it.
+///
+/// Archipelago logs none of this, which is defensible for a server an organizer
+/// runs in a terminal next to the client that is misbehaving. pahoa's rooms run
+/// in a pod, and the reports that reach it are secondhand — so a refusal the
+/// server already understood in full has to leave a trace, or the next one
+/// costs another round of guessing.
+///
+/// `team` and `slot` are simply absent when the connection has not authed,
+/// which is a state half these refusals happen in: a malformed `Connect` is
+/// answered before there is a slot to name.
+///
+/// **The client's own values never appear here.** `text` is the reference's
+/// wording or pahoa's, and `detail` is written by the handler that gave up;
+/// neither quotes the packet. That rules out the failure mode `DecodeFailed`
+/// avoids by dropping serde's message — a bad `Connect` writing a password into
+/// a log an organizer pastes into a bug report.
+fn log_refusals(room: &Room, cmd: &'static str, refusals: &mut Vec<(ConnId, Refusal)>) {
+    for (conn, refusal) in refusals.drain(..) {
+        let who = room.client(conn).filter(|c| c.auth);
+        let (team, slot) = (who.map(|c| c.team), who.map(|c| c.slot));
+        match refusal {
+            Refusal::Answered { original_cmd, text } => tracing::info!(
+                %conn,
+                team,
+                slot,
+                cmd,
+                original_cmd,
+                text,
+                "refused a client's arguments"
+            ),
+            Refusal::Fatal { detail } => tracing::info!(
+                %conn,
+                team,
+                slot,
+                cmd,
+                detail,
+                "dropping a connection over a packet the reference would raise on"
+            ),
+        }
+    }
+}
+
 fn log_disconnect(room: &Room, conn: ConnId, reason: &str) {
     if reason != crate::server::KEEPALIVE_TIMEOUT {
         return;
