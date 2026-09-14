@@ -208,6 +208,14 @@ pub struct Room {
     stored_data: HashMap<String, Arc<Value>>,
     /// Who to notify when a key changes.
     stored_data_subscriptions: HashMap<String, HashSet<ConnId>>,
+    /// Running total of [`Room::stored_data_bytes`].
+    ///
+    /// Kept incrementally rather than measured on demand, because the read side
+    /// is a metrics scrape on a schedule and the write side already has both
+    /// values in hand. Walking the map every fifteen seconds would put a cost
+    /// proportional to the whole store on the actor task, which is the one
+    /// thing this number exists to warn about.
+    stored_data_bytes: u64,
 
     /// Server start time, reported in `RoomInfo.time` for DeathLink sync.
     pub start_time: f64,
@@ -291,6 +299,7 @@ impl Room {
             admin_conn: None,
             stored_data: HashMap::new(),
             stored_data_subscriptions: HashMap::new(),
+            stored_data_bytes: 0,
             start_time,
             clock: start_time,
         }
@@ -1157,6 +1166,14 @@ impl Room {
             }
         };
 
+        // Measured either side of the write, so the gauge stays a running total
+        // rather than a periodic walk of the whole store.
+        let was = self
+            .stored_data
+            .get(&key)
+            .map_or(0, |old| entry_bytes(&key, old));
+        let now = entry_bytes(&key, &value);
+        self.stored_data_bytes = (self.stored_data_bytes + now as u64).saturating_sub(was as u64);
         self.stored_data
             .insert(key.clone(), Arc::new(value.clone()));
         out.mark_dirty();
@@ -3074,6 +3091,35 @@ impl Room {
         &self.stored_data
     }
 
+    /// What the data store would occupy if written out: every key plus its
+    /// value's compact JSON encoding.
+    ///
+    /// **Worth watching because nothing bounds it.** Keys are arbitrary client
+    /// strings and a single value may be [`pahoa_datastore::MAX_RESULT_LEN`],
+    /// so the store grows only as fast as clients write to it, and all of it
+    /// goes into every save. A room whose saves are getting slow says so here
+    /// first.
+    pub fn stored_data_bytes(&self) -> u64 {
+        self.stored_data_bytes
+    }
+
+    /// Subscribed keys, and total `SetNotify` subscriptions across them.
+    ///
+    /// The two differ by fan-out, which is the point: one key watched by two
+    /// thousand trackers turns every `Set` on it into two thousand deliveries,
+    /// and that shows up in the outbound byte counters with nothing to explain
+    /// it. Walks the *subscription* map, which holds one entry per watched key
+    /// — never the data map, which is the one that gets large.
+    pub fn stored_data_subscriptions(&self) -> (usize, usize) {
+        (
+            self.stored_data_subscriptions.len(),
+            self.stored_data_subscriptions
+                .values()
+                .map(HashSet::len)
+                .sum(),
+        )
+    }
+
     // --- persistence -----------------------------------------------------
 
     /// Take a consistent point-in-time copy of everything persistent.
@@ -3216,6 +3262,14 @@ impl Room {
             })
             .collect();
         self.stored_data = snapshot.stored_data.into_iter().collect();
+        // The one place the total is measured rather than adjusted. It is a
+        // whole-store walk, which is affordable exactly once, at startup,
+        // before the listener binds.
+        self.stored_data_bytes = self
+            .stored_data
+            .iter()
+            .map(|(key, value)| entry_bytes(key, value) as u64)
+            .sum();
 
         Ok(())
     }
@@ -3279,6 +3333,15 @@ fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<Str
         ClientPacket::Say(_) => Some((Kind::Say, Vec::new())),
         _ => None,
     }
+}
+
+/// What one data-storage entry costs, key included.
+///
+/// The key counts because it is client-supplied and unbounded too — a client
+/// writing ten thousand long keys with `null` values is a store that grows
+/// without a single byte of it appearing in the values.
+fn entry_bytes(key: &str, value: &Value) -> usize {
+    key.len() + pahoa_datastore::metrics::json_len(value)
 }
 
 fn parse_team_slot(s: &str) -> Option<(u32, u32)> {

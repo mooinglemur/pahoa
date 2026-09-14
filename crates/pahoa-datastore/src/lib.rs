@@ -17,7 +17,8 @@
 //! assert_eq!(apply("add", json!(true), &json!(1)).unwrap(), json!(2));
 //! ```
 
+pub mod metrics;
 pub mod ops;
 pub mod pyvalue;
 
-pub use ops::{MAX_RESULT_LEN, OpError, apply, apply_all};
+pub use ops::{MAX_INT_BITS, MAX_RESULT_LEN, OpError, apply, apply_all};

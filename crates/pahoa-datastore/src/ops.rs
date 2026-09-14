@@ -697,10 +697,25 @@ fn update(current: Value, arg: &Value) -> OpResult {
 ///
 /// All-or-nothing: the value is only stored if every operation succeeds. See
 /// the module docs for why that differs from the reference.
-pub fn apply_all(
-    mut value: Value,
-    operations: &[(String, Value)],
-) -> Result<Value, (usize, OpError)> {
+pub fn apply_all(value: Value, operations: &[(String, Value)]) -> Result<Value, (usize, OpError)> {
+    let started = std::time::Instant::now();
+    let outcome = apply_each(value, operations);
+    // Timed on both paths. A sequence that failed still spent the time, and an
+    // operation that is slow *and* wrong is the one most worth seeing.
+    crate::metrics::record_apply(started.elapsed());
+    if let Err((index, e)) = &outcome {
+        crate::metrics::record_failure(match e {
+            // The name came from the client, so it cannot be a label. Anything
+            // else means the dispatcher matched one of the eighteen, which is
+            // what keeps the label set bounded.
+            OpError::UnknownOperation(_) => "unknown",
+            _ => &operations[*index].0,
+        });
+    }
+    outcome
+}
+
+fn apply_each(mut value: Value, operations: &[(String, Value)]) -> Result<Value, (usize, OpError)> {
     for (index, (op, arg)) in operations.iter().enumerate() {
         value = apply(op, value, arg).map_err(|e| (index, e))?;
     }

@@ -612,3 +612,145 @@ fn a_bitfield_can_be_built_and_read_one_bit_at_a_time() {
     );
     assert_eq!(echoes(&sink, conn, &room)[0]["value"], json!(1));
 }
+
+// --- what the store costs -------------------------------------------------
+//
+// Data storage is the one part of a room's state clients grow directly:
+// arbitrary keys, values up to `MAX_RESULT_LEN`, nothing ever deleted, and all
+// of it written into every save. None of that was observable from outside, so a
+// room accumulating a gigabyte of tracker state announced itself only by its
+// saves getting slow.
+
+#[test]
+fn the_store_reports_what_it_would_cost_to_write_out() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, conn) = setup().unwrap();
+    assert_eq!(
+        room.stored_data_bytes(),
+        0,
+        "an untouched room holds nothing"
+    );
+
+    feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"k","operations":[{"operation":"replace","value":[1,2,3]}]}]"#,
+    );
+    // `k` plus `[1,2,3]`.
+    assert_eq!(room.stored_data_bytes(), 1 + 7);
+
+    // Replacing a value adjusts rather than accumulates — the failure mode of
+    // a running total is that it only ever goes up.
+    feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"k","operations":[{"operation":"replace","value":1}]}]"#,
+    );
+    assert_eq!(room.stored_data_bytes(), 1 + 1);
+
+    feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"second","operations":[{"operation":"replace","value":"ab"}]}]"#,
+    );
+    assert_eq!(room.stored_data_bytes(), 1 + 1 + 6 + 4);
+    assert_eq!(room.stored_data().len(), 2);
+}
+
+#[test]
+fn the_running_total_agrees_with_measuring_the_whole_store() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // The property the incremental bookkeeping has to hold, checked against the
+    // thing it exists to avoid doing: a full walk. Drift here is silent, and it
+    // compounds — every subsequent write is relative to a wrong number.
+    let (mut room, conn) = setup().unwrap();
+    for (key, value) in [
+        ("a", r#"{"nested":{"deep":[1,2,3]}}"#),
+        ("b", r#""héllo ☃""#),
+        ("a", "null"),
+        ("c", "2361183241434822606849"),
+        ("b", "[]"),
+        ("a", r#"[1,"two",{"three":3}]"#),
+    ] {
+        feed(
+            &mut room,
+            conn,
+            &format!(
+                r#"[{{"cmd":"Set","key":"{key}",
+                     "operations":[{{"operation":"replace","value":{value}}}]}}]"#
+            ),
+        );
+    }
+
+    let measured: u64 = room
+        .stored_data()
+        .iter()
+        .map(|(k, v)| (k.len() + serde_json::to_string(&**v).unwrap().len()) as u64)
+        .sum();
+    assert_eq!(room.stored_data_bytes(), measured);
+}
+
+#[test]
+fn a_restored_room_reports_the_size_it_restored() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // Restore replaces the map wholesale, so it is the one path that has to
+    // measure rather than adjust. A room that came back reporting zero would
+    // look like a room that had lost its data store.
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let mut room = room_for(data.clone(), RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b001);
+    feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"k","operations":[{"operation":"replace","value":[1,2,3]}]}]"#,
+    );
+    let before = room.stored_data_bytes();
+    assert!(before > 0);
+
+    let encoded = room.snapshot().encode(false);
+    let mut restored = room_for(data, RoomOptions::default());
+    restored
+        .restore(pahoa_room::Snapshot::decode(&encoded).expect("snapshot decodes"))
+        .expect("snapshot restores");
+    assert_eq!(restored.stored_data_bytes(), before);
+}
+
+#[test]
+fn subscriptions_are_counted_apart_from_the_keys_they_watch() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // The two differ by fan-out, and fan-out is the whole point: one key watched
+    // by many clients turns each `Set` on it into that many deliveries, which
+    // otherwise appears in the outbound byte counters with nothing to explain
+    // it.
+    let data = load(FIXTURE).unwrap();
+    let (_, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let a = join(&mut room, 1, &name, &game, 0b001);
+    let b = join(&mut room, 2, &name, &game, 0b001);
+    assert_eq!(room.stored_data_subscriptions(), (0, 0));
+
+    feed(
+        &mut room,
+        a,
+        r#"[{"cmd":"SetNotify","keys":["shared","mine"]}]"#,
+    );
+    feed(&mut room, b, r#"[{"cmd":"SetNotify","keys":["shared"]}]"#);
+    assert_eq!(
+        room.stored_data_subscriptions(),
+        (2, 3),
+        "two keys, three subscriptions"
+    );
+
+    // A departing client takes its subscriptions with it.
+    room.on_disconnect(b, "peer closed", &mut Recorder::default());
+    assert_eq!(room.stored_data_subscriptions().1, 2);
+}

@@ -637,6 +637,19 @@ pub async fn run_with_saves(
                     save_interval: saver.config.interval,
                     saving: saver.config.store.is_some(),
                     last_check_at: room.last_check_at(),
+                    datastore: {
+                        // Both of these are O(1) or O(watched keys) by design;
+                        // neither walks the store itself. A scrape must not
+                        // cost the actor time proportional to what clients have
+                        // written into it.
+                        let (subscribed_keys, subscriptions) = room.stored_data_subscriptions();
+                        crate::http::DataStore {
+                            keys: room.stored_data().len(),
+                            bytes: room.stored_data_bytes(),
+                            subscribed_keys,
+                            subscriptions,
+                        }
+                    },
                     options: crate::http::Options {
                         hint_cost: room.options.hint_cost,
                         location_check_points: room.options.location_check_points,

@@ -463,6 +463,53 @@ played — but it means a freshly started room can be reap-eligible on arrival,
 which is the opposite of what "it just started" suggests. Anything reaping on
 this wants a floor on how long the room has been up before the number counts.
 
+#### The data store
+
+**Data storage is the only part of a room's state that clients grow directly.**
+Slots, locations and items are all fixed at generation; the key-value store
+behind `Get` and `Set` takes whatever a client writes, under whatever key it
+chooses, never deletes anything, and puts all of it into every save. So a room
+that quietly accumulates a gigabyte of tracker state used to announce itself
+only by its saves getting slow.
+
+```
+pahoa_datastore_keys 412
+pahoa_datastore_bytes 1844233
+pahoa_datastore_subscribed_keys 3
+pahoa_datastore_subscriptions 1902
+pahoa_datastore_applied_total 88142
+pahoa_datastore_apply_seconds_total 14.204881
+pahoa_datastore_apply_max_seconds 0.197431
+pahoa_datastore_failures_total{operation="or"} 4
+```
+
+`bytes` is every key plus the compact JSON of its value — what the store adds to
+each save, and the number to look at first when
+`pahoa_save_duration_seconds` climbs. It is kept as a running total rather
+than measured on demand, because a scrape must not cost the actor time
+proportional to what clients have written.
+
+**`subscriptions` is fan-out, and it is the one that surprises people.** One key
+watched by two thousand trackers makes every `Set` on it two thousand
+deliveries; without this the traffic appears in the outbound byte counters with
+nothing to explain it.
+
+**The apply counters are the actor-stall canary.** These operations run on the
+single task that owns all room state, so their cost is not paid by the client
+that asked for it — it is paid by everybody, and
+`rate(pahoa_datastore_apply_seconds_total[5m])` is directly the fraction of
+the room that `Set`s are taking. The max is a high-water mark rather than a
+histogram, and it only records a stall that *ended*: an operation that never
+returns is invisible here and shows up instead as `pahoa_mailbox_depth` climbing
+without draining.
+
+**Every failure cost a client its connection.** The reference server raises when
+an operation fails, so pahoa closes the socket to match — which means a client
+looping on a bad `Set` reconnects forever and looks like ordinary churn from
+every other angle. The `operation` label is one of the eighteen operation names
+or `unknown`; a name a client invented is never used as a label, because that
+would be unbounded series from a single packet.
+
 #### The per-slot series
 
 `/admin/v1/metrics` carries labeled counters alongside its fixed ones. They are

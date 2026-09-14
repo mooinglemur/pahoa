@@ -1483,3 +1483,174 @@ async fn a_hostile_slot_name_cannot_break_out_of_its_label() {
     );
     server.shutdown().await;
 }
+
+/// A room whose data store already holds something, plus one failed operation.
+///
+/// Driven through `Room::handle` before the server starts rather than over a
+/// socket: what is under test is whether the numbers reach the two endpoints,
+/// and a WebSocket client in the middle would only add ways for the test to be
+/// flaky about it.
+async fn start_with_datastore() -> Server {
+    use pahoa_proto::decode;
+    let mut r = room(RoomOptions::default());
+    let conn = pahoa_room::ConnId(1);
+    let mut sink = pahoa_room::Recorder::default();
+    r.on_connect(conn, &mut sink);
+
+    let frames = [
+        r#"[{"cmd":"Connect","password":null,"game":"A Link to the Past","name":"Troy",
+             "uuid":"u","items_handling":0,"tags":["AP"],
+             "version":{"class":"Version","major":0,"minor":9,"build":0}}]"#,
+        r#"[{"cmd":"Set","key":"k","operations":[{"operation":"replace","value":[1,2,3]}]}]"#,
+        r#"[{"cmd":"SetNotify","keys":["k"]}]"#,
+        // Fails: `|` on a string is a TypeError, so the room drops the socket
+        // and the failure is counted against `or`.
+        r#"[{"cmd":"Set","key":"k","operations":[{"operation":"or","value":"x"}]}]"#,
+    ];
+    for frame in frames {
+        for packet in decode(frame).expect("well-formed") {
+            r.handle(conn, packet, &mut sink);
+        }
+    }
+    assert_eq!(
+        r.stored_data().len(),
+        1,
+        "the fixture Set should have landed"
+    );
+
+    Server::start(
+        r,
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("server should bind")
+}
+
+/// The `save` block's shape, which **puna's probe parses by name**.
+///
+/// It reads `status.save.*` field by field and answers `None` for anything it
+/// cannot find or cannot read as the type it expects, so a rename here does not
+/// break puna — it makes puna quietly record nothing, forever. That is the
+/// failure this pins: `last_save_micros` became `last_save_seconds` and changed
+/// from an integer to a float, and nothing on either side would have said so.
+/// See `HANDOFF.md` in the puna repository.
+#[tokio::test]
+async fn the_save_block_reports_seconds_as_a_float() {
+    use pahoa_net::actor::SaveConfig;
+    let dir = std::env::temp_dir().join(format!("pahoa-http-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let server = Server::start_with_saves(
+        room(RoomOptions::default()),
+        NetConfig {
+            port: 0,
+            admin_token: Some(TOKEN.to_string()),
+            ..Default::default()
+        },
+        SaveConfig {
+            store: Some(Arc::new(
+                pahoa_net::SaveStore::open(&dir).expect("save store opens"),
+            )),
+            interval: Duration::from_millis(50),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("binds");
+
+    let (_, body) = split(&authed(server.local_addr, "GET", "/admin/v1/status", TOKEN).await);
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("status is JSON");
+    let save = &doc["save"];
+
+    assert!(!save.is_null(), "a room with a save store persists: {doc}");
+    assert!(
+        save["last_save_seconds"].is_f64(),
+        "the field puna reads, as seconds and as a float: {save}"
+    );
+    assert!(
+        save.get("last_save_micros").is_none(),
+        "the old spelling must be gone rather than carried alongside: {save}"
+    );
+
+    server.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_status_document_reports_the_data_store() {
+    let server = start_with_datastore().await;
+    let response = authed(server.local_addr, "GET", "/admin/v1/status", TOKEN).await;
+    let (_, body) = split(&response);
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("status is JSON");
+    let store = &doc["datastore"];
+
+    assert_eq!(store["keys"], serde_json::json!(1));
+    // `k` plus `[1,2,3]`.
+    assert_eq!(store["bytes"], serde_json::json!(8));
+    assert_eq!(store["subscribed_keys"], serde_json::json!(1));
+    assert_eq!(store["subscriptions"], serde_json::json!(1));
+    // Counters are process-global and shared with every other test in this
+    // binary, so these are floors rather than equalities.
+    assert!(store["applied"].as_u64().unwrap() >= 2, "{store}");
+    // Seconds, and a float — the units question the whole surface answers the
+    // same way. `as_f64` on an integer JSON number succeeds, so this asserts
+    // the name and the unit; the type is pinned by `is_f64`.
+    assert!(store["apply_seconds"].is_f64(), "{store}");
+    assert!(store["apply_max_seconds"].is_f64(), "{store}");
+    assert!(
+        store["failures"]["or"].as_u64().unwrap() >= 1,
+        "the refused `or` should be counted against its operation: {store}"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_metrics_endpoint_reports_the_data_store() {
+    let server = start_with_datastore().await;
+    let (_, body) = split(&authed(server.local_addr, "GET", "/admin/v1/metrics", TOKEN).await);
+
+    for expected in [
+        "# TYPE pahoa_datastore_keys gauge",
+        "pahoa_datastore_keys 1",
+        "pahoa_datastore_bytes 8",
+        "pahoa_datastore_subscribed_keys 1",
+        "pahoa_datastore_subscriptions 1",
+        "# TYPE pahoa_datastore_applied_total counter",
+        // Seconds, decimal, like every other duration Prometheus reads.
+        "# TYPE pahoa_datastore_apply_seconds_total counter",
+        "# TYPE pahoa_datastore_apply_max_seconds gauge",
+        // The label is the operation, and it is one of the eighteen names.
+        "pahoa_datastore_failures_total{operation=\"or\"}",
+    ] {
+        assert!(body.contains(expected), "want {expected:?} in:\n{body}");
+    }
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_invented_operation_name_never_becomes_a_metric_label() {
+    // Label cardinality is the hazard: operation names arrive from clients, and
+    // an unrecognized one echoed into a label would let a single client mint
+    // unbounded Prometheus series.
+    let hostile = "'; DROP TABLE; \u{1f600} ".repeat(4);
+    let _ = pahoa_datastore::apply(&hostile, serde_json::json!(1), &serde_json::json!(1));
+    let _ = pahoa_datastore::apply_all(
+        serde_json::json!(1),
+        &[(hostile.clone(), serde_json::json!(1))],
+    );
+
+    let failures = pahoa_datastore::metrics::failures();
+    assert!(
+        !failures.iter().any(|(op, _)| op.contains("DROP TABLE")),
+        "a client-supplied name reached the label set: {failures:?}"
+    );
+    assert!(
+        failures.iter().any(|(op, n)| op == "unknown" && *n >= 1),
+        "it should still be counted, under the fixed label: {failures:?}"
+    );
+}

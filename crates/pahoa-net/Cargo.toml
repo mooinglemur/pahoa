@@ -11,6 +11,9 @@ description = "WebSocket transport and concurrency model for pahoa"
 pahoa-multidata = { path = "../pahoa-multidata" }
 pahoa-proto = { path = "../pahoa-proto" }
 pahoa-room = { path = "../pahoa-room" }
+# For its metrics only — the counters live beside the operations they measure,
+# the way `pahoa_room::filter`'s do. Already in the graph through pahoa-room.
+pahoa-datastore = { path = "../pahoa-datastore" }
 
 tokio = { version = "1", features = [
     "rt-multi-thread",

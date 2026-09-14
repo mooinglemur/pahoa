@@ -26,6 +26,26 @@ pub struct Status {
     /// Unix seconds when any slot last registered a new location check, or
     /// `None` if none ever has. See [`pahoa_room::Room::last_check_at`].
     pub last_check_at: Option<f64>,
+    pub datastore: DataStore,
+}
+
+/// The shared key-value store clients read and write with `Get` and `Set`.
+///
+/// **The only part of a room's state that clients grow directly.** Everything
+/// else is bounded by the seed — slots, locations, items are all fixed at
+/// generation — but data storage takes whatever a client writes, keeps it for
+/// the life of the room, and puts all of it in every save. Until these numbers
+/// existed, a room accumulating a gigabyte of tracker state announced itself
+/// only by its saves getting slow.
+#[derive(Debug, Clone, Default)]
+pub struct DataStore {
+    pub keys: usize,
+    /// Keys plus the compact JSON of their values. See
+    /// [`pahoa_room::Room::stored_data_bytes`].
+    pub bytes: u64,
+    pub subscribed_keys: usize,
+    /// Total `SetNotify` subscriptions, which is the fan-out a `Set` pays.
+    pub subscriptions: usize,
 }
 
 /// The room's rules, as they are *now*.
@@ -85,7 +105,14 @@ pub fn document(
     started_at: SystemTime,
     outbound_budget_bytes: usize,
 ) -> serde_json::Value {
-    let (save_micros, save_bytes) = crate::metrics::last_save();
+    let (save_duration, save_bytes) = crate::metrics::last_save();
+    let apply = pahoa_datastore::metrics::apply_stats();
+    // An object keyed by operation, so a reader can ask about one without
+    // scanning a list. Sparse: an operation that has never failed is absent.
+    let failures: serde_json::Map<String, serde_json::Value> = pahoa_datastore::metrics::failures()
+        .into_iter()
+        .map(|(op, count)| (op, serde_json::Value::from(count)))
+        .collect();
 
     serde_json::json!({
         "seed_name": seed.seed_name,
@@ -97,7 +124,10 @@ pub fn document(
             serde_json::json!({
                 "last_save_at": crate::metrics::last_save_at().map(rfc3339),
                 "last_save_bytes": save_bytes,
-                "last_save_micros": save_micros.as_micros() as u64,
+                // Seconds, like every other duration on both surfaces. This was
+                // `last_save_micros`, and puna's probe reads it by name — see
+                // `HANDOFF.md` in that repository.
+                "last_save_seconds": save_duration.as_secs_f64(),
                 "save_interval_seconds": live.save_interval.as_secs(),
                 "dirty": live.save_dirty,
             })
@@ -128,6 +158,24 @@ pub fn document(
             "idle_seconds": idle_seconds(),
             "last_check_at": live.last_check_at.map(room_time).map(rfc3339),
             "check_idle_seconds": check_idle_seconds(live.last_check_at),
+        },
+
+        // The one part of a room's state clients grow directly. Everything else
+        // is fixed by the seed; this takes whatever is written to it, keeps it
+        // for the room's life, and rides along in every save.
+        "datastore": {
+            "keys": live.datastore.keys,
+            "bytes": live.datastore.bytes,
+            "subscribed_keys": live.datastore.subscribed_keys,
+            "subscriptions": live.datastore.subscriptions,
+            "applied": apply.applied,
+            "apply_seconds": apply.total.as_secs_f64(),
+            "apply_max_seconds": apply.max.as_secs_f64(),
+            // Each of these cost a client its connection, because the reference
+            // raises where an operation fails and pahoa closes the socket to
+            // match. A client looping on a bad Set looks like ordinary churn
+            // from every other angle.
+            "failures": failures,
         },
 
         "filters": {
@@ -178,59 +226,61 @@ pub fn document(
 /// A fixed set of numbers into a fixed format is not worth a client library,
 /// and the format is stable enough that writing it out is the whole job.
 pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
-    let (save_micros, save_bytes) = crate::metrics::last_save();
+    let (save_duration, save_bytes) = crate::metrics::last_save();
     let mut out = String::with_capacity(2048);
 
-    let mut metric = |name: &str, help: &str, kind: &str, value: u64| {
-        out.push_str(&format!(
-            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
-        ));
-    };
-
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_clients_connected",
         "Open client connections, including those that have not authenticated.",
         "gauge",
         live.clients_connected as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_mailbox_depth",
         "Messages queued for the room actor. The bottleneck canary.",
         "gauge",
         crate::metrics::mailbox_depth() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_mailbox_peak",
         "Deepest the actor mailbox has been since startup.",
         "gauge",
         crate::metrics::mailbox_peak() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_lag_disconnects_total",
         "Connections the room decided to drop for falling behind. Counts the decision; \
          the close itself is forced out of band. Should be zero in a healthy room.",
         "counter",
         crate::metrics::lag_disconnects(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_outbound_queued_bytes",
         "Bytes queued for clients across all connections.",
         "gauge",
         crate::budget::queued_bytes() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_outbound_peak_bytes",
         "Most that has ever been queued at once.",
         "gauge",
         crate::budget::peak_bytes() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_outbound_budget_bytes",
         "Ceiling on queued outbound bytes.",
         "gauge",
         outbound_budget_bytes as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_compressions_total",
         "Messages compressed. Should track broadcasts, not broadcasts times connections.",
         "counter",
@@ -238,7 +288,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
     );
     // Resident memory is not here: it is `process_resident_memory_bytes`, in
     // `process` below, under the conventional spelling.
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_idle_seconds",
         "Seconds since any client last sent a message.",
         "gauge",
@@ -247,7 +298,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
     // The JSON reports `null` here for a room nobody has played yet; the text
     // exposition has no null, so a scraper sees 0 and must read it with
     // `pahoa_checks_total` to tell "just checked" from "never checked".
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_check_idle_seconds",
         "Seconds since any slot last registered a new location check. 0 when \
          none ever has, which `pahoa_checks_total` disambiguates.",
@@ -256,26 +308,30 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
     );
 
     if live.saving {
-        metric(
+        metric_line(
+            &mut out,
             "pahoa_save_bytes",
             "Size of the most recent save.",
             "gauge",
             save_bytes,
         );
-        metric(
-            "pahoa_save_duration_microseconds",
+        metric_line(
+            &mut out,
+            "pahoa_save_duration_seconds",
             "Wall time of the most recent save.",
             "gauge",
-            save_micros.as_micros() as u64,
+            seconds(save_duration),
         );
-        metric(
+        metric_line(
+            &mut out,
             "pahoa_save_dirty",
             "1 when state has changed since the last save started.",
             "gauge",
             u64::from(live.save_dirty),
         );
         if let Some(at) = crate::metrics::last_save_at() {
-            metric(
+            metric_line(
+                &mut out,
                 "pahoa_last_save_timestamp_seconds",
                 "Unix time of the last completed save.",
                 "gauge",
@@ -286,13 +342,15 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         }
     }
 
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_slots",
         "Player slots in this seed.",
         "gauge",
         live.slots.len() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_slots_connected",
         "Player slots with at least one open connection.",
         "gauge",
@@ -300,25 +358,29 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
     );
     // Worth a gauge rather than only a status field: a lock is meant to be
     // temporary, and the failure mode is nobody remembering to lift it.
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_slots_locked",
         "Slots an administrator has barred from connecting.",
         "gauge",
         live.slots.iter().filter(|s| s.locked).count() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_slots_filtered",
         "Slots with something filtering their traffic, their own rules or the room's.",
         "gauge",
         live.slots.iter().filter(|s| s.filtered).count() as u64,
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_filtered_from_slots_total",
         "Messages dropped because a slot's filter matched what it sent.",
         "counter",
         pahoa_room::filter::dropped_from_slot(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_filtered_to_slots_total",
         "Messages dropped because a filter matched what a slot would receive. \
          Counted per recipient connection, so one broadcast filtered for forty slots is forty, \
@@ -327,20 +389,26 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "counter",
         pahoa_room::filter::dropped_to_slot(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_checks_total",
         "Locations checked across every slot.",
         "gauge",
-        live.slots.iter().map(|s| s.checks as u64).sum(),
+        live.slots.iter().map(|s| s.checks as u64).sum::<u64>(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_checks_possible",
         "Locations that exist across every slot.",
         "gauge",
-        live.slots.iter().map(|s| s.total_checks as u64).sum(),
+        live.slots
+            .iter()
+            .map(|s| s.total_checks as u64)
+            .sum::<u64>(),
     );
 
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_admin_auth_failures_total",
         "Admin requests with a wrong or missing bearer token. Its own counter rather than a \
          status filter, because pahoa_http_requests_total{status=\"401\"} also carries the \
@@ -348,14 +416,16 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "counter",
         crate::metrics::auth_failures(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_admin_auth_rate_limited_total",
         "Admin requests answered 429 because that source had already failed too often. A \
          correct token is never refused, so this counts only sources that were guessing.",
         "counter",
         crate::metrics::auth_rate_limited(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_shard_overflow_total",
         "Frames a fan-out shard's inbox had no room for. Each one disconnects whoever it was \
          for — one connection for a directed send, every connection on that shard for a \
@@ -366,7 +436,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "counter",
         crate::metrics::shard_overflow(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_shard_sweeps_total",
         "Times a shard closed every connection it owns because a broadcast for them was \
          dropped. Read against pahoa_shard_overflow_total: a full inbox refuses a broadcast on \
@@ -377,7 +448,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         "counter",
         crate::metrics::shard_sweeps(),
     );
-    metric(
+    metric_line(
+        &mut out,
         "pahoa_http_malformed_total",
         "Requests that never parsed into a route, so they are counted nowhere else. A port \
          scan looks like this.",
@@ -385,12 +457,100 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         crate::metrics::http_malformed(),
     );
 
-    // The closure holds `out` mutably; nothing above needs it again.
-    let _ = metric;
     process(&mut out);
+    datastore(&mut out, live);
     by_slot(&mut out, live);
     http_surface(&mut out);
     out
+}
+
+/// The shared key-value store.
+///
+/// Room-wide rather than per-slot, deliberately: the store has no owner. Any
+/// client may write any key, and the cost of a large one is paid by the room.
+fn datastore(out: &mut String, live: &Status) {
+    metric_line(
+        out,
+        "pahoa_datastore_keys",
+        "Keys held in the shared data store. Unbounded and entirely client-driven: clients \
+         choose the keys, nothing ever deletes one, and all of it is written into every save.",
+        "gauge",
+        live.datastore.keys as u64,
+    );
+    metric_line(
+        out,
+        "pahoa_datastore_bytes",
+        "Size of the data store: every key plus the compact JSON of its value. This is what \
+         each save carries on top of the room's own state, so it is the number to look at \
+         first when pahoa_save_duration_seconds starts climbing.",
+        "gauge",
+        live.datastore.bytes,
+    );
+    metric_line(
+        out,
+        "pahoa_datastore_subscribed_keys",
+        "Keys at least one client is watching with SetNotify.",
+        "gauge",
+        live.datastore.subscribed_keys as u64,
+    );
+    metric_line(
+        out,
+        "pahoa_datastore_subscriptions",
+        "Total SetNotify subscriptions across all keys, which is the fan-out a Set pays. Larger \
+         than pahoa_datastore_subscribed_keys by however many clients share a key: one key \
+         watched by two thousand trackers makes every Set on it two thousand deliveries, which \
+         otherwise appears in the outbound counters with nothing to explain it.",
+        "gauge",
+        live.datastore.subscriptions as u64,
+    );
+
+    let apply = pahoa_datastore::metrics::apply_stats();
+    metric_line(
+        out,
+        "pahoa_datastore_applied_total",
+        "Operation sequences applied, successful or not — one per Set that got as far as its \
+         operations.",
+        "counter",
+        apply.applied,
+    );
+    metric_line(
+        out,
+        "pahoa_datastore_apply_seconds_total",
+        "Actor time spent inside data storage operations. This is time the room spends on \
+         nobody's behalf but one client's, on the single task that owns all room state, so \
+         rate() of this is directly the fraction of the room that Sets are taking.",
+        "counter",
+        seconds(apply.total),
+    );
+    metric_line(
+        out,
+        "pahoa_datastore_apply_max_seconds",
+        "The worst single operation sequence since the room started. A high-water mark rather \
+         than a histogram, and it only records a stall that ENDED — an operation that never \
+         returns is invisible here and shows up as pahoa_mailbox_depth climbing without \
+         draining.",
+        "gauge",
+        seconds(apply.max),
+    );
+
+    let mut failures = pahoa_datastore::metrics::failures();
+    if !failures.is_empty() {
+        failures.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        out.push_str(
+            "# HELP pahoa_datastore_failures_total Operation sequences that failed, by \
+             operation. Each one cost a client its connection: the reference server raises \
+             here, so pahoa closes the socket to match. A client looping on a bad Set therefore \
+             reconnects forever, and this is the counter that says so — the disconnects \
+             themselves look like ordinary churn. The label is one of the eighteen operation \
+             names or \"unknown\"; a name the client invented is never used as a label.\n\
+             # TYPE pahoa_datastore_failures_total counter\n",
+        );
+        for (op, count) in &failures {
+            out.push_str(&format!(
+                "pahoa_datastore_failures_total{{operation=\"{op}\"}} {count}\n"
+            ));
+        }
+    }
 }
 
 /// What the process costs the node it runs on.
@@ -794,6 +954,38 @@ fn idle_seconds() -> Option<u64> {
 fn room_time(at: f64) -> SystemTime {
     let secs = if at.is_finite() { at.max(0.0) } else { 0.0 };
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64)
+}
+
+/// One `HELP`/`TYPE`/value triple.
+///
+/// The same shape as the closure at the top of [`prometheus`], as a free
+/// function because that closure holds a mutable borrow of the buffer and is
+/// therefore only usable in the uninterrupted run of calls it opens with.
+///
+/// `value` is anything that can print itself, so a duration can arrive as
+/// seconds — see [`seconds`].
+fn metric_line(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    kind: &str,
+    value: impl std::fmt::Display,
+) {
+    out.push_str(&format!(
+        "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
+    ));
+}
+
+/// A duration as Prometheus wants every duration: **seconds**, decimal.
+///
+/// Prometheus's convention is base units, and its sample type is `float64`
+/// regardless — a counter of integer microseconds is converted to a float the
+/// moment it is ingested, so emitting one buys nothing and costs a reader the
+/// conversion. Six decimal places because that is the resolution the clock
+/// underneath actually has; `f64` holds it out past a thousand years of
+/// accumulated time, so precision is not what decides this.
+fn seconds(d: Duration) -> String {
+    format!("{:.6}", d.as_secs_f64())
 }
 
 /// Seconds since any slot last checked a location, or `None` if none ever has.
