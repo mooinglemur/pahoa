@@ -245,6 +245,9 @@ Several of the events above are worth a note on why they are shaped as they are:
 - **`tags_changed` fires on the change, not on the packet.** Trackers send `ConnectUpdate` routinely
   and most change nothing. Tags are worth recording when they do move: they decide whether a
   connection may claim the goal, whether it receives chat, and whether it counts as a game client.
+  "Changed" means the *set* changed, as the reference decides it (`MultiServer.py:2025`), so a
+  client that reorders its tags or repeats one records nothing — and neither does it announce
+  anything to the room, which is the same comparison.
 - **The link records carry both who sent it and who the packet said sent it.** `source` is copied
   straight out of the bounce payload, so it is the client's unvalidated claim and nothing stops one
   naming somebody else; `team`, `slot` and `player` come from the authenticated connection the packet

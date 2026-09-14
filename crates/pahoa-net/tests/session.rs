@@ -126,6 +126,22 @@ impl Client {
         }
         panic!("never saw {cmd}");
     }
+
+    /// Read until a `PrintJSON` of this `type` arrives.
+    ///
+    /// Separate from [`Client::wait_for`] because a room talks constantly:
+    /// tutorials, joins and item sends all answer to `PrintJSON`, and a test
+    /// waiting for one particular kind should not fail over whatever happened
+    /// to be first.
+    async fn wait_for_print(&mut self, print_type: &str) -> Value {
+        for _ in 0..50 {
+            let packet = self.wait_for("PrintJSON").await;
+            if packet.get("type").and_then(Value::as_str) == Some(print_type) {
+                return packet;
+            }
+        }
+        panic!("never saw a PrintJSON of type {print_type}");
+    }
 }
 
 fn first_player(data: &MultiData) -> (u32, String, String) {
@@ -632,4 +648,52 @@ async fn a_send_filter_keeps_one_print_type_away_from_a_client() {
     );
 
     server.shutdown().await;
+}
+
+/// The tag announcement, through the real transport rather than a `Recorder`.
+///
+/// `no_text` is *derived* from the tags, and it is the transport — not the room
+/// — that expands a text broadcast's audience against its own copy of it. So a
+/// client that drops `NoText` and is then handed a broadcast exercises a seam
+/// the room-level tests cannot reach: there, recipients resolve against the
+/// room, which is right by construction.
+///
+/// What this does **not** pin is the ordering. The actor re-pushes membership
+/// after every batch and the shards take control messages ahead of frames, so
+/// the window where an announcement could overtake the update that belongs with
+/// it is real but not reliably reproducible — the room closes it by pushing
+/// membership inline, and a test that tried to observe that would be a coin
+/// toss dressed up as an assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_no_text_starts_delivering_text_again() {
+    let Some(data) = load(FIXTURE) else {
+        eprintln!("SKIP: fixture {FIXTURE} not present");
+        return;
+    };
+    let (_, name, game) = first_player(&data);
+    let server = start(data, RoomOptions::default()).await;
+
+    let mut client = Client::connect(server.local_addr).await;
+    client.wait_for("RoomInfo").await;
+    let mut connect = connect_packet(&name, &game, 0b111);
+    connect[0]["tags"] = json!(["AP", "NoText"]);
+    client.send(connect).await;
+    client.wait_for("Connected").await;
+
+    client
+        .send(json!([{"cmd": "ConnectUpdate", "tags": ["AP"]}]))
+        .await;
+
+    // Its own tag change is the first *broadcast* text it is entitled to, and
+    // it arrives only if the transport learned about the change before the
+    // broadcast went out — which is why the room tells it first. The tutorial
+    // line beats it here and proves nothing either way: that one is a direct
+    // send, and `no_text` never applied to it.
+    let announced = client.wait_for_print("TagsChanged").await;
+    assert_eq!(announced["tags"], json!(["AP"]));
+
+    // And ordinary chat follows.
+    client.send(json!([{"cmd": "Say", "text": "hello"}])).await;
+    let chat = client.wait_for_print("Chat").await;
+    assert_eq!(chat["message"], json!("hello"));
 }

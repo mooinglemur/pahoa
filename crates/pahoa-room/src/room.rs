@@ -10,7 +10,7 @@ mod server_commands;
 
 pub use admin::{AdminCommand, AdminOutcome, SEND_MULTIPLE_LIMIT};
 
-use crate::conn::{Client, ConnId, FeedPolicy, non_game_verb, python_list_repr};
+use crate::conn::{Client, ConnId, FeedPolicy, non_game_verb, python_list_repr, tag_set};
 use crate::datapackage::DataPackageCache;
 use crate::effect::{CloseReason, EffectSink, Recipients, Trigger};
 use crate::hints::HintStore;
@@ -846,7 +846,12 @@ impl Room {
                 }
             }
             if let Some(tags) = args.tags {
-                if tags != client.tags {
+                // Compared as *sets*, which is what the reference does
+                // (`MultiServer.py:2025`). A client that reorders its tags or
+                // repeats one has changed nothing, and a tracker that resends
+                // the same list on a timer must not put a line in every
+                // player's chat for it.
+                if tag_set(&tags) != tag_set(&client.tags) {
                     retagged = Some((
                         (client.team, client.slot),
                         client.tags.clone(),
@@ -865,6 +870,7 @@ impl Room {
                 &from,
                 &to,
             ));
+            self.announce_tags_changed(conn, key, &from, &to, out);
         }
 
         // Changing items_handling restarts the item stream from zero, because
@@ -872,6 +878,57 @@ impl Room {
         if resend {
             self.resend_all_items(conn, out);
         }
+    }
+
+    /// Say that a slot's tags changed (`MultiServer.py:2026-2033`).
+    ///
+    /// **This is the only evidence a player has that a `ConnectUpdate` landed.**
+    /// The server sends no reply to one, so with the announcement missing — as
+    /// it was — a client toggling `DeathLink` saw exactly as much as a client
+    /// whose packet had been dropped on the floor. That is what the report
+    /// behind this described: "any tag updates are getting dropped / ignored".
+    ///
+    /// The membership push is ordering, not repair. `no_text` is *derived* from
+    /// the tags ([`Client::apply_tags`]) and the transport keeps its own copy to
+    /// decide who a text broadcast reaches; the actor already re-pushes that
+    /// copy after every batch of inbound packets, so it does not go stale. What
+    /// it does not do is push it *before* the announcement this method queues,
+    /// which is a race a client that has just dropped `NoText` would lose — it
+    /// would miss its own change. The join path states the same rule at length
+    /// for the same reason.
+    fn announce_tags_changed(
+        &self,
+        conn: ConnId,
+        key: SlotKey,
+        from: &[String],
+        to: &[String],
+        out: &mut dyn EffectSink,
+    ) {
+        let client = &self.clients[&conn];
+        out.membership_changed(conn, true, client.no_text, Some(key));
+        // `MultiServer.py:2031-2033`, verbatim — including rendering the two
+        // tag lists the way Python's `repr` does, since this is a line players
+        // read next to the join message that uses the same spelling.
+        let text = format!(
+            "{} (Team #{}) has changed tags from {} to {}.",
+            self.slot_alias(key),
+            key.0 + 1,
+            python_list_repr(from),
+            python_list_repr(to),
+        );
+        // Scoped as a join is: a filtered feed hears about its own slot
+        // retagging, not about the other two thousand.
+        out.broadcast(
+            Recipients::AllTextAbout(key),
+            &[ServerPacket::PrintJSON(PrintJson {
+                data: vec![JsonMessagePart::text(text)],
+                print_type: Some(PrintJsonType::TagsChanged),
+                team: Some(key.0),
+                slot: Some(key.1),
+                tags: Some(to.to_vec()),
+                ..Default::default()
+            })],
+        );
     }
 
     fn handle_sync(&mut self, conn: ConnId, out: &mut dyn EffectSink) {

@@ -40,8 +40,8 @@ The filter is easy to over-apply, and most of these are load-bearing:
   one-line announcement is cheap
 
 What it drops is the bulk of the firehose, and only that: `ItemSend` between other slots,
-`Join`/`Part` spam for other slots, and other players' hints. **A message a human typed is never
-dropped.**
+`Join`/`Part`/`TagsChanged` spam for other slots, and other players' hints. **A message a human
+typed is never dropped.**
 
 ## `MyText` is a content filter, not an audience filter
 

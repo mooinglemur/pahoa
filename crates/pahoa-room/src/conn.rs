@@ -39,6 +39,15 @@ pub fn non_game_verb(tags: &[String]) -> Option<&'static str> {
     None
 }
 
+/// Tags as the reference compares them for change detection.
+///
+/// `set(old_tags) != set(client.tags)` (`MultiServer.py:2025`) — so order and
+/// repeats do not count. A tracker that resends its tag list on a timer is the
+/// common case, and announcing that to the room would be pure noise.
+pub fn tag_set(tags: &[String]) -> std::collections::BTreeSet<&str> {
+    tags.iter().map(String::as_str).collect()
+}
+
 /// Render tags the way Python renders a list of strings.
 ///
 /// The join and leave announcements interpolate `client.tags` directly

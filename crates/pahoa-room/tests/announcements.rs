@@ -234,3 +234,176 @@ fn the_verb_follows_the_references_tag_priority_not_the_clients_order() {
         joins[0]
     );
 }
+
+// --- tag changes ---------------------------------------------------------
+//
+// `ConnectUpdate` is answered with nothing at all, so this announcement is the
+// only evidence a player has that their tags took. Without it a client toggling
+// `DeathLink` cannot tell a working server from one dropping its packets — the
+// report that found this said exactly that: "it never seems to update the tags".
+
+/// Retag an existing connection.
+fn retag(tags: &[&str]) -> ClientPacket {
+    ClientPacket::ConnectUpdate(cmd::ConnectUpdate {
+        items_handling: Arg::Missing,
+        tags: Some(tags.iter().map(|t| t.to_string()).collect()),
+    })
+}
+
+#[test]
+fn a_tag_change_reads_exactly_as_the_reference_prints_it() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let (mut room, observer, players) = room_with_observer().unwrap();
+    let (_, name, game) = &players[1];
+    let conn = ConnId(2);
+    let mut setup = Recorder::default();
+    room.on_connect(conn, &mut setup);
+    room.handle(conn, connect_tagged(name, game, &["AP"]), &mut setup);
+
+    let mut sink = Recorder::default();
+    room.handle(conn, retag(&["AP", "DeathLink"]), &mut sink);
+
+    // `MultiServer.py:2031-2033`, tag lists rendered as Python repr.
+    assert_eq!(
+        of_type(&sink, observer, &room, PrintJsonType::TagsChanged),
+        [format!(
+            "{name} (Team #1) has changed tags from ['AP'] to ['AP', 'DeathLink']."
+        )]
+    );
+}
+
+#[test]
+fn a_tag_change_carries_the_new_tags_as_fields_too() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // A client that acts on tag changes reads the fields, not the prose.
+    let (mut room, observer, players) = room_with_observer().unwrap();
+    let (slot, name, game) = &players[1];
+    let conn = ConnId(2);
+    let mut setup = Recorder::default();
+    room.on_connect(conn, &mut setup);
+    room.handle(conn, connect_tagged(name, game, &["AP"]), &mut setup);
+
+    let mut sink = Recorder::default();
+    room.handle(conn, retag(&["AP", "DeathLink"]), &mut sink);
+
+    let announced: Vec<&PrintJson> = sink
+        .packets_for(observer, &room)
+        .into_iter()
+        .filter_map(|p| match p {
+            ServerPacket::PrintJSON(m) if m.print_type == Some(PrintJsonType::TagsChanged) => {
+                Some(m)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].team, Some(0));
+    assert_eq!(announced[0].slot, Some(*slot));
+    assert_eq!(
+        announced[0].tags.as_deref(),
+        Some(["AP".to_string(), "DeathLink".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn reordering_the_same_tags_announces_nothing() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // `set(old_tags) != set(client.tags)` (`MultiServer.py:2025`). A tracker
+    // resending its tag list on a timer is the common case, and a line in every
+    // player's chat for it would be pure noise.
+    let (mut room, observer, players) = room_with_observer().unwrap();
+    let (_, name, game) = &players[1];
+    let conn = ConnId(2);
+    let mut setup = Recorder::default();
+    room.on_connect(conn, &mut setup);
+    room.handle(
+        conn,
+        connect_tagged(name, game, &["AP", "DeathLink"]),
+        &mut setup,
+    );
+
+    let mut sink = Recorder::default();
+    room.handle(conn, retag(&["DeathLink", "AP"]), &mut sink);
+
+    assert!(
+        of_type(&sink, observer, &room, PrintJsonType::TagsChanged).is_empty(),
+        "the set is unchanged, so nothing happened"
+    );
+    assert!(
+        sink.journal_events_of("tags_changed").is_empty(),
+        "and the journal agrees"
+    );
+
+    // The control: a real change still announces, so the comparison above is
+    // not simply refusing everything.
+    let mut sink = Recorder::default();
+    room.handle(conn, retag(&["AP"]), &mut sink);
+    assert_eq!(
+        of_type(&sink, observer, &room, PrintJsonType::TagsChanged).len(),
+        1
+    );
+}
+
+#[test]
+fn a_deathlink_taken_on_after_connecting_receives_bounces() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // The report this came from: everyone enables DeathLink in-game rather than
+    // at connect time, and the bounces never arrived. Tag *state* was applied
+    // correctly all along — this pins that, so a future change to the
+    // announcement cannot quietly take the routing with it.
+    let (mut room, _observer, players) = room_with_observer().unwrap();
+    let (_, name, game) = &players[1];
+    let conn = ConnId(2);
+    let mut setup = Recorder::default();
+    room.on_connect(conn, &mut setup);
+    room.handle(conn, connect_tagged(name, game, &["AP"]), &mut setup);
+
+    let mut before = Recorder::default();
+    room.handle(ConnId(1), deathlink(), &mut before);
+    assert!(
+        bounces(&before, conn, &room).is_empty(),
+        "untagged, so not a recipient"
+    );
+
+    let mut sink = Recorder::default();
+    room.handle(conn, retag(&["AP", "DeathLink"]), &mut sink);
+    let mut after = Recorder::default();
+    room.handle(ConnId(1), deathlink(), &mut after);
+    assert_eq!(
+        bounces(&after, conn, &room).len(),
+        1,
+        "the new tag should make it a recipient"
+    );
+}
+
+/// A `Bounce` tagged `DeathLink`, as a client sends one.
+fn deathlink() -> ClientPacket {
+    let mut raw = serde_json::Map::new();
+    raw.insert("cmd".into(), serde_json::json!("Bounce"));
+    raw.insert("tags".into(), serde_json::json!(["DeathLink"]));
+    raw.insert("data".into(), serde_json::json!({"cause": "a test"}));
+    ClientPacket::Bounce(
+        cmd::Bounce {
+            games: Arg::Missing,
+            slots: Arg::Missing,
+            tags: Arg::Ok(vec!["DeathLink".to_string()]),
+            data: serde_json::json!({"cause": "a test"}),
+        },
+        raw,
+    )
+}
+
+fn bounces<'a>(sink: &'a Recorder, conn: ConnId, room: &Room) -> Vec<&'a ServerPacket> {
+    sink.packets_for(conn, room)
+        .into_iter()
+        .filter(|p| matches!(p, ServerPacket::Echo(_)))
+        .collect()
+}
