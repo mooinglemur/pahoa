@@ -57,13 +57,19 @@ fn parse() -> Vec<Case> {
 /// The documented divergences, all of which turn a Python success into a pahoa
 /// error. Anything else is a real mismatch.
 ///
-/// Three are denial-of-service bounds — Python's unbounded integers and
-/// sequences make `pow(2, 10**9)` and `"x" * 10**9` remote memory exhaustion.
-/// The fourth is printf-style string formatting via `mod`; see [`OpError`].
+/// Two are denial-of-service bounds — Python's unbounded integers and sequences
+/// make `pow(2, 10**9)` and `"x" * 10**9` remote memory exhaustion. One is
+/// non-finite floats, which have no JSON spelling. The last is printf-style
+/// string formatting via `mod`; see [`OpError`].
+///
+/// `OpError::Overflow` is deliberately **not** here any more. It now means what
+/// Python's `OverflowError` means — an integer too large to become a float —
+/// and the reference raises in exactly the same place, so it is agreement
+/// rather than divergence.
 fn is_documented_divergence(e: &OpError) -> bool {
     matches!(
         e,
-        OpError::Overflow
+        OpError::IntegerTooWide
             | OpError::ResultTooLarge
             | OpError::NotFinite
             | OpError::StringFormatting
@@ -169,9 +175,15 @@ fn every_operation_matches_cpython() {
 
     // Pin the divergence count. Growth means a new divergence crept in without
     // being reasoned about, which is exactly what this file exists to prevent.
+    //
+    // All 83 are the one `mod`-on-a-string case. The count rose from 71 when
+    // the operand matrix gained integers wider than 64 bits — those added more
+    // `mod(str, …)` pairs, and *nothing else*: every arithmetic case involving
+    // them now agrees with CPython exactly, where the whole class used to be
+    // refused for not fitting in an `i64`.
     assert_eq!(
         divergences.len(),
-        71,
+        83,
         "divergence count changed; every entry must be a deliberate, documented decision"
     );
 }
@@ -293,10 +305,12 @@ mod traps {
 
     #[test]
     fn the_denial_of_service_shapes_are_bounded() {
-        // Python computes these happily and exhausts memory doing it.
+        // Python computes these happily and exhausts memory doing it. Each is
+        // refused from the *projected* size, before anything is allocated —
+        // which is the only way to refuse them at all.
         assert!(matches!(
             apply("pow", json!(2), &json!(1_000_000_000)),
-            Err(OpError::Overflow)
+            Err(OpError::IntegerTooWide)
         ));
         assert!(matches!(
             apply("mul", json!("x"), &json!(1_000_000_000)),
@@ -304,8 +318,78 @@ mod traps {
         ));
         assert!(matches!(
             apply("left_shift", json!(1), &json!(1_000_000)),
-            Err(OpError::Overflow)
+            Err(OpError::IntegerTooWide)
         ));
+        // Raising something to a vast power is only expensive when the base is
+        // not 0, 1 or -1, and Python answers those instantly.
+        assert_eq!(ok("pow", json!(1), json!(1_000_000_000)), json!(1));
+        assert_eq!(ok("pow", json!(-1), json!(1_000_000_000)), json!(1));
+        assert_eq!(ok("pow", json!(0), json!(1_000_000_000)), json!(0));
+    }
+
+    /// Repeating an **empty** sequence, which passes every size check.
+    ///
+    /// This hung — not slowly, indefinitely — on the one task that owns all
+    /// room state, so any authenticated client could stop a room with a single
+    /// `Set`. Zero times anything is zero, so the result-length guard saw
+    /// nothing to refuse, and the loop that appended nothing a trillion times
+    /// ran anyway. The CPython vectors found it once the operand matrix gained
+    /// integers large enough to make "slow" read as "never finishes".
+    #[test]
+    fn repeating_an_empty_sequence_does_not_loop() {
+        let start = std::time::Instant::now();
+        assert_eq!(ok("mul", json!([]), json!(1_000_000_000_000i64)), json!([]));
+        assert_eq!(ok("mul", json!(""), json!(1_000_000_000_000i64)), json!(""));
+        assert_eq!(ok("mul", json!([1]), json!(0)), json!([]));
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "took {:?}; the loop is back",
+            start.elapsed()
+        );
+    }
+
+    /// The reported bug: a world storing its location checks as a bitfield.
+    ///
+    /// Every one of these cost a player their connection when this module
+    /// bounded arithmetic to an `i64`.
+    #[test]
+    fn a_bitfield_wider_than_64_bits_can_be_operated_on() {
+        let wide = || serde_json::from_str::<Value>("2361183241434822606848").unwrap();
+
+        // Setting a bit, which is what a client does on every check.
+        assert_eq!(
+            ok("or", wide(), json!(1)).to_string(),
+            "2361183241434822606849"
+        );
+        // Clearing one, testing one, and toggling one.
+        assert_eq!(ok("and", wide(), json!(1)).to_string(), "0");
+        assert_eq!(ok("xor", wide(), wide().clone()).to_string(), "0");
+        // Building the mask in the first place.
+        assert_eq!(
+            ok("left_shift", json!(1), json!(71)).to_string(),
+            "2361183241434822606848"
+        );
+        // And arithmetic on it stays exact rather than rounding to a double.
+        assert_eq!(
+            ok("add", wide(), json!(1)).to_string(),
+            "2361183241434822606849"
+        );
+    }
+
+    /// Python's bitwise operators behave as if integers were infinitely sign
+    /// extended, so `-1 & 0xff` is `0xff` and not something width-dependent.
+    /// Sign-magnitude bignums do not do this for free.
+    #[test]
+    fn bitwise_operations_on_negative_integers_are_two_s_complement() {
+        assert_eq!(ok("and", json!(-1), json!(0xff)), json!(0xff));
+        assert_eq!(ok("or", json!(-2), json!(1)), json!(-1));
+        assert_eq!(ok("xor", json!(-1), json!(-1)), json!(0));
+        assert_eq!(ok("xor", json!(-5), json!(3)), json!(-8));
+        // `>>` is arithmetic: it rounds toward negative infinity, so it
+        // saturates at -1 rather than at 0.
+        assert_eq!(ok("right_shift", json!(-1), json!(1000)), json!(-1));
+        assert_eq!(ok("right_shift", json!(-7), json!(1)), json!(-4));
+        assert_eq!(ok("right_shift", json!(7), json!(1000)), json!(0));
     }
 
     #[test]

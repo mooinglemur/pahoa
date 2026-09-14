@@ -12,31 +12,117 @@
 //! - **Equality crosses types.** `1 == 1.0 == True`, which decides what
 //!   `update` considers a duplicate and what `remove` removes.
 
+use num_bigint::BigInt;
+use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use serde_json::Value;
 use std::cmp::Ordering;
 
 /// Python's numeric tower, narrowed to what JSON can carry.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `Int` is arbitrary precision because Python's is, and because a client
+/// depended on it: a world packing its location checks into a 71-bit bitfield
+/// had every `or` that set a bit refused, back when this held an `i64`. What
+/// is *not* unbounded is how wide a value the operations will build — see
+/// [`crate::ops::MAX_INT_BITS`].
+#[derive(Debug, Clone, PartialEq)]
 pub enum PyNum {
-    Int(i64),
+    Int(BigInt),
     Float(f64),
 }
 
 impl PyNum {
-    pub fn as_f64(self) -> f64 {
+    /// The value as an `f64`, as Python's `float()` would produce it.
+    ///
+    /// `None` exactly where Python raises `OverflowError`: an integer too large
+    /// for a double has no float value, and answering `inf` would quietly make
+    /// every such integer compare equal to every other one.
+    pub fn as_f64(&self) -> Option<f64> {
         match self {
-            PyNum::Int(i) => i as f64,
-            PyNum::Float(f) => f,
+            PyNum::Int(i) => i.to_f64().filter(|f| f.is_finite()),
+            PyNum::Float(f) => Some(*f),
         }
     }
 
-    pub fn to_value(self) -> Option<Value> {
+    pub fn to_value(&self) -> Option<Value> {
         match self {
-            PyNum::Int(i) => Some(Value::from(i)),
-            PyNum::Float(f) => py_repr_f64(f)
+            // The common case stays off the string path entirely.
+            PyNum::Int(i) => match i.to_i64() {
+                Some(small) => Some(Value::from(small)),
+                // `arbitrary_precision` is what lets this survive: the digits
+                // are kept as written rather than folded into a double.
+                None => serde_json::from_str(&i.to_string()).ok(),
+            },
+            PyNum::Float(f) => py_repr_f64(*f)
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .map(Value::Number),
         }
+    }
+}
+
+/// Compare an exact integer with a float, the way Python does.
+///
+/// Python does **not** convert the int to a double first — that would make
+/// `2**71 + 1 == 2.3611832414348226e+21` true, because the conversion rounds
+/// onto exactly that double. It compares against the float's integer part and
+/// lets the fraction break the tie, which is what this reproduces.
+fn cmp_int_f64(a: &BigInt, f: f64) -> Option<Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    if f == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if f == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    let truncated = f.trunc();
+    // Every finite double with no fractional part is an integer exactly, so
+    // this conversion is lossless in the direction that matters.
+    let whole = BigInt::from_f64(truncated)?;
+    Some(match a.cmp(&whole) {
+        Ordering::Equal => {
+            // Equal integer parts, so the fraction decides — and it carries the
+            // float's own sign, which is what makes `-2 > -2.5`.
+            let fraction = f - truncated;
+            if fraction > 0.0 {
+                Ordering::Less
+            } else if fraction < 0.0 {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        other => other,
+    })
+}
+
+/// Order two numbers as Python orders them, across the int/float divide.
+pub fn cmp_nums(x: &PyNum, y: &PyNum) -> Option<Ordering> {
+    match (x, y) {
+        (PyNum::Int(a), PyNum::Int(b)) => Some(a.cmp(b)),
+        (PyNum::Float(a), PyNum::Float(b)) => a.partial_cmp(b),
+        (PyNum::Int(a), PyNum::Float(f)) => cmp_int_f64(a, *f),
+        (PyNum::Float(f), PyNum::Int(b)) => cmp_int_f64(b, *f).map(Ordering::reverse),
+    }
+}
+
+/// Both operands as `f64`, as Python's mixed int/float arithmetic does it.
+///
+/// `None` where Python raises `OverflowError` converting the int.
+pub fn as_floats(x: &PyNum, y: &PyNum) -> Option<(f64, f64)> {
+    Some((x.as_f64()?, y.as_f64()?))
+}
+
+/// The two numbers a `Value` pair holds, if both are numbers and both are small
+/// enough to answer without allocating.
+///
+/// `py_eq` runs once per element of a list for `update` and `remove`, so the
+/// overwhelmingly common comparison — two ordinary integers — should not build
+/// two heap-allocated bignums to reach its answer.
+fn small_ints(a: &Value, b: &Value) -> Option<(i64, i64)> {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => Some((x.as_i64()?, y.as_i64()?)),
+        _ => None,
     }
 }
 
@@ -82,38 +168,32 @@ pub fn py_repr_f64(f: f64) -> Option<String> {
 pub fn as_num(v: &Value) -> Option<PyNum> {
     match v {
         // `True` is `1` in every arithmetic and bitwise context.
-        Value::Bool(b) => Some(PyNum::Int(*b as i64)),
+        Value::Bool(b) => Some(PyNum::Int(BigInt::from(*b as u8))),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Some(PyNum::Int(i))
-            } else {
-                n.as_f64().map(PyNum::Float)
+                return Some(PyNum::Int(BigInt::from(i)));
             }
+            // Wider than an `i64` and still an integer: `arbitrary_precision`
+            // kept the digits, so parse them rather than accepting the double.
+            // A float's text (`1.5`, `1e5`) fails this and falls through, which
+            // is the sorting Python's own parser does.
+            if let Ok(big) = n.to_string().parse::<BigInt>() {
+                return Some(PyNum::Int(big));
+            }
+            n.as_f64().map(PyNum::Float)
         }
         _ => None,
     }
 }
 
-/// Promote to a common type, as Python does before an arithmetic operation.
-pub fn coerce(a: PyNum, b: PyNum) -> (PyNum, PyNum) {
-    match (a, b) {
-        (PyNum::Int(_), PyNum::Float(_)) | (PyNum::Float(_), PyNum::Int(_)) => {
-            (PyNum::Float(a.as_f64()), PyNum::Float(b.as_f64()))
-        }
-        _ => (a, b),
-    }
-}
-
 /// `a % b` with Python's sign convention: the result follows the *divisor*.
-pub fn floor_mod_i64(a: i64, b: i64) -> Option<i64> {
-    if b == 0 {
+pub fn floor_mod_big(a: &BigInt, b: &BigInt) -> Option<BigInt> {
+    if b.is_zero() {
         return None;
     }
-    // wrapping_rem, because `i64::MIN % -1` overflows in Rust while Python
-    // simply answers 0.
-    let m = a.wrapping_rem(b);
-    Some(if m != 0 && ((m < 0) != (b < 0)) {
-        m.wrapping_add(b)
+    let m = a % b;
+    Some(if !m.is_zero() && (m.is_negative() != b.is_negative()) {
+        m + b
     } else {
         m
     })
@@ -140,8 +220,11 @@ pub fn floor_mod_f64(a: f64, b: f64) -> Option<f64> {
 /// Numbers compare by value regardless of int/float/bool, which is what makes
 /// `1 in [True]` true and stops `update` appending a duplicate.
 pub fn py_eq(a: &Value, b: &Value) -> bool {
+    if let Some((x, y)) = small_ints(a, b) {
+        return x == y;
+    }
     match (as_num(a), as_num(b)) {
-        (Some(x), Some(y)) => x.as_f64() == y.as_f64(),
+        (Some(x), Some(y)) => cmp_nums(&x, &y) == Some(Ordering::Equal),
         (None, None) => match (a, b) {
             (Value::String(x), Value::String(y)) => x == y,
             (Value::Null, Value::Null) => true,
@@ -162,8 +245,11 @@ pub fn py_eq(a: &Value, b: &Value) -> bool {
 ///
 /// Returns `None` for comparisons Python would refuse, such as `1 < "a"`.
 pub fn py_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+    if let Some((x, y)) = small_ints(a, b) {
+        return Some(x.cmp(&y));
+    }
     if let (Some(x), Some(y)) = (as_num(a), as_num(b)) {
-        return x.as_f64().partial_cmp(&y.as_f64());
+        return cmp_nums(&x, &y);
     }
     match (a, b) {
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
@@ -275,23 +361,98 @@ mod tests {
         assert_eq!(floor_mod_f64(-7.0, 3.0), Some(2.0));
     }
 
+    /// `BigInt::from` for the small literals these tests are written with.
+    fn int(i: i64) -> BigInt {
+        BigInt::from(i)
+    }
+
     #[test]
     fn booleans_are_integers() {
-        assert_eq!(as_num(&json!(true)), Some(PyNum::Int(1)));
-        assert_eq!(as_num(&json!(false)), Some(PyNum::Int(0)));
+        assert_eq!(as_num(&json!(true)), Some(PyNum::Int(int(1))));
+        assert_eq!(as_num(&json!(false)), Some(PyNum::Int(int(0))));
     }
 
     #[test]
     fn modulo_follows_the_divisors_sign() {
         // Python: -7 % 3 == 2, 7 % -3 == -2. Rust's % gives -1 and 1.
-        assert_eq!(floor_mod_i64(-7, 3), Some(2));
-        assert_eq!(floor_mod_i64(7, -3), Some(-2));
-        assert_eq!(floor_mod_i64(7, 3), Some(1));
-        assert_eq!(floor_mod_i64(-7, -3), Some(-1));
-        assert_eq!(floor_mod_i64(6, 3), Some(0));
-        assert_eq!(floor_mod_i64(1, 0), None);
-        // Python answers 0; Rust's `%` would overflow.
-        assert_eq!(floor_mod_i64(i64::MIN, -1), Some(0));
+        let m = |a: i64, b: i64| floor_mod_big(&int(a), &int(b));
+        assert_eq!(m(-7, 3), Some(int(2)));
+        assert_eq!(m(7, -3), Some(int(-2)));
+        assert_eq!(m(7, 3), Some(int(1)));
+        assert_eq!(m(-7, -3), Some(int(-1)));
+        assert_eq!(m(6, 3), Some(int(0)));
+        assert_eq!(m(1, 0), None);
+        // The case that needed `wrapping_rem` when this was an `i64`: nothing
+        // overflows any more, and Python's answer was 0 all along.
+        assert_eq!(m(i64::MIN, -1), Some(int(0)));
+    }
+
+    #[test]
+    fn an_integer_wider_than_i64_is_read_as_an_integer() {
+        // The reported case. Before `arbitrary_precision` this arrived as a
+        // float and every bitwise operation on it was a `TypeError`.
+        let wide: BigInt = "2361183241434822606849".parse().unwrap();
+        let v: Value = serde_json::from_str("2361183241434822606849").unwrap();
+        assert_eq!(as_num(&v), Some(PyNum::Int(wide)));
+    }
+
+    #[test]
+    fn a_float_literal_is_never_mistaken_for_a_wide_integer() {
+        // `as_num` reaches for the digit text before settling for a double, so
+        // the sorting between the two has to hold for values that only *look*
+        // integral.
+        for (text, want) in [("1.5", 1.5), ("1e5", 100000.0), ("2.0", 2.0)] {
+            let v: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(as_num(&v), Some(PyNum::Float(want)), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_exact_integer_does_not_compare_equal_to_the_double_it_rounds_to() {
+        // Python compares int against float exactly rather than converting, so
+        // `2**71 + 1` is *not* the double it would round onto. Converting first
+        // — which is what this module used to do — makes them equal, and then
+        // `remove` drops the wrong element.
+        let exact: BigInt = "2361183241434822606849".parse().unwrap();
+        let rounded = 2361183241434822606849f64;
+        assert_eq!(
+            cmp_nums(&PyNum::Int(exact.clone()), &PyNum::Float(rounded)),
+            Some(Ordering::Greater)
+        );
+        // And the double it *is* equal to still compares equal.
+        let on_the_nose: BigInt = "2361183241434822606848".parse().unwrap();
+        assert_eq!(
+            cmp_nums(&PyNum::Int(on_the_nose), &PyNum::Float(rounded)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            cmp_nums(&PyNum::Float(rounded), &PyNum::Int(exact)),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn a_fraction_breaks_the_tie_with_its_own_sign() {
+        // `-2 > -2.5` and `2 < 2.5`, both decided after the integer parts match.
+        let cases = [
+            (2, 2.5, Ordering::Less),
+            (3, 2.5, Ordering::Greater),
+            (-2, -2.5, Ordering::Greater),
+            (-3, -2.5, Ordering::Less),
+            (2, 2.0, Ordering::Equal),
+        ];
+        for (a, f, want) in cases {
+            assert_eq!(
+                cmp_nums(&PyNum::Int(int(a)), &PyNum::Float(f)),
+                Some(want),
+                "{a} vs {f}"
+            );
+        }
+        assert_eq!(cmp_nums(&PyNum::Int(int(0)), &PyNum::Float(f64::NAN)), None);
+        assert_eq!(
+            cmp_nums(&PyNum::Int(int(0)), &PyNum::Float(f64::INFINITY)),
+            Some(Ordering::Less)
+        );
     }
 
     #[test]

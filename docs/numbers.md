@@ -75,19 +75,44 @@ that round-trips — but the layout differs twice:
 CPython switches to exponential notation below `1e-4` and pads an exponent to two digits. Positive
 exponents and exponents of three digits or more already agree, since serde_json writes the `+` too.
 
-## Arithmetic is a separate question
+## Arithmetic
 
-Representation is fixed; **arithmetic is not, yet.** A value wider than `i64` now survives
-`replace`, `Get`, `SetReply`, a save and a restart exactly — but `or`, `and`, `xor`, `add` and the
-rest still refuse it, because `pahoa_datastore::pyvalue::PyNum` holds an `i64` and anything that
-does not fit reads back as a float, which is a `TypeError` in every bitwise context. So the
-silent corruption is gone and the loud refusal is not.
+`pyvalue::PyNum` holds a `num_bigint::BigInt`, so every operation is exact at any width: `or` sets
+a bit in a 71-bit field, `left_shift` builds the mask, `add` does not round. This is the one place
+in pahoa where a dependency beat hand-rolling — two's-complement bitwise operations over
+sign-magnitude limbs, floored division, and shortest-round-trip decimal rendering of a
+twenty-thousand-digit number are each a subtle algorithm, and being *exactly* right is the entire
+point.
 
-That is a strictly better place to be — a client that is told "no" can retry or report, where one
-handed a rounded bitfield cannot tell anything happened — but it is not the finished job. The
-remaining work is to give `PyNum` an arbitrary-precision integer, with a width bound: Python's
-unbounded integers make `pow(2, 10**9)` a remote memory-exhaustion path in the reference server
-that pahoa deliberately does not reproduce, and the same reasoning applies to a bignum that a
-client can grow by shifting.
+Two things needed care beyond swapping the type.
 
-`crates/pahoa-datastore/src/ops.rs` documents the bounds as they stand.
+**Comparison does not go through a double.** Python compares an int with a float exactly rather
+than converting, so `2**71 + 1` is **not** equal to the double it would round onto. Converting
+first — which this module used to do — makes them equal, and then `remove` deletes the wrong
+element of a list.
+
+**Width is bounded, and the bound is about time rather than memory.** `ops::MAX_INT_BITS` is
+65,536 bits: 8 KiB, just under 19,729 decimal digits, and 65,536 independent bit flags, an order of
+magnitude past the largest world's location count. These operations run on the actor task, the one
+thread that owns all room state, so a room that pauses for every player while somebody's tracker
+multiplies two million-bit numbers is a worse failure than a refused `Set`. `pow`, `mul` and
+`left_shift` decide from the *projected* width before allocating anything, which is the only way to
+refuse `pow(2, 10**9)` at all — the reference server simply builds the 125 MB.
+
+A value wider than the bound can still be stored and read back. Storage is verbatim passthrough and
+costs nothing; it is arithmetic that is bounded.
+
+## What the vectors say
+
+`tools/gen-datastore-vectors.py` enumerates every operation against Archipelago's own
+`modify_functions` table and records what CPython does. Its operand list now includes integers
+either side of the `i64` and `u64` boundaries and at the reported 71-bit width, which took the
+corpus from 13,122 cases to 19,602.
+
+Every one of the 83 remaining divergences is the single documented `mod`-on-a-string case. There
+are **no** width-bound divergences: every arithmetic case involving a wide integer now agrees with
+CPython exactly, where the whole class used to be refused for not fitting in an `i64`.
+
+The generator carries the same width bound, and for the same reason — with wide operands in the
+matrix, `pow(2**71, 2**71)` is one of the pairs, and CPython does not fail on it. It takes the
+machine down.

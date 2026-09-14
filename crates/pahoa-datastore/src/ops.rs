@@ -6,19 +6,13 @@
 //!
 //! Four deliberate divergences, all narrower than they sound:
 //!
-//! 1. **Bounded integers.** Python's ints are arbitrary precision, so
-//!    `pow(2, 10**9)` does not error — it hangs and exhausts memory. That is a
-//!    remote denial of service in the reference server. Arithmetic here is
-//!    checked `i64`; overflow becomes an error, which drops the connection as
-//!    Python's exception would.
-//!
-//!    **This bound is too tight, and a live room proved it.** The claim it used
-//!    to carry — that no real client sends anything wider — was wrong: a world
-//!    storing its location checks as a 71-bit bitfield hit it, and every `or`
-//!    setting a bit cost that player their connection. Values that wide now
-//!    survive being *stored* and echoed exactly (see `docs/numbers.md`), so
-//!    what is left is the arithmetic, and the fix is an arbitrary-precision
-//!    integer here with a width bound to keep `pow(2, 10**9)` refused.
+//! 1. **Bounded integer width.** Integers are arbitrary precision here as they
+//!    are in Python — a world storing its location checks as a 71-bit bitfield
+//!    reached a live room, and back when this was an `i64` every `or` that set
+//!    a bit cost that player their connection. What is bounded is how *wide* a
+//!    value these operations will build: see [`MAX_INT_BITS`]. Python has no
+//!    such bound, which is why `pow(2, 10**9)` is a remote denial of service in
+//!    the reference server rather than an error.
 //! 2. **Bounded sequences.** `"x" * 10**9` likewise. Results larger than
 //!    [`MAX_RESULT_LEN`] are refused.
 //! 3. **No non-finite floats.** Python emits bare `Infinity`/`NaN`, which are
@@ -29,6 +23,8 @@
 //!    can sanely depend on; here a failed sequence changes nothing.
 
 use crate::pyvalue::{self, PyNum};
+use num_bigint::BigInt;
+use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use thiserror::Error;
@@ -36,6 +32,24 @@ use thiserror::Error;
 /// Cap on strings and arrays produced by an operation. Generous for real use,
 /// small enough that `"x" * 10**9` cannot exhaust memory.
 pub const MAX_RESULT_LEN: usize = 16 * 1024 * 1024;
+
+/// Cap on the width of an integer these operations will accept or produce.
+///
+/// 65,536 bits is 8 KiB, a little under 19,729 decimal digits, and 65,536
+/// independent bit flags — an order of magnitude beyond the largest Archipelago
+/// world's location count, and the reported case that motivated arbitrary
+/// precision at all used 71 of them.
+///
+/// **The bound is about time, not memory.** These operations run on the actor
+/// task, the one thread that owns all room state and must never stall; a room
+/// that pauses for every client while somebody's tracker multiplies two
+/// million-bit numbers is a worse failure than a refused `Set`. At this width
+/// every operation here is microseconds. The reference server has no bound at
+/// all, which is why `pow(2, 10**9)` is a remote memory-exhaustion path in it.
+///
+/// Raising it is a one-line change if a real world ever needs more; nothing
+/// depends on the specific number.
+pub const MAX_INT_BITS: u64 = 65_536;
 
 /// Failure modes, named after the Python exception they stand in for.
 ///
@@ -68,8 +82,16 @@ pub enum OpError {
     #[error("unknown data storage operation {0:?}")]
     UnknownOperation(String),
 
-    #[error("arithmetic overflow (pahoa bounds integers to 64 bits)")]
+    /// Python's own `OverflowError`: an integer too large to become a float,
+    /// which is what mixed int/float arithmetic needs. Not a divergence — the
+    /// reference raises here too.
+    #[error("integer too large to convert to a float")]
     Overflow,
+
+    /// pahoa's width bound, which the reference does not have. See
+    /// [`MAX_INT_BITS`].
+    #[error("integer wider than {MAX_INT_BITS} bits")]
+    IntegerTooWide,
 
     #[error("result would exceed {MAX_RESULT_LEN} bytes")]
     ResultTooLarge,
@@ -125,9 +147,36 @@ fn num_value(n: PyNum) -> OpResult {
     }
 }
 
+/// Hand back an integer result, refusing one wider than [`MAX_INT_BITS`].
+fn int_value(v: BigInt) -> OpResult {
+    if v.bits() > MAX_INT_BITS {
+        return Err(OpError::IntegerTooWide);
+    }
+    PyNum::Int(v).to_value().ok_or(OpError::NotFinite)
+}
+
+/// A float result from two operands Python would have converted.
+fn float_value(x: &PyNum, y: &PyNum, f: impl FnOnce(f64, f64) -> f64) -> OpResult {
+    let (a, b) = pyvalue::as_floats(x, y).ok_or(OpError::Overflow)?;
+    num_value(PyNum::Float(f(a, b)))
+}
+
 fn need_nums(op: &'static str, a: &Value, b: &Value) -> Result<(PyNum, PyNum), OpError> {
     match (pyvalue::as_num(a), pyvalue::as_num(b)) {
-        (Some(x), Some(y)) => Ok(pyvalue::coerce(x, y)),
+        (Some(x), Some(y)) => {
+            // Checked on the way in as well as the way out. A value wider than
+            // the bound can still be *stored* and read back — storage is
+            // verbatim passthrough, and costs nothing — but it is not something
+            // the actor will do arithmetic on.
+            for n in [&x, &y] {
+                if let PyNum::Int(i) = n
+                    && i.bits() > MAX_INT_BITS
+                {
+                    return Err(OpError::IntegerTooWide);
+                }
+            }
+            Ok((x, y))
+        }
         _ => Err(OpError::TypeError {
             op,
             left: type_name(a),
@@ -190,11 +239,9 @@ fn add(current: Value, arg: &Value) -> OpResult {
         }
         _ => {
             let (x, y) = need_nums("+", &current, arg)?;
-            match (x, y) {
-                (PyNum::Int(a), PyNum::Int(b)) => {
-                    num_value(PyNum::Int(a.checked_add(b).ok_or(OpError::Overflow)?))
-                }
-                _ => num_value(PyNum::Float(x.as_f64() + y.as_f64())),
+            match (&x, &y) {
+                (PyNum::Int(a), PyNum::Int(b)) => int_value(a + b),
+                _ => float_value(&x, &y, |a, b| a + b),
             }
         }
     }
@@ -208,6 +255,13 @@ fn mul(current: Value, arg: &Value) -> OpResult {
             Some(PyNum::Int(n)) => n,
             _ => return None,
         };
+        // CPython converts the count to a `Py_ssize_t` before it looks at the
+        // sequence at all, so one that does not fit raises `OverflowError` —
+        // even where the answer is obviously empty, and even when the count is
+        // negative. `"" * 2**71` is an error; `"" * -1` is `""`.
+        let Some(n) = n.to_i64() else {
+            return Some(Err(OpError::Overflow));
+        };
         let n = n.max(0) as usize;
         Some(match seq {
             Value::String(s) => {
@@ -218,10 +272,21 @@ fn mul(current: Value, arg: &Value) -> OpResult {
                 }
             }
             Value::Array(a) => {
-                if a.len().saturating_mul(n) > MAX_RESULT_LEN {
+                let len = a.len().saturating_mul(n);
+                if len > MAX_RESULT_LEN {
                     Err(OpError::ResultTooLarge)
+                } else if len == 0 {
+                    // **An empty result needs no loop, and that is a fix rather
+                    // than a tidy-up.** `[] * 10**18` passes the length check —
+                    // zero times anything is zero — and then spun through
+                    // `0..n` appending nothing, on the one task that owns all
+                    // room state. Any authenticated client could stop a room
+                    // dead with one `Set`. Found by the CPython vectors once
+                    // the operand matrix gained integers large enough to make
+                    // the loop visibly not terminate.
+                    Ok(Value::Array(Vec::new()))
                 } else {
-                    let mut out = Vec::with_capacity(a.len() * n);
+                    let mut out = Vec::with_capacity(len);
                     for _ in 0..n {
                         out.extend(a.iter().cloned());
                     }
@@ -244,23 +309,53 @@ fn mul(current: Value, arg: &Value) -> OpResult {
     }
 
     let (x, y) = need_nums("*", &current, arg)?;
-    match (x, y) {
+    match (&x, &y) {
         (PyNum::Int(a), PyNum::Int(b)) => {
-            num_value(PyNum::Int(a.checked_mul(b).ok_or(OpError::Overflow)?))
+            // Before multiplying, not after: the product's width is the sum of
+            // the operands' and is known without building it.
+            if a.bits().saturating_add(b.bits()) > MAX_INT_BITS {
+                return Err(OpError::IntegerTooWide);
+            }
+            int_value(a * b)
         }
-        _ => num_value(PyNum::Float(x.as_f64() * y.as_f64())),
+        _ => float_value(&x, &y, |a, b| a * b),
     }
 }
 
 fn pow(current: &Value, arg: &Value) -> OpResult {
     let (x, y) = need_nums("**", current, arg)?;
-    match (x, y) {
-        (PyNum::Int(a), PyNum::Int(b)) if b >= 0 => {
-            let exp = u32::try_from(b).map_err(|_| OpError::Overflow)?;
-            num_value(PyNum::Int(a.checked_pow(exp).ok_or(OpError::Overflow)?))
+    match (&x, &y) {
+        (PyNum::Int(a), PyNum::Int(b)) if !b.is_negative() => {
+            let Some(exp) = b.to_u32() else {
+                // An exponent too large to hold, which is unbounded for every
+                // base except the three that answer instantly. CPython answers
+                // those, so refusing them would be a divergence invented for
+                // nothing. `bits()` measures the magnitude: 0 for zero, 1 for
+                // ±1. The exponent cannot be zero here, so `0**0` is not this
+                // case — it goes down the ordinary path and gives 1.
+                return match (a.bits(), a.is_negative()) {
+                    (0, _) => int_value(BigInt::ZERO),
+                    // `(-1)**n` alternates, and `b.bit(0)` is `n` being odd.
+                    (1, true) if b.bit(0) => int_value(BigInt::from(-1)),
+                    (1, _) => int_value(BigInt::from(1)),
+                    _ => Err(OpError::IntegerTooWide),
+                };
+            };
+            // `pow(2, 10**9)` is 125 MB, and the reference server allocates it
+            // rather than refusing — so this has to be decided from the *size*
+            // of the answer, before any of it exists.
+            let projected = if a.bits() <= 1 {
+                1
+            } else {
+                a.bits().saturating_mul(u64::from(exp))
+            };
+            if projected > MAX_INT_BITS {
+                return Err(OpError::IntegerTooWide);
+            }
+            int_value(a.pow(exp))
         }
         // A negative integer exponent produces a float in Python 3.
-        _ => num_value(PyNum::Float(x.as_f64().powf(y.as_f64()))),
+        _ => float_value(&x, &y, f64::powf),
     }
 }
 
@@ -269,29 +364,31 @@ fn modulo(current: &Value, arg: &Value) -> OpResult {
         return Err(OpError::StringFormatting);
     }
     let (x, y) = need_nums("%", current, arg)?;
-    match (x, y) {
-        (PyNum::Int(a), PyNum::Int(b)) => num_value(PyNum::Int(
-            pyvalue::floor_mod_i64(a, b).ok_or(OpError::ZeroDivisionError)?,
-        )),
-        _ => num_value(PyNum::Float(
-            pyvalue::floor_mod_f64(x.as_f64(), y.as_f64()).ok_or(OpError::ZeroDivisionError)?,
-        )),
+    match (&x, &y) {
+        (PyNum::Int(a), PyNum::Int(b)) => {
+            int_value(pyvalue::floor_mod_big(a, b).ok_or(OpError::ZeroDivisionError)?)
+        }
+        _ => {
+            let (a, b) = pyvalue::as_floats(&x, &y).ok_or(OpError::Overflow)?;
+            num_value(PyNum::Float(
+                pyvalue::floor_mod_f64(a, b).ok_or(OpError::ZeroDivisionError)?,
+            ))
+        }
     }
 }
 
 /// `floor`/`ceil` ignore the argument entirely and return an int.
 fn round(current: &Value, f: fn(f64) -> f64) -> OpResult {
     match pyvalue::as_num(current) {
-        Some(PyNum::Int(i)) => Ok(Value::from(i)),
+        Some(PyNum::Int(i)) => int_value(i),
         Some(PyNum::Float(x)) => {
             let r = f(x);
             if !r.is_finite() {
                 return Err(OpError::NotFinite);
             }
-            if r < i64::MIN as f64 || r > i64::MAX as f64 {
-                return Err(OpError::Overflow);
-            }
-            Ok(Value::from(r as i64))
+            // Python answers an exact int however large the double was, and a
+            // double with no fractional part converts exactly.
+            int_value(BigInt::from_f64(r).ok_or(OpError::NotFinite)?)
         }
         None => Err(OpError::TypeError {
             op: "floor/ceil",
@@ -325,13 +422,26 @@ fn pick(op: &'static str, current: Value, arg: &Value, worse: Ordering) -> OpRes
     }
 }
 
-fn bitwise(op: &'static str, current: &Value, arg: &Value, f: fn(i64, i64) -> i64) -> OpResult {
+/// `&`, `|`, `^` over Python's integers.
+///
+/// `num_bigint` gives these two's-complement semantics over a sign-magnitude
+/// representation, which is what Python's conceptually-infinite sign extension
+/// amounts to: `-1 & 0xff` is `0xff`, not something width-dependent. Getting
+/// that right by hand for negative operands is most of why this crate is a
+/// dependency rather than four hundred lines here.
+fn bitwise(
+    op: &'static str,
+    current: &Value,
+    arg: &Value,
+    f: fn(&BigInt, &BigInt) -> BigInt,
+) -> OpResult {
     // `True & True` is `True` in Python, not `1`.
     if let (Value::Bool(a), Value::Bool(b)) = (current, arg) {
-        return Ok(Value::Bool(f(*a as i64, *b as i64) != 0));
+        let r = f(&BigInt::from(*a as u8), &BigInt::from(*b as u8));
+        return Ok(Value::Bool(!r.is_zero()));
     }
-    match (pyvalue::as_num(current), pyvalue::as_num(arg)) {
-        (Some(PyNum::Int(a)), Some(PyNum::Int(b))) => Ok(Value::from(f(a, b))),
+    match need_nums(op, current, arg)? {
+        (PyNum::Int(a), PyNum::Int(b)) => int_value(f(&a, &b)),
         _ => Err(OpError::TypeError {
             op,
             left: type_name(current),
@@ -354,26 +464,33 @@ fn or(current: Value, arg: &Value) -> OpResult {
 
 fn shift(current: &Value, arg: &Value, left: bool) -> OpResult {
     let op = if left { "<<" } else { ">>" };
-    match (pyvalue::as_num(current), pyvalue::as_num(arg)) {
-        (Some(PyNum::Int(a)), Some(PyNum::Int(b))) => {
-            if b < 0 {
+    match need_nums(op, current, arg)? {
+        (PyNum::Int(a), PyNum::Int(b)) => {
+            if b.is_negative() {
                 return Err(OpError::ValueError("negative shift count".into()));
             }
-            let bits = u32::try_from(b).map_err(|_| OpError::Overflow)?;
-            let result = if left {
-                a.checked_shl(bits)
-                    .filter(|r| r >> bits == a)
-                    .ok_or(OpError::Overflow)?
-            } else {
-                // Python's >> on a negative int is an arithmetic shift, and
-                // shifting past the width saturates toward the sign.
-                if bits >= 64 {
-                    if a < 0 { -1 } else { 0 }
-                } else {
-                    a >> bits
+            if left {
+                // Decided before shifting, for the reason `pow` gives: the
+                // width of `1 << 10**9` is known from the count alone, and
+                // building it is the denial of service.
+                let count = b.to_u64().ok_or(OpError::IntegerTooWide)?;
+                if a.bits().saturating_add(count) > MAX_INT_BITS {
+                    return Err(OpError::IntegerTooWide);
                 }
-            };
-            Ok(Value::from(result))
+                int_value(a << count)
+            } else {
+                // Python's `>>` is arithmetic, so shifting past the width
+                // saturates toward the sign rather than to zero — and a count
+                // too large to hold is simply "past the width".
+                let Some(count) = b.to_u64() else {
+                    return int_value(if a.is_negative() {
+                        BigInt::from(-1)
+                    } else {
+                        BigInt::ZERO
+                    });
+                };
+                int_value(a >> count)
+            }
         }
         _ => Err(OpError::TypeError {
             op,
@@ -421,6 +538,15 @@ fn pop(current: Value, arg: &Value) -> OpResult {
                     left: "list",
                     right: type_name(arg),
                 });
+            };
+            // An index too wide for an `i64` is out of range either way, and
+            // the asymmetry below decides which way that lands.
+            let Some(i) = i.to_i64() else {
+                return if i.is_negative() {
+                    Err(OpError::IndexError)
+                } else {
+                    Ok(Value::Array(items))
+                };
             };
             // Guarded: non-negative and out of range does nothing.
             if i >= 0 && (i as usize) >= items.len() {

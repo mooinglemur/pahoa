@@ -19,3 +19,13 @@ serde_json = { version = "1", features = [
     "arbitrary_precision",
 ] }
 thiserror.workspace = true
+
+# Python's ints are unbounded and clients rely on it — a world storing its
+# location checks as a 71-bit bitfield reached a live room, and every `or` that
+# set a bit was refused. This is the one place in pahoa where a dependency beats
+# hand-rolling: two's-complement bitwise operations over sign-magnitude limbs,
+# floored division and shortest-round-trip decimal rendering of a 20,000-digit
+# number are each a subtle algorithm, and the whole point of the exercise is to
+# be *exactly* right. Pure Rust, no build script, builds static-musl.
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
+num-traits = { version = "0.2", default-features = false, features = ["std"] }

@@ -535,3 +535,80 @@ fn a_wide_value_survives_a_save_and_restore() {
     assert_eq!(retrieved.len(), 1);
     assert_eq!(retrieved[0]["keys"]["bits"].to_string(), WIDE);
 }
+
+#[test]
+fn setting_a_bit_in_a_wide_bitfield_no_longer_drops_the_socket() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // The reported symptom, end to end. `or` on a value this wide used to reach
+    // `bitwise` with a float on both sides — the digits having been lost in the
+    // JSON parser — which is a Python `TypeError`, which closes the connection.
+    // A client was disconnected for setting a bit in its own bitfield.
+    let (mut room, conn) = setup().unwrap();
+
+    let sink = feed(
+        &mut room,
+        conn,
+        &format!(
+            r#"[{{"cmd":"Set","key":"bits","want_reply":true,"default":0,
+                 "operations":[{{"operation":"or","value":{WIDE}}}]}}]"#
+        ),
+    );
+
+    assert!(
+        !sink
+            .events
+            .iter()
+            .any(|e| matches!(e, pahoa_room::Event::Close { .. })),
+        "the connection should survive: {:?}",
+        sink.events
+    );
+    let reply = echoes(&sink, conn, &room);
+    assert_eq!(reply.len(), 1, "want a SetReply");
+    assert_eq!(reply[0]["value"].to_string(), WIDE);
+}
+
+#[test]
+fn a_bitfield_can_be_built_and_read_one_bit_at_a_time() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    // What a world actually does across a session: shift a mask up to the bit
+    // it wants, or it in, and later test it back out. Every step of this was
+    // either a dropped connection or a rounded value.
+    let (mut room, conn) = setup().unwrap();
+
+    let sink = feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"f","default":0,"want_reply":true,
+             "operations":[{"operation":"or","value":1}]},
+            {"cmd":"Set","key":"mask","default":1,"want_reply":true,
+             "operations":[{"operation":"left_shift","value":70}]}]"#,
+    );
+    let replies = echoes(&sink, conn, &room);
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[1]["value"].to_string(), "1180591620717411303424");
+
+    // Set bit 70 on the field, then confirm it reads back.
+    let sink = feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"f","want_reply":true,
+             "operations":[{"operation":"or","value":1180591620717411303424}]}]"#,
+    );
+    assert_eq!(
+        echoes(&sink, conn, &room)[0]["value"].to_string(),
+        "1180591620717411303425"
+    );
+
+    let sink = feed(
+        &mut room,
+        conn,
+        r#"[{"cmd":"Set","key":"probe","default":1180591620717411303425,"want_reply":true,
+             "operations":[{"operation":"and","value":1180591620717411303424},
+                           {"operation":"right_shift","value":70}]}]"#,
+    );
+    assert_eq!(echoes(&sink, conn, &room)[0]["value"], json!(1));
+}
