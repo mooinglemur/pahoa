@@ -1,8 +1,8 @@
 //! The HTTP surface, on the same port as the game.
 //!
-//! One port serves the WebSocket feed, the readiness probe, the public room
-//! description and the admin API. `accept` decides which of the two a
-//! connection is; everything under this module handles the HTTP half.
+//! One port serves the WebSocket feed, the readiness probe, the room
+//! description, the tracker and the admin API. `accept` decides which of the
+//! two a connection is; everything under this module handles the HTTP half.
 //!
 //! **A router is something a listener is given, not something wired into one.**
 //! The scoped feed (`docs/scoped-feed.md`) is a second port serving a filtered
@@ -45,11 +45,11 @@ struct Inner {
     /// Fired by `POST /admin/v1/shutdown`, and awaited by whatever owns the
     /// process's exit.
     shutdown: Arc<tokio::sync::Notify>,
-    /// Whether the tracker answers without the bearer token.
+    /// Whether the roster surfaces answer without the bearer token.
     ///
     /// True when no admin token is configured at all (a standalone pahoa) or
     /// when an operator asked for it explicitly.
-    open_tracker: bool,
+    open_roster: bool,
     /// Rendered tracker documents, held for their TTL.
     tracker_cache: Mutex<Cached>,
     static_tracker_cache: Mutex<Cached>,
@@ -68,7 +68,7 @@ impl Router {
             started_at: SystemTime::now(),
             admin: Admin::new(config.admin_token.clone()),
             outbound_budget_bytes: config.outbound_budget_bytes,
-            open_tracker: config.admin_token.is_none() || config.open_tracker,
+            open_roster: config.admin_token.is_none() || config.open_tracker,
             shutdown,
             tracker_cache: Mutex::default(),
             static_tracker_cache: Mutex::default(),
@@ -118,13 +118,23 @@ impl Router {
             return self.admin_route(method, path, &exchange.body).await;
         }
 
+        // The roster surfaces, gated together. Three renderings of one
+        // disclosure: who is in this room. Leaving any of them open reopens
+        // what gating the others closed, and the room description was open for
+        // exactly that long.
+        if matches!(
+            path,
+            "/api/v1/room" | "/api/tracker" | "/api/static_tracker"
+        ) && let Some(refused) = self.roster_gate(request, source)
+        {
+            return refused;
+        }
+
         match (method, path) {
             ("GET", "/healthz") => Response::text(200, "ok\n"),
             ("GET", "/api/v1/room") => self.room().await,
-            ("GET", "/api/tracker") => self.gated_tracker(request, source, Which::Live).await,
-            ("GET", "/api/static_tracker") => {
-                self.gated_tracker(request, source, Which::Static).await
-            }
+            ("GET", "/api/tracker") => self.tracker(Which::Live).await,
+            ("GET", "/api/static_tracker") => self.tracker(Which::Static).await,
             // A path that exists but not for this verb is worth distinguishing
             // from one that does not exist at all.
             (_, "/healthz" | "/api/v1/room" | "/api/tracker" | "/api/static_tracker") => {
@@ -134,34 +144,38 @@ impl Router {
         }
     }
 
-    /// The tracker, behind the admin token unless this room serves it openly.
+    /// The roster gate: `Some` is the refusal to answer with, `None` means
+    /// carry on.
     ///
-    /// **Gated whenever a token exists at all, not only for race seeds.** An
-    /// open tracker on a public port lets an anonymous port scan read the
+    /// **Gated whenever a token exists at all, not only for race seeds.** A
+    /// roster readable on a public port lets an anonymous port scan read the
     /// participant list out of every room, which turns a port range into an
     /// index from "whose game is this" to an address. Rooms without a password
     /// are common and are protected today only by being unidentifiable; the
     /// gate keeps them that way. A standalone pahoa configures no token and
-    /// serves it openly, which is the deployment the CORS headers exist for;
+    /// answers openly, which is the deployment the CORS headers exist for;
     /// `open_tracker` restores that for an orchestrated room whose operator
     /// wants it. See `docs/tracker.md`.
-    async fn gated_tracker(
+    ///
+    /// The room description discloses the same roster the tracker does, in a
+    /// smaller document, so it is gated by the same rule rather than by its own.
+    fn roster_gate(
         &self,
         request: &crate::ws::handshake::HttpRequest,
         source: std::net::IpAddr,
-        which: Which,
-    ) -> Response {
-        if !self.0.open_tracker {
-            let Some(admin) = &self.0.admin else {
-                return Response::not_found();
-            };
-            if let admin::Auth::Refused(response) =
-                admin.check(request.header("Authorization"), source)
-            {
-                return response;
-            }
+    ) -> Option<Response> {
+        if self.0.open_roster {
+            return None;
         }
-        self.tracker(which).await
+        // Unreachable while `open_roster` is derived from the token's absence,
+        // and the safe answer if that ever stops being true.
+        let Some(admin) = &self.0.admin else {
+            return Some(Response::not_found());
+        };
+        match admin.check(request.header("Authorization"), source) {
+            admin::Auth::Refused(response) => Some(response),
+            admin::Auth::Ok => None,
+        }
     }
 
     /// Serve a tracker document, from the cache when one is warm.
@@ -450,8 +464,11 @@ impl Router {
         rx.await.ok()
     }
 
-    /// What a room page shows. Public, and therefore carries no secrets and no
-    /// per-slot progress: only what the seed already tells anyone holding it.
+    /// What a room page shows. Carries no secrets and no per-slot progress:
+    /// only what the seed already tells anyone holding it.
+    ///
+    /// Behind [`Router::roster_gate`] all the same, because the slot names are
+    /// a disclosure on their own: see the gate for what they give away.
     async fn room(&self) -> Response {
         let seed = &self.0.seed;
         let live = self.live().await;
@@ -500,7 +517,7 @@ impl Router {
     }
 }
 
-/// The live figures the public surface reports.
+/// The live figures the room description reports.
 #[derive(Debug, Clone, Copy)]
 pub struct Live {
     pub clients_connected: usize,

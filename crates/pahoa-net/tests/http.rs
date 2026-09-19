@@ -22,7 +22,7 @@ fn slot(name: &str, game: &str) -> NetworkSlot {
     }
 }
 
-/// A two-slot room, enough for the public description to have something in it.
+/// A two-slot room, enough for the room description to have something in it.
 fn room(options: RoomOptions) -> Room {
     let mut slot_info = BTreeMap::new();
     slot_info.insert(1, slot("Troy", "A Link to the Past"));
@@ -151,7 +151,7 @@ async fn healthz_answers_once_the_listener_is_up() {
 }
 
 #[tokio::test]
-async fn the_public_room_description_carries_no_secrets() {
+async fn the_room_description_carries_no_secrets() {
     let server = start(RoomOptions {
         password: Some("quiet-harbor-ledger".to_string()),
         server_password: Some("admin-secret".to_string()),
@@ -652,7 +652,7 @@ async fn a_slot_password_rotates_without_a_restart() {
     let server = start_with_slot_passwords().await;
 
     // Per-slot mode is in force from the start, so the room asks for one.
-    let before = get(server.local_addr, "/api/v1/room").await;
+    let before = authed(server.local_addr, "GET", "/api/v1/room", TOKEN).await;
     let before: serde_json::Value = serde_json::from_str(&split(&before).1).unwrap();
     assert_eq!(before["password"], true);
 
@@ -676,7 +676,7 @@ async fn a_slot_password_rotates_without_a_restart() {
     )
     .await;
     assert_eq!(split(&response).0, "HTTP/1.1 200 OK");
-    let cleared = get(server.local_addr, "/api/v1/room").await;
+    let cleared = authed(server.local_addr, "GET", "/api/v1/room", TOKEN).await;
     let cleared: serde_json::Value = serde_json::from_str(&split(&cleared).1).unwrap();
     assert_eq!(
         cleared["password"], true,
@@ -740,8 +740,8 @@ async fn the_scoped_port_serves_the_same_http_surface() {
         assert_eq!(status, "HTTP/1.1 200 OK", "healthz on {addr}");
         assert_eq!(body, "ok\n");
 
-        let (status, _) = split(&get(addr, "/api/v1/room").await);
-        assert_eq!(status, "HTTP/1.1 200 OK", "room on {addr}");
+        let response = authed(addr, "GET", "/api/v1/room", TOKEN).await;
+        assert_eq!(split(&response).0, "HTTP/1.1 200 OK", "room on {addr}");
 
         let response = authed(addr, "GET", "/admin/v1/status", TOKEN).await;
         assert_eq!(
@@ -918,7 +918,31 @@ async fn the_tracker_is_open_when_no_token_is_configured() {
     server.shutdown().await;
 }
 
-/// And an operator can have both: an admin API and an open tracker.
+/// The room description is a third rendering of the roster, so it is gated by
+/// the same rule. It was open while the trackers were not, which made gating
+/// them pointless: the slot names were one request away on a smaller document.
+#[tokio::test]
+async fn the_room_description_is_gated_alongside_the_tracker() {
+    let server = start_with_admin().await;
+
+    let response = get(server.local_addr, "/api/v1/room").await;
+    let (status, body) = split(&response);
+    assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+    assert!(
+        !body.contains("Troy") && !body.contains("Kai"),
+        "a refusal should not carry the roster it refused: {body}"
+    );
+
+    // And the orchestrator, which holds the token, still reads it.
+    let response = authed(server.local_addr, "GET", "/api/v1/room", TOKEN).await;
+    let (status, body) = split(&response);
+    assert_eq!(status, "HTTP/1.1 200 OK", "{response}");
+    assert!(body.contains("Troy"), "{body}");
+
+    server.shutdown().await;
+}
+
+/// And an operator can have both: an admin API and an open roster.
 #[tokio::test]
 async fn open_tracker_restores_it_alongside_a_token() {
     let server = Server::start(
@@ -933,8 +957,10 @@ async fn open_tracker_restores_it_alongside_a_token() {
     .await
     .expect("server should bind");
 
-    let (status, _) = split(&get(server.local_addr, "/api/tracker").await);
-    assert_eq!(status, "HTTP/1.1 200 OK");
+    for path in ["/api/tracker", "/api/static_tracker", "/api/v1/room"] {
+        let (status, _) = split(&get(server.local_addr, path).await);
+        assert_eq!(status, "HTTP/1.1 200 OK", "{path}");
+    }
     // The admin surface stays gated regardless.
     let (status, _) = split(&get(server.local_addr, "/admin/v1/status").await);
     assert_eq!(status, "HTTP/1.1 401 Unauthorized");

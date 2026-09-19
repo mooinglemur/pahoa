@@ -52,6 +52,12 @@ a zero that would render as 1970.
 **The tracker is gated behind the admin token whenever one is configured**, not only for
 `race_mode` seeds.
 
+**And so is `/api/v1/room`**, which shipped open. The room description is a third rendering of the
+same disclosure: a smaller document, no progress in it, but the same slot names, so gating the two
+trackers and leaving it open protected nothing. Everything below is written about the tracker
+because that is where the reasoning was worked out; it applies to all three, and the code gates
+them through one function rather than three rules that could drift apart.
+
 The reference restricts race rooms because its tracker links are handed out publicly. pahoa's
 exposure is different and, left open, worse in one specific way: the endpoints sit on a public port
 with no authentication, so an **anonymous port scan can iterate rooms and read the participant list
@@ -76,7 +82,8 @@ So the rule is about deployment rather than seed:
   the rest of the admin surface. An orchestrator that proxies the tracker server-side holds the
   token already and is unaffected.
 - **`--open-tracker`** restores the open behavior for an operator who wants both an admin API and a
-  public tracker.
+  public tracker. It opens the room description with them, for the same reason they are gated
+  together: an operator who has chosen to publish the roster has published it either way.
 
 `race_mode` is parsed and available, and deliberately does **not** enter into this: gating on the
 seed would leave the ordinary case open to the scan, and the ordinary case (an unpassworded room

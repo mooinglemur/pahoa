@@ -55,7 +55,8 @@ pub struct ServeArgs<'a> {
     /// `None` serves plaintext only.
     pub tls: Option<pahoa_net::TlsPaths>,
     pub allow_plaintext: bool,
-    /// Serve the tracker unauthenticated even with an admin token configured.
+    /// Serve the roster surfaces (both trackers and `/api/v1/room`)
+    /// unauthenticated even with an admin token configured.
     pub open_tracker: bool,
     /// A second port serving the scoped feed.
     pub filtered_port: Option<u16>,

@@ -96,10 +96,11 @@ SERVE OPTIONS
     --allow-plaintext        Keep answering ws:// after a certificate is
                              configured. Off by default: it puts the admin
                              token's traffic in the clear.
-    --open-tracker           Serve /api/tracker without the admin token even
-                             when one is configured. Without a token the tracker
-                             is open anyway; with one it is gated, so a port
-                             scan cannot find out whose game a room is.
+    --open-tracker           Serve /api/tracker and /api/v1/room without the
+                             admin token even when one is configured. Without
+                             a token they are open anyway; with one they are
+                             gated, so a port scan cannot find out whose game
+                             a room is.
 
 ROOM OPTIONS
     --password <pw>              Required from every client on connect

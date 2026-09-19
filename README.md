@@ -380,7 +380,7 @@ these are `https://`; without it, `http://`.
 | route | auth | |
 |---|---|---|
 | `GET /healthz` | none | `200` once the room is serving |
-| `GET /api/v1/room` | none | What a room page shows. No secrets |
+| `GET /api/v1/room` | see below | What a room page shows. No secrets |
 | `GET /api/tracker` | see below | The reference WebHost's tracker document |
 | `GET /api/static_tracker` | see below | The half that only changes with the seed |
 | `GET /admin/v1/status` | bearer | Clients, save state, net counters, activity, per-slot progress, the room's effective options |
@@ -403,14 +403,18 @@ renders Python and both of which pahoa reproduces deliberately. They carry
 can fetch a room directly. Rendered documents are cached for 60 seconds, and the
 static half for 300, matching the windows the reference memoizes with.
 
-**The tracker is gated behind the admin token whenever one is configured**, and
-open when none is. An unauthenticated tracker on a public port lets a port scan
-read the participant list out of every room, and that turns a port range into an
-index from a player's name to a room's address. Rooms run without a password,
-the usual case, are protected today only by being unidentifiable, so the gate
-holds whether or not the seed is a race. A standalone pahoa configures no token
-and serves it openly; `--open-tracker` restores that alongside an admin API. [docs/tracker.md](docs/tracker.md) covers the shapes,
-the CORS rules, and the live-tracker direction this is a stepping stone to.
+**The roster is gated behind the admin token whenever one is configured**, and
+open when none is. That covers `/api/tracker`, `/api/static_tracker` and
+`/api/v1/room` together: three renderings of one disclosure, who is in this
+room, so gating any of them alone would leave the others to answer the same
+question. An unauthenticated roster on a public port lets a port scan read the
+participant list out of every room, and that turns a port range into an index
+from a player's name to a room's address. Rooms run without a password, the
+usual case, are protected today only by being unidentifiable, so the gate holds
+whether or not the seed is a race. A standalone pahoa configures no token and
+answers openly; `--open-tracker` restores that alongside an admin API.
+[docs/tracker.md](docs/tracker.md) covers the shapes, the CORS rules, and the
+live-tracker direction this is a stepping stone to.
 
 **The admin surface is authenticated by `PAHOA_ADMIN_TOKEN` and nothing else.**
 It is mutating and reachable from the internet by design (driving it with

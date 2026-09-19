@@ -142,15 +142,16 @@ pub struct NetConfig {
     /// feed cannot select a tag or a path. See `docs/scoped-feed.md`.
     pub filtered_port: Option<u16>,
 
-    /// Serve the tracker without authentication even when an admin token is
-    /// configured.
+    /// Serve the roster surfaces without authentication even when an admin
+    /// token is configured: both trackers and `/api/v1/room`, which all
+    /// disclose the same slot names.
     ///
-    /// Off by default. With a token set, the tracker is gated behind it: an
-    /// open tracker on a public port lets an anonymous port scan read the
-    /// participant list out of every room, which is what a room without a
-    /// password relies on staying hidden. A standalone pahoa with no token
-    /// serves it openly regardless, which is the case the CORS headers exist
-    /// for. See `docs/tracker.md`.
+    /// Off by default. With a token set, they are gated behind it: an open
+    /// roster on a public port lets an anonymous port scan read the participant
+    /// list out of every room, which is what a room without a password relies
+    /// on staying hidden. A standalone pahoa with no token serves them openly
+    /// regardless, which is the case the CORS headers exist for. See
+    /// `docs/tracker.md`.
     pub open_tracker: bool,
 
     /// Bearer token for `/admin/v1/**`.
