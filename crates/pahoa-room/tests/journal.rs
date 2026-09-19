@@ -9,7 +9,8 @@
 mod common;
 
 use common::*;
-use pahoa_room::{Recorder, RoomOptions};
+use pahoa_proto::ServerPacket;
+use pahoa_room::{Event, Recorder, RoomOptions};
 
 const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
@@ -1186,4 +1187,133 @@ fn the_release_record_precedes_the_checks_it_explains() {
         "the release should have produced checks to sit above: {:?}",
         sink.0
     );
+}
+
+/// A `DeathLink` whose `source` is `null`, which clients do send.
+///
+/// The convention documents `source` as a string, and most clients send one —
+/// but a mod that has not resolved a player name yet sends `null`, and a bounce
+/// is relayed *verbatim* to everyone carrying the tag, so a server that choked
+/// on it would take the sender's connection with it. The whole payload is an
+/// untyped `Value` for exactly this reason: the room reads `source` only to
+/// journal it, and never requires it to be anything.
+#[test]
+fn a_link_with_a_null_or_absent_source_is_relayed_and_journaled_anyway() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+
+    // Every shape a client has any chance of putting there, including the ones
+    // that are not strings at all.
+    let cases = [
+        (
+            "an explicit null",
+            serde_json::json!({"source": null, "cause": "fell in a pit"}),
+        ),
+        (
+            "no source key",
+            serde_json::json!({"cause": "fell in a pit"}),
+        ),
+        (
+            "a number",
+            serde_json::json!({"source": 7, "cause": "fell in a pit"}),
+        ),
+        (
+            "an object",
+            serde_json::json!({"source": {"name": "x"}, "cause": "fell in a pit"}),
+        ),
+        ("an empty payload", serde_json::json!({})),
+        ("a null payload", serde_json::Value::Null),
+        (
+            "a payload that is not an object",
+            serde_json::json!("just a string"),
+        ),
+    ];
+
+    for (what, payload) in cases {
+        let mut sink = Recorder::default();
+        // Through `decode`, not by building the packet: "does this parse" is the
+        // question, and constructing a `cmd::Bounce` by hand would skip the only
+        // layer that could have refused it.
+        let frame = serde_json::to_string(&serde_json::json!([{
+            "cmd": "Bounce",
+            "slots": [slot],
+            "tags": ["DeathLink"],
+            "data": payload.clone(),
+        }]))
+        .expect("encodes");
+        let packets =
+            pahoa_proto::decode(&frame).unwrap_or_else(|e| panic!("{what} failed to decode: {e}"));
+        for packet in packets {
+            room.handle(conn, packet, &mut sink);
+        }
+
+        // The connection survives. This is the claim that matters: the sender
+        // is a player mid-game, and dropping them over a field the room only
+        // wanted for its own history would be the worst possible trade.
+        assert!(
+            !sink.events.iter().any(|e| matches!(e, Event::Close { .. })),
+            "{what} closed the connection: {:?}",
+            sink.events
+        );
+
+        // It still reaches the recipients, byte for byte as it arrived.
+        let relayed: Vec<&serde_json::Map<String, serde_json::Value>> = sink
+            .packets_for(conn, &room)
+            .into_iter()
+            .filter_map(|p| match p {
+                ServerPacket::Echo(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(relayed.len(), 1, "{what} was not relayed");
+        assert_eq!(relayed[0]["data"], payload, "{what} was altered in flight");
+
+        // And it is journaled, with `source` present as null rather than the
+        // field going missing — a reader distinguishing "no source" from "this
+        // record predates the field" needs the key to be there.
+        let deaths = sink.journal_events_of("deathlink");
+        assert_eq!(deaths.len(), 1, "{what} was not journaled");
+        let row = deaths[0].as_value();
+        assert!(row.get("source").is_some(), "{what}: source key missing");
+        assert!(
+            row["source"].is_null(),
+            "{what}: a non-string source should record as null, got {}",
+            row["source"]
+        );
+    }
+}
+
+/// The control for the case above: a *string* source still reaches the journal.
+#[test]
+fn a_string_source_is_still_recorded() {
+    if skip_without(FIXTURE) {
+        return;
+    }
+    let data = load(FIXTURE).unwrap();
+    let (slot, name, game) = first_player(&data);
+    let mut room = room_for(data, RoomOptions::default());
+    let conn = join(&mut room, 1, &name, &game, 0b111);
+
+    let mut sink = Recorder::default();
+    room.handle(
+        conn,
+        ClientPacket::Bounce(
+            cmd::Bounce {
+                games: Arg::Missing,
+                slots: Arg::Ok(vec![slot]),
+                tags: Arg::Ok(vec!["DeathLink".to_string()]),
+                data: serde_json::json!({"source": "MooingYacht", "cause": "a pit"}),
+            },
+            serde_json::Map::new(),
+        ),
+        &mut sink,
+    );
+    let deaths = sink.journal_events_of("deathlink");
+    assert_eq!(deaths.len(), 1);
+    assert_eq!(deaths[0].as_value()["source"], "MooingYacht");
 }
