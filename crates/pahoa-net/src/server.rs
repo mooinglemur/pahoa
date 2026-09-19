@@ -679,6 +679,9 @@ where
     // comparable with the outbound byte counter rather than with the inflated
     // text. Continuation frames accumulate until the message completes.
     let mut message_bytes = 0usize;
+    // Set when the read loop ended because the *writer* did, which is the one
+    // case where its handle must not be awaited again below.
+    let mut writer_done = false;
     let outcome = 'read: loop {
         // Drain whatever is already buffered before asking for more; a single
         // read commonly carries several frames.
@@ -718,10 +721,14 @@ where
             // path a keepalive timeout can take to somewhere that knows the
             // slot. An aborted or panicked writer has none, so it keeps the
             // generic wording.
-            reason = &mut writer => break match reason {
-                Ok(reason) => reason.to_string(),
-                Err(_) => "closed by the server".to_string(),
-            },
+            reason = &mut writer => {
+                // Its handle is finished now, and polling one twice panics.
+                writer_done = true;
+                break match reason {
+                    Ok(reason) => reason.to_string(),
+                    Err(_) => "closed by the server".to_string(),
+                };
+            }
             read = read_half.read_buf(&mut buf) => match read {
                 Ok(0) => break "peer closed".to_string(),
                 Ok(_) => {}
@@ -737,6 +744,26 @@ where
             reason: outcome,
         })
         .await;
+
+    // **Let the writer drain before taking the socket away from it.** The
+    // reader decides the connection is over, but the writer is the only task
+    // that can put anything on the wire, so whatever is still queued reaches
+    // the peer only if the writer gets to run. The case that matters is the
+    // closing handshake: a peer that sent a close frame is waiting for the
+    // echo `handle_event` just queued, and aborting here means it never
+    // arrives. `websockets` reports that as "no close frame received" and
+    // Archipelago's `CommonClient` logs an ordinary `/disconnect` as a lost
+    // connection.
+    //
+    // Dropping this side's sender lets the loop end by itself once the shard
+    // has dropped its own, which is the ordinary and quick case. The timeout
+    // is for the other one: a peer that has stopped reading leaves `write_all`
+    // pending forever, and waiting on that is exactly what `abort` exists to
+    // prevent. See `lagged_close.rs`.
+    drop(out_tx);
+    if !writer_done {
+        let _ = tokio::time::timeout(CLOSE_FLUSH, &mut writer).await;
+    }
     writer.abort();
     Ok(())
 }
@@ -806,6 +833,14 @@ async fn handle_event(
 
 const CLOSE_NORMAL: u16 = 1000;
 const CLOSE_GOING_AWAY: u16 = 1001;
+
+/// How long a finished connection waits for its writer to drain.
+///
+/// Generous for what it covers, which is a frame already queued reaching a
+/// socket that is ready for it, and short enough that a peer which has stopped
+/// reading is not worth waiting for. Nothing is retried after it: the frames
+/// this protects are the last ones a connection sends.
+const CLOSE_FLUSH: Duration = Duration::from_millis(250);
 
 /// Build a multi-threaded runtime sized for the container, not the host.
 pub fn build_runtime(config: &NetConfig) -> io::Result<tokio::runtime::Runtime> {
