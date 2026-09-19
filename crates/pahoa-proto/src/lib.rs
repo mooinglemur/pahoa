@@ -2,7 +2,7 @@
 //!
 //! I/O-free by design. The room state machine consumes [`ClientPacket`] and
 //! produces [`ServerPacket`] without ever touching a socket, which is what lets
-//! the whole of the game logic be tested synchronously — and lets anyone write
+//! the whole of the game logic be tested synchronously, and lets anyone write
 //! a Rust Archipelago client against this crate without pulling in a server.
 //!
 //! ```

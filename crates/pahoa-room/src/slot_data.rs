@@ -4,7 +4,7 @@
 //! untouched. It cannot go through `serde_json::Value` because a real seed
 //! carries an integer larger than `u64` (`slot_data[…]["seed_name"] ==
 //! 56979137468180783661`), and `Value`'s number type cannot hold it without
-//! enabling `arbitrary_precision` globally — which would change how *all* JSON
+//! enabling `arbitrary_precision` globally, which would change how *all* JSON
 //! in the server parses, for the sake of one field.
 //!
 //! So this writes JSON text directly and hands back a [`RawValue`], which
@@ -68,7 +68,7 @@ fn write(value: &PyObj, out: &mut String) {
 /// JSON object keys must be strings, and Python's encoder coerces them.
 ///
 /// `json.dumps({1: 2})` yields `{"1": 2}`, and `True`/`None` become `"true"`
-/// and `"null"` — not `"True"`/`"None"`.
+/// and `"null"`, not `"True"`/`"None"`.
 fn key(k: &PyObj, out: &mut String) {
     match k {
         PyObj::Str(s) => escape(s, out),
@@ -94,7 +94,7 @@ fn key(k: &PyObj, out: &mut String) {
 ///
 /// Finite floats go through the same renderer the data store uses, so the two
 /// halves of the server spell a float the same way Python does and as each
-/// other — shortest round-trip digits, exponent form below `1e-4`, exponents
+/// other: shortest round-trip digits, exponent form below `1e-4`, exponents
 /// padded to two digits.
 fn float(f: f64) -> String {
     pahoa_datastore::pyvalue::py_repr_f64(f).unwrap_or_else(|| "null".to_string())

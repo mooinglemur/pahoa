@@ -3,7 +3,7 @@
 //! # Storage
 //!
 //! Hints are kept in a `Vec` per slot, deduplicated on
-//! [`pahoa_multidata::HintIdentity`] — the subset of fields Python hashes
+//! [`pahoa_multidata::HintIdentity`], the subset of fields Python hashes
 //! (`NetUtils.py:418-419`), which excludes `found`, `item_flags` and `status`
 //! so that updating a hint's status replaces it in place rather than adding a
 //! near-duplicate.
@@ -15,12 +15,12 @@
 //! # Ordering, and why it does not match Python exactly
 //!
 //! Python builds its candidate list by iterating a `set`, so the order handed
-//! to `random.shuffle` depends on CPython's set internals — and, because
+//! to `random.shuffle` depends on CPython's set internals, and, because
 //! `Hint.__hash__` includes the `entrance` string, on per-process hash
 //! randomization. Measured across three `PYTHONHASHSEED` values: hints with
 //! empty entrances come out in a stable order (`hash("")` is 0 and is not
-//! randomized), but hints carrying entrance names — any entrance-randomized
-//! seed — come out differently every run.
+//! randomized), but hints carrying entrance names (any entrance-randomized
+//! seed) come out differently every run.
 //!
 //! So Archipelago's own hint order is not reproducible across its own restarts
 //! for ER seeds, and "match Python bit-for-bit" is not a reachable target.
@@ -42,7 +42,7 @@ use crate::room::SlotKey;
 /// Every slot's hints, in insertion order.
 ///
 /// Each list is behind an `Arc` so a save snapshot is a refcount bump rather
-/// than a deep clone — a hint carries an owned entrance string, so cloning the
+/// than a deep clone: a hint carries an owned entrance string, so cloning the
 /// lot would mean one allocation per hint per save.
 #[derive(Debug, Default)]
 pub struct HintStore {
@@ -57,8 +57,8 @@ impl HintStore {
             .unwrap_or_default()
     }
 
-    /// The list itself, shared. For callers that hold it past the borrow —
-    /// a save snapshot, or the tracker — where copying every hint's owned
+    /// The list itself, shared. For callers that hold it past the borrow
+    /// (a save snapshot, or the tracker) where copying every hint's owned
     /// entrance string would be an allocation apiece.
     pub fn shared(&self, key: SlotKey) -> Arc<Vec<Hint>> {
         self.by_slot.get(&key).cloned().unwrap_or_default()
@@ -102,7 +102,7 @@ impl HintStore {
     /// hint is held in every team's list that cares about it, and each team
     /// finds it on their own playthrough; the reference keeps them apart by
     /// rechecking one `(team, slot)` list at a time (`MultiServer.py:740-742`).
-    /// Only one team exists, so `finder.0` is always the same value — but a
+    /// Only one team exists, so `finder.0` is always the same value, but a
     /// sweep that ignored it would be wrong rather than merely unexercised.
     pub fn recheck(
         &mut self,
@@ -222,8 +222,8 @@ pub fn collect_for_item(
     let wanted = hintable_slots(data, slot);
     let mut out = Vec::new();
 
-    // Scanning the flat table is a linear pass over contiguous memory — about
-    // 13 MB at 400k locations — rather than a per-slot map lookup.
+    // Scanning the flat table is a linear pass over contiguous memory, about
+    // 13 MB at 400k locations, rather than a per-slot map lookup.
     for entry in data.locations.all() {
         if entry.item != item || !wanted.contains(&entry.receiver) {
             continue;
@@ -288,8 +288,8 @@ fn build(
 
 /// Order candidate hints and take as many as the player can afford.
 ///
-/// Reproduces `MultiServer.py:1774-1790`: shuffle, then two *stable* sorts —
-/// first preferring non-local placements, then preferring earlier spheres —
+/// Reproduces `MultiServer.py:1774-1790`: shuffle, then two *stable* sorts,
+/// first preferring non-local placements, then preferring earlier spheres,
 /// and finally take from the end of the list. The sorts must be stable and the
 /// second must not reverse ties, or the shuffle's work is undone.
 ///

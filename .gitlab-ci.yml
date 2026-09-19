@@ -1,8 +1,8 @@
 # Image build pipeline for pahoa.
 #
 # One image, unlike the lobby's five: the `Dockerfile` here is already
-# self-contained multi-stage — builder, a `verify` stage that runs
-# `pahoa selftest` and asserts a static ELF, then `FROM scratch` — so there is
+# self-contained multi-stage (builder, a `verify` stage that runs
+# `pahoa selftest` and asserts a static ELF, then `FROM scratch`) so there is
 # no separate cargo job staging a `build-result` binary next to it. The whole
 # pipeline is a test job and a buildah job.
 #
@@ -44,7 +44,7 @@ stages:
 # correct, and the Dockerfile's `verify` stage is what checks that the shipped
 # musl artifact is static and computes the right answers.
 #
-# No apt install step. pahoa links no OpenSSL, no libpq and no system zlib —
+# No apt install step. pahoa links no OpenSSL, no libpq and no system zlib:
 # the only C in the tree is vendored inside mimalloc, and the rust image
 # already has a compiler for it.
 test:
@@ -55,7 +55,7 @@ test:
     - k8s
   # The registry only, deliberately not `target/`. A cold clippy-plus-test of
   # this workspace measures 77 s on 8 CPUs, against a `target/` that is over
-  # 3 GB — zipping, uploading, downloading and unpacking that every run costs
+  # 3 GB, and zipping, uploading, downloading and unpacking that every run costs
   # more than the build it would save. Downloading crates is the part actually
   # worth keeping.
   #
@@ -83,7 +83,7 @@ test:
     - cargo clippy --workspace --all-targets -- -D warnings
     # Hermetic by design: the `.archipelago` seeds are large, not ours to
     # redistribute, and therefore gitignored symlinks. Every test that wants one
-    # skips loudly rather than passing silently — see
+    # skips loudly rather than passing silently. See
     # crates/pahoa-pickle/tests/fixtures.rs. The differential half additionally
     # needs python3 and skips without it.
     - cargo test --workspace
@@ -111,7 +111,7 @@ image-pahoa:
     KUBERNETES_MEMORY_LIMIT: "6Gi"
   # No resource override here on purpose. This job's wall time is dominated by
   # the fat-LTO link, which is single-threaded, so extra CPU buys almost
-  # nothing — a measured 8-CPU release build ran at ~1.2x parallelism over its
+  # nothing: a measured 8-CPU release build ran at ~1.2x parallelism over its
   # own wall time. It peaks around 950 MiB, comfortably inside any sane default.
   rules:
     - if: '$CI_COMMIT_BRANCH'

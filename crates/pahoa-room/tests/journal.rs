@@ -47,7 +47,7 @@ fn each_fresh_check_is_journaled_once_with_its_finder_and_receiver() {
             "journaled a location nobody checked: {record:?}"
         );
         // The receiver is the slot the item belongs to, which is routinely not
-        // the finder — that is what makes it a multiworld.
+        // the finder: that is what makes it a multiworld.
         let entry = data
             .locations
             .get(slot, record.location)
@@ -132,7 +132,7 @@ fn a_release_journals_every_remaining_location_once() {
     assert_eq!(before, seen.len(), "the release journaled a duplicate");
 }
 
-/// Nothing checked, nothing recorded — including for ids the seed does not have.
+/// Nothing checked, nothing recorded, including for ids the seed does not have.
 #[test]
 fn unknown_locations_are_not_journaled() {
     if skip_without(FIXTURE) {
@@ -163,7 +163,7 @@ fn say(text: &str) -> ClientPacket {
 /// The masking is the whole reason chat can be journaled at all.
 ///
 /// A history outlives the room and is handed to a person, so a password
-/// reappearing here is worse than one in a log — this is the test that says the
+/// reappearing here is worse than one in a log. This is the test that says the
 /// masking survives all the way to the file.
 #[test]
 fn admin_passwords_are_masked_in_the_journal_as_they_are_in_chat() {
@@ -290,7 +290,7 @@ fn a_cheated_item_is_journaled_since_no_check_can_account_for_it() {
     let row = cheats[0].as_value();
     assert_eq!(row["slot"], slot);
     assert_eq!(row["item_name"], item.as_str());
-    // And no `check` record, because there is no location behind it — which is
+    // And no `check` record, because there is no location behind it, which is
     // exactly why this event has to exist.
     assert!(sink.journal.is_empty(), "{:?}", sink.journal);
 }
@@ -451,7 +451,7 @@ fn a_connection_is_journaled_when_it_joins_and_when_it_goes() {
 /// whoever reads the history: a player who closed their client is fine, and a
 /// player whose connection kept dying is a support ticket. Only the writer task
 /// knows a peer stopped answering pings, so the reason has to travel from there
-/// to here — see `pahoa_net::actor::log_disconnect` for the other half.
+/// to here. See `pahoa_net::actor::log_disconnect` for the other half.
 #[test]
 fn how_a_connection_ended_is_recorded_with_it() {
     if skip_without(FIXTURE) {
@@ -479,7 +479,7 @@ fn how_a_connection_ended_is_recorded_with_it() {
 ///
 /// The detail is a serde message that quotes the offending value, so a
 /// malformed `Connect` would put a password into a file an organizer hands to
-/// people — the same hazard `!admin` masking exists for. The actor passes a
+/// people: the same hazard `!admin` masking exists for. The actor passes a
 /// fixed string instead; this pins that the record has somewhere to put one and
 /// that it is not the client's own text.
 #[test]
@@ -577,7 +577,7 @@ fn only_a_real_tag_change_reaches_the_journal() {
 /// **The goal, which nothing recorded before.**
 ///
 /// It is the transition an organizer is asked to adjudicate, it is
-/// irreversible, and it triggers auto-release and auto-collect — so without it
+/// irreversible, and it triggers auto-release and auto-collect, so without it
 /// the `check` records that follow have no explanation in the file. The other
 /// statuses churn as clients come and go and say nothing durable.
 #[test]
@@ -609,7 +609,7 @@ fn reaching_the_goal_is_journaled_exactly_once() {
     assert_eq!(goals[0].as_value()["player"], name.as_str());
     assert_eq!(goals[0].as_value()["game"], game.as_str());
 
-    // Goal is irreversible, so a repeat must not write a second line — a
+    // Goal is irreversible, so a repeat must not write a second line: a
     // history saying somebody finished twice is worse than one saying nothing.
     sink.clear();
     room.handle(conn, status(30), &mut sink);
@@ -626,7 +626,7 @@ fn reaching_the_goal_is_journaled_exactly_once() {
 ///
 /// Sixteen mutating verbs and no record of any of them: an operator could
 /// conjure items, force hints, rename a slot or release a world, and the
-/// history showed only consequences with no cause. It was also inconsistent —
+/// history showed only consequences with no cause. It was also inconsistent:
 /// `!getitem` typed into chat has always been a `cheat` record, so whether an
 /// action was recorded depended on which door the operator came through, in
 /// the artifact that exists to adjudicate exactly that.
@@ -708,7 +708,7 @@ fn a_read_only_admin_command_is_not_journaled() {
 /// **No admin command may put a secret in the file.**
 ///
 /// The one verb carrying a free-text value is `/option`, and the settable table
-/// deliberately holds no password — the path refuses one before it reaches the
+/// deliberately holds no password: the path refuses one before it reaches the
 /// journal. This pins that, because the record writes the value verbatim and
 /// the file outlives the room.
 #[test]
@@ -739,8 +739,8 @@ fn an_admin_option_change_cannot_write_a_password() {
 ///
 /// The server relays every `Bounce` identically, so singling out one tag was a
 /// guess about what matters rather than a property of the protocol. `TrapLink`
-/// is the same kind of thing as `DeathLink` — a discrete, player-affecting,
-/// cross-game effect — and "why did I get a trap I never earned" is exactly
+/// is the same kind of thing as `DeathLink` (a discrete, player-affecting,
+/// cross-game effect) and "why did I get a trap I never earned" is exactly
 /// what an organizer is asked, which was the one question the history could not
 /// answer.
 ///
@@ -816,7 +816,7 @@ fn a_traplink_is_journaled_beside_deathlink() {
 /// **`RingLink` is a link by name and a firehose by behavior.**
 ///
 /// It shares a running currency balance, so it fires on every coin picked up or
-/// spent — a continuous delta, not the discrete player-affecting event the
+/// spent: a continuous delta, not the discrete player-affecting event the
 /// other two are. Recording it buries a room's real history under thousands of
 /// lines that answer no question anybody asks, which is the volume rule the
 /// table already turns on; it was added for symmetry with `DeathLink` and
@@ -879,8 +879,8 @@ fn a_ringlink_is_relayed_but_never_journaled() {
 /// beside it comes from the authenticated connection the packet arrived on.
 ///
 /// A history that kept only the claim would be useless for the one question it
-/// exists to answer — an organizer asked "who killed me" needs the room's
-/// answer, not the packet's assertion — so this pins that the two are recorded
+/// exists to answer (an organizer asked "who killed me" needs the room's
+/// answer, not the packet's assertion) so this pins that the two are recorded
 /// separately and that the authoritative one is not taken from the payload.
 #[test]
 fn a_link_records_the_authenticated_sender_not_the_clients_claim() {
@@ -931,7 +931,7 @@ fn a_link_records_the_authenticated_sender_not_the_clients_claim() {
 /// **The cause, which the file never carried.**
 ///
 /// Both of these produce a flood of `check` records and announce themselves to
-/// clients, and neither wrote anything down — so a reader saw two hundred items
+/// clients, and neither wrote anything down, so a reader saw two hundred items
 /// arrive with nothing above them saying why. It was not in `chat` either: that
 /// records what a player *typed*, so an in-game `!release` left the line
 /// `player: !release` and no indication of whether the room allowed it. A
@@ -965,8 +965,8 @@ fn a_release_journals_its_cause_above_the_checks_it_causes() {
 
 /// **`items` is what moved, not the size of the world.**
 ///
-/// Computed before any of the checks are registered — which is also what lets
-/// the record precede them — so a world already half finished by hand reports
+/// Computed before any of the checks are registered (which is also what lets
+/// the record precede them) so a world already half finished by hand reports
 /// the remainder rather than its whole location count.
 #[test]
 fn a_release_counts_only_the_locations_it_actually_checks() {
@@ -1003,7 +1003,7 @@ fn a_release_counts_only_the_locations_it_actually_checks() {
 }
 
 /// **Every path, which is the whole ask.** A record on only the explicit
-/// commands would leave the most common case — goal, then the automatic sweep —
+/// commands would leave the most common case (goal, then the automatic sweep)
 /// as the one with no line.
 ///
 /// The trigger is a parameter rather than something inferred, so a new caller
@@ -1017,7 +1017,7 @@ fn every_path_into_a_release_says_which_one_it_was() {
     let data = load(FIXTURE).unwrap();
     let (slot, name, game) = first_player(&data);
 
-    // The player's own command. `release_mode` has to permit it — the default
+    // The player's own command. `release_mode` has to permit it: the default
     // is `auto`, which refuses a manual release until the slot has goaled, and
     // a refused release correctly writes nothing at all.
     let manual = RoomOptions {
@@ -1070,7 +1070,7 @@ fn every_path_into_a_release_says_which_one_it_was() {
     );
     // **Asserted non-empty first, deliberately.** `all()` over an empty
     // iterator is true, so checking only the trigger would pass just as
-    // happily if the automatic sweep wrote nothing at all — which is the
+    // happily if the automatic sweep wrote nothing at all, which is the
     // failure this test exists to catch.
     let swept = sink.journal_events_of("release");
     assert_eq!(
@@ -1142,7 +1142,7 @@ fn a_refused_release_leaves_no_record() {
 /// was worth adding: a reader seeing two hundred items arrive wants the line
 /// saying why *first*, not three thousand lines later. `Recorder` keeps checks
 /// and events in two separate lists, so their relative order is not observable
-/// through it — hence a sink that keeps one.
+/// through it, hence a sink that keeps one.
 #[test]
 fn the_release_record_precedes_the_checks_it_explains() {
     if skip_without(FIXTURE) {
@@ -1191,7 +1191,7 @@ fn the_release_record_precedes_the_checks_it_explains() {
 
 /// A `DeathLink` whose `source` is `null`, which clients do send.
 ///
-/// The convention documents `source` as a string, and most clients send one —
+/// The convention documents `source` as a string, and most clients send one,
 /// but a mod that has not resolved a player name yet sends `null`, and a bounce
 /// is relayed *verbatim* to everyone carrying the tag, so a server that choked
 /// on it would take the sender's connection with it. The whole payload is an
@@ -1274,7 +1274,7 @@ fn a_link_with_a_null_or_absent_source_is_relayed_and_journaled_anyway() {
         assert_eq!(relayed[0]["data"], payload, "{what} was altered in flight");
 
         // And it is journaled, with `source` present as null rather than the
-        // field going missing — a reader distinguishing "no source" from "this
+        // field going missing: a reader distinguishing "no source" from "this
         // record predates the field" needs the key to be there.
         let deaths = sink.journal_events_of("deathlink");
         assert_eq!(deaths.len(), 1, "{what} was not journaled");

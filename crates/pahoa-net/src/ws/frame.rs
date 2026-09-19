@@ -2,7 +2,7 @@
 //!
 //! Small and completely specified, which is why it is here rather than taken
 //! from a crate: what pahoa actually needs is the ability to hand the socket a
-//! **pre-built frame** — header and all — so one broadcast can be encoded once,
+//! **pre-built frame**, header and all, so one broadcast can be encoded once,
 //! compressed once, and written verbatim to thousands of connections. Every
 //! WebSocket library owns compression per connection, because every WebSocket
 //! library is built for point-to-point traffic.
@@ -263,7 +263,7 @@ fn unmask(payload: &mut [u8], key: [u8; 4]) {
     }
 }
 
-/// Build a complete server frame — header and payload — ready to write.
+/// Build a complete server frame, header and payload, ready to write.
 ///
 /// This is the whole point of owning this layer. The actor calls it once per
 /// broadcast and the resulting `Bytes` is cloned to every recipient, so 6000
@@ -278,8 +278,8 @@ pub fn build(opcode: OpCode, rsv1: bool, payload: &[u8]) -> Bytes {
 /// Build a complete **client** frame: masked, as RFC 6455 §5.1 requires.
 ///
 /// Only the load driver and the tests send from this side; a server never does.
-/// The key is not cryptographic — masking defends intermediaries against cache
-/// poisoning, not the payload against reading — so a counter-derived key is
+/// The key is not cryptographic (masking defends intermediaries against cache
+/// poisoning, not the payload against reading) so a counter-derived key is
 /// sufficient and avoids a dependency on a random source.
 pub fn build_masked(opcode: OpCode, rsv1: bool, payload: &[u8], key: [u8; 4]) -> Bytes {
     let mut out = BytesMut::with_capacity(MAX_SERVER_HEADER + 4 + payload.len());

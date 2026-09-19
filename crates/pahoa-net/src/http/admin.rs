@@ -4,7 +4,7 @@
 //! orchestrator on the other end: the room port is on a public load balancer,
 //! and driving the API directly with `curl` is a capability worth keeping. The
 //! consequence is that the bearer token is the only control, so three things
-//! here are not optional — a token with real entropy behind it, a comparison
+//! here are not optional: a token with real entropy behind it, a comparison
 //! that does not leak where it stopped matching, and a limit on how fast an
 //! attacker may guess.
 //!
@@ -13,8 +13,8 @@
 //! identically to everyone kept the limit from becoming an oracle. It does do
 //! that, and it also made this a remote denial of service against the room's own
 //! orchestrator: the counter was keyed on *nothing*, so eleven wrong guesses a
-//! minute from anyone who could reach the port took the whole admin surface down
-//! — locks, filters and password rotations included — for everybody. No
+//! minute from anyone who could reach the port took the whole admin surface
+//! down, locks, filters and password rotations included, for everybody. No
 //! credential needed, and re-trippable every window.
 //!
 //! Checking the token first gives that back without reopening anything. A wrong
@@ -47,7 +47,7 @@ const FLOOD_LIMIT: u32 = 500;
 ///
 /// Without a cap, the failure table is itself the attack: a spoofed source per
 /// packet would grow it without bound. Expired entries are pruned first, and a
-/// new source arriving at a full table is simply not tracked — it still counts
+/// new source arriving at a full table is simply not tracked: it still counts
 /// toward [`FLOOD_LIMIT`], which is what bounds that case.
 const MAX_SOURCES: usize = 1024;
 
@@ -308,7 +308,7 @@ mod tests {
         }
         assert_eq!(refused(a.check(Some("Bearer wrong"), them())).status, 429);
 
-        // From their own address as well as from anywhere else — holding the
+        // From their own address as well as from anywhere else: holding the
         // token is what gets a caller through, not where they are.
         assert!(allowed(a.check(Some("Bearer quiet-harbor-ledger"), us())));
         assert!(allowed(a.check(Some("Bearer quiet-harbor-ledger"), them())));

@@ -3,7 +3,7 @@
 //! **An orchestrator decides a room is really serving by matching the `serving`
 //! event's `message` and reading `addr` and `seed_name` off it.** That makes a
 //! rename, a moved field, or a stray `println!` a failure *in someone else's
-//! cluster*, announced by nothing here — the sort of break a unit test cannot
+//! cluster*, announced by nothing here: the sort of break a unit test cannot
 //! see, because it is a fact about the process's streams rather than about any
 //! function.
 //!
@@ -119,7 +119,7 @@ fn json_announces_the_room_as_a_serving_event_and_leaves_stdout_empty() {
     let (stdout, stderr) = run_until_serving(&["--log-format", "json"]);
 
     // Puna's own verification job asserts this too. It is here as well because
-    // the thing that would break it — someone adding a `println!` — lives on
+    // the thing that would break it (someone adding a `println!`) lives on
     // this side, and finding out from another repository's CI is too late.
     assert!(
         stdout.is_empty(),
@@ -254,7 +254,7 @@ fn a_fatal_error_after_logging_starts_is_a_json_event() {
 /// The other side of that split, which has to stay `eprintln!`.
 ///
 /// A `--log-format` that failed to parse cannot be reported in the format it
-/// names, so this one legitimately escapes — and being explicit about *which*
+/// names, so this one legitimately escapes, and being explicit about *which*
 /// failures do is what makes "every line after startup is JSON" a checkable
 /// claim rather than an approximate one.
 #[test]

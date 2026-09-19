@@ -2,7 +2,7 @@
 //!
 //! Two renderings of one snapshot. The JSON is for a person or an orchestrator
 //! reading a single room; the Prometheus text is for a scraper that wants the
-//! same numbers over time. Neither computes anything the other does not — they
+//! same numbers over time. Neither computes anything the other does not: they
 //! differ only in shape.
 
 use super::rfc3339;
@@ -32,8 +32,8 @@ pub struct Status {
 /// The shared key-value store clients read and write with `Get` and `Set`.
 ///
 /// **The only part of a room's state that clients grow directly.** Everything
-/// else is bounded by the seed — slots, locations, items are all fixed at
-/// generation — but data storage takes whatever a client writes, keeps it for
+/// else is bounded by the seed (slots, locations, items are all fixed at
+/// generation) but data storage takes whatever a client writes, keeps it for
 /// the life of the room, and puts all of it in every save. Until these numbers
 /// existed, a room accumulating a gigabyte of tracker state announced itself
 /// only by its saves getting slow.
@@ -56,8 +56,8 @@ pub struct DataStore {
 /// can move them mid-game. A room that has been up for a week may legitimately
 /// disagree with its own manifest.
 ///
-/// The three passwords are deliberately absent. They are the mirror image —
-/// never saved, always from configuration — and there is nothing to learn here
+/// The three passwords are deliberately absent. They are the mirror image
+/// (never saved, always from configuration) and there is nothing to learn here
 /// that `/api/v1/room`'s `password_required` does not already say without
 /// disclosing a secret to anything that reads a status document.
 #[derive(Debug, Clone)]
@@ -74,8 +74,8 @@ pub struct Options {
 
 #[derive(Debug, Clone)]
 pub struct SlotStatus {
-    /// Which team this row is. One team exists, so it is always the same value
-    /// — reported anyway, because a caller that reads it will not need changing
+    /// Which team this row is. One team exists, so it is always the same value,
+    /// reported anyway, because a caller that reads it will not need changing
     /// on the day there is more than one, and one that infers it will.
     pub team: u32,
     pub slot: u32,
@@ -125,7 +125,7 @@ pub fn document(
                 "last_save_at": crate::metrics::last_save_at().map(rfc3339),
                 "last_save_bytes": save_bytes,
                 // Seconds, like every other duration on both surfaces. This was
-                // `last_save_micros`, and puna's probe reads it by name — see
+                // `last_save_micros`, and puna's probe reads it by name. See
                 // `HANDOFF.md` in that repository.
                 "last_save_seconds": save_duration.as_secs_f64(),
                 "save_interval_seconds": live.save_interval.as_secs(),
@@ -428,8 +428,8 @@ pub fn prometheus(live: &Status, outbound_budget_bytes: usize) -> String {
         &mut out,
         "pahoa_shard_overflow_total",
         "Frames a fan-out shard's inbox had no room for. Each one disconnects whoever it was \
-         for — one connection for a directed send, every connection on that shard for a \
-         broadcast — because a lost frame would otherwise leave a client silently out of sync \
+         for (one connection for a directed send, every connection on that shard for a \
+         broadcast) because a lost frame would otherwise leave a client silently out of sync \
          with the room. Should be zero; if it is not, the shard queue is too shallow for the \
          load. Not the same as pahoa_lag_disconnects_total, which is a client that could not \
          keep up rather than a server that could not.",
@@ -508,7 +508,7 @@ fn datastore(out: &mut String, live: &Status) {
     metric_line(
         out,
         "pahoa_datastore_applied_total",
-        "Operation sequences applied, successful or not — one per Set that got as far as its \
+        "Operation sequences applied, successful or not: one per Set that got as far as its \
          operations.",
         "counter",
         apply.applied,
@@ -526,7 +526,7 @@ fn datastore(out: &mut String, live: &Status) {
         out,
         "pahoa_datastore_apply_max_seconds",
         "The worst single operation sequence since the room started. A high-water mark rather \
-         than a histogram, and it only records a stall that ENDED — an operation that never \
+         than a histogram, and it only records a stall that ENDED: an operation that never \
          returns is invisible here and shows up as pahoa_mailbox_depth climbing without \
          draining.",
         "gauge",
@@ -540,7 +540,7 @@ fn datastore(out: &mut String, live: &Status) {
             "# HELP pahoa_datastore_failures_total Operation sequences that failed, by \
              operation. Each one cost a client its connection: the reference server raises \
              here, so pahoa closes the socket to match. A client looping on a bad Set therefore \
-             reconnects forever, and this is the counter that says so — the disconnects \
+             reconnects forever, and this is the counter that says so; the disconnects \
              themselves look like ordinary churn. The label is one of the eighteen operation \
              names or \"unknown\"; a name the client invented is never used as a label.\n\
              # TYPE pahoa_datastore_failures_total counter\n",
@@ -568,13 +568,13 @@ fn datastore(out: &mut String, live: &Status) {
 /// to sum them.
 ///
 /// All three are absent rather than zero when `/proc` cannot be read, which is
-/// the honest answer on a platform that does not have it — a zero here would
+/// the honest answer on a platform that does not have it: a zero here would
 /// read as an idle room.
 fn process(out: &mut String) {
     if let Some(seconds) = crate::metrics::cpu_seconds() {
         out.push_str(
             "# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds. \
-             Process-wide: it says what this room costs a node, not which task is busy — \
+             Process-wide: it says what this room costs a node, not which task is busy; \
              pahoa_mailbox_depth is what says whether the actor is the bottleneck.\n\
              # TYPE process_cpu_seconds_total counter\n",
         );
@@ -616,7 +616,7 @@ fn http_surface(out: &mut String) {
         "# HELP pahoa_http_requests_total Requests answered on the HTTP surface, by route, \
          method and status. WebSocket upgrades are not counted here. The route is a template, \
          so a slot's filter counts under /admin/v1/slots/{slot}/filter and anything \
-         unrecognized under \"other\" — a public port gets scanned, and a label taken from the \
+         unrecognized under \"other\": a public port gets scanned, and a label taken from the \
          request line would let a scanner mint series.\n\
          # TYPE pahoa_http_requests_total counter\n",
     );
@@ -667,7 +667,7 @@ fn http_surface(out: &mut String) {
 /// The labeled series: traffic and drops broken out per slot.
 ///
 /// Kept apart from the fixed metrics above because these are the only ones
-/// whose *number of series* depends on the room. Sorted before rendering — the
+/// whose *number of series* depends on the room. Sorted before rendering: the
 /// tables behind them are hash maps, and a scrape whose line order changed
 /// every tick would be unreadable in a diff and gratuitously hard to test.
 fn by_slot(out: &mut String, live: &Status) {
@@ -677,21 +677,21 @@ fn by_slot(out: &mut String, live: &Status) {
         .map(|s| ((s.team, s.slot), (s.name.as_str(), s.game.as_str())))
         .collect();
 
-    // `player` and `game` are functions of the key — one each — so all four
+    // `player` and `game` are functions of the key (one each) so all four
     // together are one dimension of size "slots in this room" rather than the
     // product four labels look like. They travel with the slot so a dashboard
     // can group by game without joining against a roster.
     //
     // **`team` is here even though it is always `0`.** A room has one team and
     // is refused if its seed says otherwise, so this label carries no
-    // information today — but a scraper that already groups by it needs nothing
+    // information today, but a scraper that already groups by it needs nothing
     // rewritten if that ever changes, and one that assumed slot numbers were
     // unique would silently add two teams together. Cardinality is unaffected:
     // it is a function of the key like the other two.
     let identify = |key: SlotKey| {
         let (name, game) = named.get(&key).copied().unwrap_or(("", ""));
         // A spectator plays nothing, and `Archipelago` is what the datapackage
-        // already calls that — a value rather than a hole, so nothing has to
+        // already calls that: a value rather than a hole, so nothing has to
         // special-case an empty label.
         let game = if game.is_empty() { "Archipelago" } else { game };
         format!(
@@ -792,7 +792,7 @@ fn by_slot(out: &mut String, live: &Status) {
 
     // What the room produced, once per message whatever its audience. No slot
     // label: a slot's connections are not sent the same stream, so there is no
-    // honest one — see `crate::metrics::PACKETS_OUT`.
+    // honest one. See `crate::metrics::PACKETS_OUT`.
     let mut produced = crate::metrics::packets_out();
     if !produced.is_empty() {
         produced.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -863,7 +863,7 @@ fn by_slot(out: &mut String, live: &Status) {
              already done, by slot, game and kind: location_check is a location that slot had \
              already checked, hint is a CreateHints or a create_as_hint=2 LocationScouts naming a \
              hint that already existed. Neither is an error and the room handles both correctly, \
-             which is why they are otherwise invisible — a client looping on either costs the \
+             which is why they are otherwise invisible: a client looping on either costs the \
              room work and looks exactly like a busy player. Read as a ratio against \
              pahoa_packets_total for the same slot, never as a threshold: re-sending checks on \
              reconnect is how the protocol resynchronizes, so a room with churn accumulates \
@@ -908,7 +908,7 @@ fn by_slot(out: &mut String, live: &Status) {
 /// How long a label value may be before it is cut.
 ///
 /// Player names and games come out of an uploaded seed, so they are untrusted
-/// text of arbitrary length — a 4 KB name is expressible — and a label value
+/// text of arbitrary length (a 4 KB name is expressible) and a label value
 /// that size is a problem for whoever stores the scrape rather than for the
 /// room. Generous enough that no real name reaches it.
 const MAX_LABEL: usize = 128;
@@ -963,7 +963,7 @@ fn room_time(at: f64) -> SystemTime {
 /// therefore only usable in the uninterrupted run of calls it opens with.
 ///
 /// `value` is anything that can print itself, so a duration can arrive as
-/// seconds — see [`seconds`].
+/// seconds. See [`seconds`].
 fn metric_line(
     out: &mut String,
     name: &str,
@@ -979,7 +979,7 @@ fn metric_line(
 /// A duration as Prometheus wants every duration: **seconds**, decimal.
 ///
 /// Prometheus's convention is base units, and its sample type is `float64`
-/// regardless — a counter of integer microseconds is converted to a float the
+/// regardless: a counter of integer microseconds is converted to a float the
 /// moment it is ingested, so emitting one buys nothing and costs a reader the
 /// conversion. Six decimal places because that is the resolution the clock
 /// underneath actually has; `f64` holds it out past a thousand years of

@@ -1,7 +1,7 @@
 //! Save round-trips, and what a save refuses.
 //!
 //! The claim under test is that a room reconstructed from a snapshot is
-//! *indistinguishable* from the one that produced it — not merely that the
+//! *indistinguishable* from the one that produced it, not merely that the
 //! fields survive. So most of these drive the restored room and compare what it
 //! says to a client, which is the only thing that actually matters.
 
@@ -204,7 +204,7 @@ fn encoding_is_deterministic() {
     if skip_without(FIXTURE) {
         return;
     }
-    // Same state, same bytes — every map is sorted before it is written. This
+    // Same state, same bytes: every map is sorted before it is written. This
     // is what lets a save be diffed, and what keeps the round-trip tests from
     // depending on hash iteration order.
     let (room, _, _, _) = played_room();
@@ -292,8 +292,8 @@ fn options_survive_a_restart() {
 /// every start.
 ///
 /// This is the regression test for a real bug. Passwords used to be the first
-/// two fields of the saved options, and `Room::restore` assigns them wholesale
-/// — so the value on disk won, a rotated password reverted on the next restart,
+/// two fields of the saved options, and `Room::restore` assigns them
+/// wholesale, so the value on disk won, a rotated password reverted on the next restart,
 /// and the configured value was never actually in force.
 #[test]
 fn a_saved_password_never_replaces_the_configured_one() {
@@ -543,7 +543,7 @@ fn reheader(version: u8, body: &[u8]) -> Vec<u8> {
 /// **A version-1 save still loads, with no locks.**
 ///
 /// Version 2 appended `locked_slots`, and rooms saved before it must keep
-/// working — the absence has to read as "nothing was locked" rather than as a
+/// working: the absence has to read as "nothing was locked" rather than as a
 /// parse failure, so an operator upgrading mid-async notices nothing.
 #[test]
 fn a_version_one_save_loads_without_locks() {

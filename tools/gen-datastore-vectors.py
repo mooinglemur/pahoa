@@ -3,7 +3,7 @@
 
 The eighteen `Set` operations are Python expressions over client-supplied JSON.
 Hand-writing tests for 18 operations across every combination of null, bool,
-int, float, string, list and dict is hopeless — so this enumerates them against
+int, float, string, list and dict is hopeless, so this enumerates them against
 the *real* `MultiServer.modify_functions`, records what CPython does (including
 which exception it raises), and commits the result for the Rust side to replay.
 
@@ -92,7 +92,7 @@ def refuses_to_compute(op, current, arg):
 
     Not a nicety: with wide integers in the operand list, `pow(2**71, 2**71)`
     is in the matrix, and CPython will happily try to build a number with
-    3 * 10**21 bits. It does not fail — it takes the machine down, which is the
+    3 * 10**21 bits. It does not fail: it takes the machine down, which is the
     whole reason `ops::MAX_INT_BITS` exists on pahoa's side.
 
     The projected width is the same arithmetic pahoa does before allocating, so
@@ -117,7 +117,7 @@ def refuses_to_compute(op, current, arg):
 def jsonable(value):
     """Whether a Python result survives a JSON round trip unchanged.
 
-    Integers of any width are fine now — pahoa keeps their digits — up to the
+    Integers of any width are fine now (pahoa keeps their digits) up to the
     width bound above. What is still filtered out is non-finite floats, which
     Python emits as invalid JSON.
     """
@@ -165,7 +165,7 @@ def main():
                 continue
 
             # The operations mutate their container in place, so each case gets
-            # a fresh copy — otherwise earlier cases would contaminate later ones.
+            # a fresh copy. Otherwise earlier cases would contaminate later ones.
             try:
                 result = f(copy.deepcopy(current), copy.deepcopy(arg))
             except Exception as e:  # noqa: BLE001 - recording is the point

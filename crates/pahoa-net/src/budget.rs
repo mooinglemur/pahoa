@@ -7,7 +7,7 @@
 //! **unbounded server-side memory growth**. At 6000 connections and a mass
 //! release that is a room that dies rather than a client that does.
 //!
-//! Blocking the actor on a full queue would be worse still — one slow client
+//! Blocking the actor on a full queue would be worse still: one slow client
 //! would stall the whole room. So the policy is: bound the queue, and when a
 //! connection cannot keep up, **drop the connection rather than the frame**.
 //!
@@ -19,9 +19,9 @@
 //! holds items it never received, and the client cannot tell. It would silently
 //! play a different game until it happened to reconnect.
 //!
-//! Closing is safe precisely because the protocol is resumable — `Connect`
+//! Closing is safe precisely because the protocol is resumable (`Connect`
 //! resends `checked_locations` in full and replays the item queue from index
-//! zero — so a lagged client reconnects into correct state. The only thing lost
+//! zero) so a lagged client reconnects into correct state. The only thing lost
 //! is chat scrollback, which any disconnect already loses.
 //!
 //! # Bytes, not messages
@@ -46,7 +46,7 @@ use std::time::Instant;
 /// client, not about the client.** Answering a data-package fetch puts
 /// megabytes into one connection's queue in a handful of frames; faulting it
 /// for not having drained them yet blames the peer for the room's own burst,
-/// and that is precisely what dropped healthy players on a live room — clients
+/// and that is precisely what dropped healthy players on a live room: clients
 /// closed moments after connecting, having done nothing but ask which games
 /// were in it.
 ///
@@ -55,7 +55,7 @@ use std::time::Instant;
 /// thing that distinguishes them.
 ///
 /// Generous, because it has to exceed the time a single large frame takes to
-/// reach a slow peer — progress is recorded per completed frame, so a client
+/// reach a slow peer: progress is recorded per completed frame, so a client
 /// part-way through a six-megabyte write has legitimately reported nothing yet.
 /// The keepalive catches a peer that is simply gone, in a fifth of this; what
 /// this catches is the rarer case of a peer that answers pings and never reads.
@@ -68,7 +68,7 @@ const STALL_DEADLINE_MS: u64 = 120_000;
 fn now_ms() -> u64 {
     /// Offset so the counter never starts near zero.
     ///
-    /// Nothing in production depends on it — stall simply cannot be detected in
+    /// Nothing in production depends on it: stall simply cannot be detected in
     /// the first `STALL_DEADLINE_MS` of a process either way, because no
     /// connection has existed long enough to have stalled. It is here so that
     /// "this connection last moved bytes two minutes ago" is expressible at all
@@ -152,7 +152,7 @@ pub struct ConnBudget {
 impl Default for ConnBudget {
     /// **A new connection starts having just made progress**, which is not
     /// merely tidy. Deriving this would leave `last_progress` at zero, and the
-    /// stall test reads `now - last_progress` — so on a process that had been
+    /// stall test reads `now - last_progress`, so on a process that had been
     /// up longer than the deadline, every connection would be born already
     /// stalled and dropped the moment anything queued for it. The failure would
     /// arrive two minutes after each restart and look exactly like the bug this
@@ -231,7 +231,7 @@ impl Budget {
         // **The gate is "is this connection behind", not "is its queue empty".**
         // It was the second, and that made the allowance a race against the
         // writer rather than a rule: a client whose `RoomInfo` had not yet
-        // reached the socket — two kilobytes, against a 256 KiB share — was
+        // reached the socket (two kilobytes, against a 256 KiB share) was
         // refused its data package and dropped as "too slow" while completely
         // idle. Seen on a live room as a reconnect loop, every client cycling
         // every few seconds, with room-wide queued bytes never above 3.28 MiB
@@ -248,8 +248,8 @@ impl Budget {
         // it was wrong for the traffic that actually exists: a client asks for
         // the data package once per game and pipelines the requests, so the
         // second arrives while the first is still on the wire. Measured on a
-        // live 189-slot, 106-game room — 1,825 `GetDataPackage` across 130
-        // connections, one reply of 6.19 MB against a 256 KiB share — that rule
+        // live 189-slot, 106-game room (1,825 `GetDataPackage` across 130
+        // connections, one reply of 6.19 MB against a 256 KiB share) that rule
         // closed healthy clients in a reconnect loop.
         //
         // What remains is the rule that was always doing the real work: a
@@ -257,7 +257,7 @@ impl Budget {
         // larger than a share is not accumulation but a single legitimate
         // payload. `counted` excludes those, so a client that stops draining is
         // still caught by its ordinary backlog, and the room is still bounded
-        // by `limit` — the cap documented as the one that protects the process.
+        // by `limit`, the cap documented as the one that protects the process.
         // **The judgement about the client**, as opposed to the two limits
         // below it, which are judgements about memory. A connection draining
         // steadily is keeping up no matter how deep its queue; one that has
@@ -291,7 +291,7 @@ impl Budget {
         // **An empty queue is proof of health, and has to count as progress.**
         //
         // Without this the clock only advances when bytes *drain*, so a client
-        // in a quiet room — an async where a slot hears nothing for an hour —
+        // in a quiet room (an async where a slot hears nothing for an hour)
         // keeps a progress timestamp from whenever it last received something.
         // The first frame after that is admitted, because an empty queue is
         // never stalled; the *second* frame of the same burst sees a non-empty
@@ -301,8 +301,8 @@ impl Budget {
         // The keepalive does not save it: pings are written straight to the
         // socket, bypassing this queue, so they never release anything.
         //
-        // Refreshing here makes the deadline measure what it should — time
-        // since the connection was last empty *or* draining — and cannot
+        // Refreshing here makes the deadline measure what it should (time
+        // since the connection was last empty *or* draining) and cannot
         // whitewash a genuinely stuck client, whose queue never reaches zero.
         if queued == 0 {
             conn.made_progress();
@@ -321,8 +321,8 @@ impl Budget {
     /// differ in a race that a live room hits constantly. A disconnecting
     /// connection is reconciled by [`release_all`] from its shard, while its
     /// writer task may already have taken a frame off the queue and be sitting
-    /// in `write_all`. `release_all` counts that frame — it is still in
-    /// `queued` — and the writer then releases it a second time. Subtracting
+    /// in `write_all`. `release_all` counts that frame (it is still in
+    /// `queued`) and the writer then releases it a second time. Subtracting
     /// blindly wraps `usize`, and because the check is `total > limit`, a
     /// counter one byte below zero reads as sixteen exabytes: every reservation
     /// in the room fails from that moment on, for every connection, forever.
@@ -351,13 +351,13 @@ impl Budget {
         // Subtracting each release from it looks equivalent and is not: the
         // releases are mostly *ordinary* frames, so a client holding one large
         // payload watched its allowance erode by the room's feed until
-        // `counted` — which is `queued` minus the allowance — reached the whole
+        // `counted` (which is `queued` minus the allowance) reached the whole
         // size of the payload it was still being sent. Then it was refused and
         // dropped, having drained every single frame it was ever given.
         //
         // Measured: with a 340 KB compressed data package in flight, 65 feed
         // frames of 4 KB were enough. That is seconds on a live room, which is
-        // why this looked like the earlier connect-burst bug and was not — it
+        // why this looked like the earlier connect-burst bug and was not: it
         // is steady state, and it is why clients kept cycling after that fix.
         //
         // Nothing is left to erode once `queued` is zero, so clearing there is
@@ -388,13 +388,13 @@ pub type ConnHandle = Arc<ConnBudget>;
 /// The one lock every test in this binary must hold before touching the
 /// process-wide budget counters.
 ///
-/// **`QUEUED` and `PEAK` are process-wide statics**, so `cargo test` — which
-/// runs one binary's tests concurrently — shares them across modules, not just
+/// **`QUEUED` and `PEAK` are process-wide statics**, so `cargo test` (which
+/// runs one binary's tests concurrently) shares them across modules, not just
 /// within one. `budget`'s own tests were serialized; `shard`'s were not, and
 /// they build a `Budget` with a one-megabyte limit that is checked against the
 /// *global* counter. A budget test that reserved several megabytes and did not
 /// release them therefore made every shard test fail with "the room is out of
-/// outbound budget" — but only when the scheduler interleaved them that way,
+/// outbound budget", but only when the scheduler interleaved them that way,
 /// so it passed locally and failed in CI.
 ///
 /// A `tokio` mutex rather than a `std` one because the tests needing it are a
@@ -472,12 +472,12 @@ mod tests {
     }
 
     /// The allowance is for a connection that is not **behind**, which is not
-    /// the same as one that is *empty* — and the difference was a live bug.
+    /// the same as one that is *empty*, and the difference was a live bug.
     ///
     /// This test used to assert the opposite: that 512 bytes in the queue was
     /// enough to forfeit the allowance. That made admission a race against the
     /// writer rather than a rule, and on a real room it dropped healthy clients
-    /// in a loop — a `RoomInfo` not yet on the wire was enough to have the data
+    /// in a loop: a `RoomInfo` not yet on the wire was enough to have the data
     /// package refused and the client closed as "too slow" while idle.
     ///
     /// Behind means *at the share*. That is still refused, and that is the
@@ -509,7 +509,7 @@ mod tests {
     ///
     /// A client asks per game and does not wait for each reply, so the second
     /// large payload arrives while the first is still on the wire. This test
-    /// asserted the opposite — one in flight at a time — and that rule closed
+    /// asserted the opposite (one in flight at a time) and that rule closed
     /// healthy clients in a reconnect loop on a live 189-slot, 106-game room.
     #[test]
     fn pipelined_large_payloads_are_all_admitted() {
@@ -532,8 +532,8 @@ mod tests {
     /// **A client that drains everything it is given is never refused.**
     ///
     /// The steady-state failure, and the one that survived two earlier fixes.
-    /// A connection holding one large payload — a compressed data package, say
-    /// — also receives the room's ordinary feed, and each of those releases
+    /// A connection holding one large payload (a compressed data package, say)
+    /// also receives the room's ordinary feed, and each of those releases
     /// used to draw down the oversize allowance. `counted` is `queued` minus
     /// that allowance, so it climbed by 4 KB per feed frame until it reached
     /// the share and the client was dropped, having kept up with every byte.
@@ -541,7 +541,7 @@ mod tests {
     /// Measured on a live room: 65 frames of 4 KB was enough. Seconds of play.
     ///
     /// The loop runs far past that, and the assertion is about the client's
-    /// *behavior* — it drained everything — rather than about any counter, so
+    /// *behavior* (it drained everything) rather than about any counter, so
     /// it holds however the accounting is rearranged underneath.
     #[test]
     fn a_client_draining_everything_is_never_refused_behind_a_large_payload() {
@@ -577,8 +577,8 @@ mod tests {
     /// **A data package fetched in pieces must not drop the client.**
     ///
     /// The failure that survived three fixes, because none of them touched this
-    /// path. Clients ask for the data package per game — 1,825 requests across
-    /// 130 connections on the live room, about fourteen each — and each reply
+    /// path. Clients ask for the data package per game (1,825 requests across
+    /// 130 connections on the live room, about fourteen each) and each reply
     /// is its own frame. None is individually larger than the share, so none
     /// takes the oversize allowance; they simply add up, pass 256 KiB, and the
     /// client is dropped moments after connecting having asked for nothing but
@@ -595,7 +595,7 @@ mod tests {
         let conn = ConnBudget::default();
 
         assert!(budget.reserve(&conn, 9_058), "RoomInfo");
-        // Fourteen replies at the *compressed* size the wire actually carries —
+        // Fourteen replies at the *compressed* size the wire actually carries:
         // 340 KB of package split fourteen ways. **Each is comfortably under
         // even the old 256 KiB share**, which is the whole point: none of them
         // is individually oversize, so none takes the allowance and every one
@@ -651,7 +651,7 @@ mod tests {
 
     /// **Depth is not the test; progress is.**
     ///
-    /// A client handed megabytes in a burst — a data-package fetch — and
+    /// A client handed megabytes in a burst (a data-package fetch) and
     /// draining every one of them is keeping up, however deep the queue got.
     /// Judging it on depth blames the peer for the room's own burst.
     #[test]
@@ -674,8 +674,8 @@ mod tests {
     /// is what keeps the deadline from being a way to hoard the room's budget.
     ///
     /// The keepalive catches a peer that is simply gone. This catches the
-    /// rarer one that answers pings — they are written straight to the socket,
-    /// bypassing this queue — while never draining a byte of what it asked for.
+    /// rarer one that answers pings (they are written straight to the socket,
+    /// bypassing this queue) while never draining a byte of what it asked for.
     #[test]
     fn a_client_that_has_stopped_draining_is_refused_however_shallow_its_queue() {
         let _guard = exclusive();
@@ -783,7 +783,7 @@ mod tests {
     #[test]
     fn the_global_ceiling_holds_even_when_each_connection_is_within_its_share() {
         let _guard = exclusive();
-        // Ten connections each entitled to 1 KiB, but only 4 KiB in total —
+        // Ten connections each entitled to 1 KiB, but only 4 KiB in total:
         // the shape that matters at 6000 connections, where per-connection
         // shares vastly oversubscribe the process.
         let budget = Budget::new(4096, 1024);
@@ -824,7 +824,7 @@ mod tests {
     /// `total > limit`, *every* reservation in the room failed from then on:
     /// all clients dropped in the same instant, every reconnect dropped on
     /// arrival, and the process held no memory to show for it. Seen live as
-    /// `pahoa_outbound_queued_bytes 18446744073709548046` — 3570 bytes below
+    /// `pahoa_outbound_queued_bytes 18446744073709548046`: 3570 bytes below
     /// zero was enough to end the room.
     #[test]
     fn releasing_a_frame_a_disconnect_already_reconciled_does_not_wrap() {
@@ -840,7 +840,7 @@ mod tests {
         assert_eq!(queued_bytes(), 0);
 
         // The writer's `write_all` returns and it releases the frame it had
-        // already popped — the same bytes, a second time.
+        // already popped: the same bytes, a second time.
         Budget::release(&conn, 3570);
 
         assert_eq!(
@@ -907,7 +907,7 @@ mod tests {
     ///
     /// Every real client requests the data package on connect when its cached
     /// checksums miss, and the reply is megabytes against a 256 KiB share. The
-    /// allowance exists for exactly that — but gated on an empty queue it only
+    /// allowance exists for exactly that, but gated on an empty queue it only
     /// fired if the writer had already drained the `RoomInfo` sent moments
     /// before, which on a busy room it usually had not.
     ///
@@ -933,7 +933,7 @@ mod tests {
     /// whole population the moment it says something.**
     ///
     /// This is the failure the stall deadline introduced and very nearly
-    /// shipped. Nothing queued means no stall — that part was right — but the
+    /// shipped. Nothing queued means no stall (that part was right) but the
     /// progress clock only advanced when bytes *drained*, so a slot that heard
     /// nothing for an hour kept an hour-old timestamp. The first frame of the
     /// next burst was admitted, because the queue was empty; the **second** saw

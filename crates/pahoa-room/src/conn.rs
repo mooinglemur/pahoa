@@ -1,6 +1,6 @@
 //! Per-connection state.
 //!
-//! A slot may have several connections at once — that is how co-op works — so
+//! A slot may have several connections at once (that is how co-op works) so
 //! connections and slots are separate concepts throughout.
 
 use pahoa_proto::{ItemsHandling, Version};
@@ -41,7 +41,7 @@ pub fn non_game_verb(tags: &[String]) -> Option<&'static str> {
 
 /// Tags as the reference compares them for change detection.
 ///
-/// `set(old_tags) != set(client.tags)` (`MultiServer.py:2025`) — so order and
+/// `set(old_tags) != set(client.tags)` (`MultiServer.py:2025`), so order and
 /// repeats do not count. A tracker that resends its tag list on a timer is the
 /// common case, and announcing that to the room would be pure noise.
 pub fn tag_set(tags: &[String]) -> std::collections::BTreeSet<&str> {
@@ -52,7 +52,7 @@ pub fn tag_set(tags: &[String]) -> std::collections::BTreeSet<&str> {
 ///
 /// The join and leave announcements interpolate `client.tags` directly
 /// (`MultiServer.py:975`, `:1005`), so the wire text carries a Python list
-/// repr — `['Tracker', 'DeathLink']`, single-quoted, comma-space separated.
+/// repr: `['Tracker', 'DeathLink']`, single-quoted, comma-space separated.
 /// Clients display this verbatim, which makes it observable formatting rather
 /// than an internal detail.
 pub fn python_list_repr(items: &[String]) -> String {
@@ -102,7 +102,7 @@ fn python_str_repr(s: &str) -> String {
 /// How much of the room's feed a connection wants.
 ///
 /// See `docs/scoped-feed.md`. The distinction that matters: `NoText` is an
-/// *audience* filter — it decides who a message goes to — while this is a
+/// *audience* filter (it decides who a message goes to) while this is a
 /// *content* filter, deciding which subset of a feed one connection receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FeedPolicy {
@@ -136,7 +136,7 @@ pub struct Client {
     /// How much of the feed this connection receives.
     ///
     /// **Sticky, and deliberately not derived from `tags`.** `ConnectUpdate`
-    /// calls [`Client::apply_tags`], which *replaces* the tag vector — and
+    /// calls [`Client::apply_tags`], which *replaces* the tag vector, and
     /// trackers send `ConnectUpdate` routinely, to add `DeathLink` for
     /// instance. A policy living in the tags would therefore be wiped
     /// mid-session and the connection would silently fall back to the full

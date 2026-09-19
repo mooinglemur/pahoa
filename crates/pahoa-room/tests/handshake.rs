@@ -215,7 +215,7 @@ fn a_per_slot_password_gates_only_its_own_slot() {
     );
 
     // A slot *missing* from the map is refused, not admitted. The map says who
-    // holds a key, not who needs one — so an incomplete map locks a slot out
+    // holds a key, not who needs one, so an incomplete map locks a slot out
     // rather than leaving it the one open door in the room.
     let (other_slot, other_name, other_game) = data
         .player_slots()
@@ -480,7 +480,7 @@ fn compatibility_zero_demands_an_exact_version_match() {
     //
     // **Derived from `SERVER_VERSION` rather than written out.** It was
     // hardcoded as 0.6.7, and the day the room started advertising 0.6.7 that
-    // became a version which *matches* — so the client was accepted and the
+    // became a version which *matches*, so the client was accepted and the
     // test failed on the assertion rather than on anything being wrong. One
     // above the server is always a mismatch and always above the floor.
     let server = pahoa_room::SERVER_VERSION;

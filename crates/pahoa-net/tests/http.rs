@@ -1,6 +1,6 @@
 //! The HTTP surface, over real sockets, on the same port as the game.
 //!
-//! Synthetic multidata rather than a fixture, so these run in CI — see
+//! Synthetic multidata rather than a fixture, so these run in CI. See
 //! `tests/tls.rs` for the same reasoning.
 
 use pahoa_multidata::{LocationStore, MultiData, NetworkSlot, SlotType, Version};
@@ -110,7 +110,7 @@ async fn authed(addr: SocketAddr, method: &str, path: &str, token: &str) -> Stri
     .await
 }
 
-/// One request, one response, connection closed — which is what every response
+/// One request, one response, connection closed, which is what every response
 /// on this surface does.
 async fn request(addr: SocketAddr, raw: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.expect("connects");
@@ -317,7 +317,7 @@ async fn status_reports_the_room() {
 
     let slots = json["slots"].as_array().expect("slots");
     assert_eq!(slots.len(), 2);
-    // Every row names its team. One team exists, so this is always 0 — reported
+    // Every row names its team. One team exists, so this is always 0, reported
     // anyway, because a caller that reads it needs no change on the day there
     // is more than one, and a caller that infers it does.
     assert_eq!(slots[0]["team"], 0);
@@ -334,7 +334,7 @@ async fn status_reports_the_room() {
 
     // Two activity questions, and an orchestrator needs both: "is this socket
     // set alive" and "is anyone still playing". A room nobody has played
-    // reports the second as null — not as a zero or an epoch, because puna
+    // reports the second as null, not as a zero or an epoch, because puna
     // reaps idle rooms on it and must be able to tell "nobody has checked
     // anything yet" from "somebody checked in 1970".
     let activity = &json["activity"];
@@ -438,7 +438,7 @@ async fn metrics_are_prometheus_text() {
         assert!(body.contains(expected), "missing {expected:?} in:\n{body}");
     }
 
-    // A start time before 2001 is a misparse rather than a clock — the failure
+    // A start time before 2001 is a misparse rather than a clock: the failure
     // mode of reading the wrong field, or of `btime` not resolving.
     let start: f64 = body
         .lines()
@@ -449,7 +449,7 @@ async fn metrics_are_prometheus_text() {
 
     // Every line is either a comment or `name[{labels}] value`. Split on the
     // *last* space rather than every one: a label value is quoted text out of a
-    // seed and routinely contains spaces — "A Link to the Past" is a game name,
+    // seed and routinely contains spaces: "A Link to the Past" is a game name,
     // not a malformed line.
     for line in body
         .lines()
@@ -473,7 +473,7 @@ async fn metrics_are_prometheus_text() {
 ///
 /// Its own test because it has to do some work first: the counter is quantized
 /// to the 10 ms clock tick, so a test binary that has barely started renders an
-/// exact and entirely correct `0.00` — which is why this burns a few ticks
+/// exact and entirely correct `0.00`, which is why this burns a few ticks
 /// rather than asserting on whatever happened to have accumulated.
 #[tokio::test]
 async fn cpu_time_is_reported_once_there_is_any() {
@@ -497,7 +497,7 @@ async fn cpu_time_is_reported_once_there_is_any() {
 }
 
 /// `POST /admin/v1/shutdown` answers before quiescing, then takes the same exit
-/// path SIGTERM does — which the owner of the process observes by awaiting
+/// path SIGTERM does, which the owner of the process observes by awaiting
 /// `shutdown_requested`.
 #[tokio::test]
 async fn shutdown_answers_and_then_asks_the_process_to_stop() {
@@ -536,7 +536,7 @@ async fn shutdown_answers_even_with_no_one_waiting() {
 /// already going away.
 ///
 /// The listener going away entirely is why the router's `503` path is only for
-/// the narrower race where the actor stops while the listener is still up — a
+/// the narrower race where the actor stops while the listener is still up: a
 /// closed port is the better answer, and this is what proves it happens.
 #[tokio::test]
 async fn the_port_stops_accepting_once_the_room_has_stopped() {
@@ -603,7 +603,7 @@ async fn a_typed_command_runs_against_the_room() {
 
 /// A malformed request is the caller's fault and gets a `400`. A command the
 /// *room* refuses was understood and answered, so it is a `200` carrying
-/// `ok: false` — the caller renders `output` either way.
+/// `ok: false`, and the caller renders `output` either way.
 #[tokio::test]
 async fn a_malformed_command_and_a_refused_one_are_different_answers() {
     let server = start_with_admin().await;
@@ -667,7 +667,7 @@ async fn a_slot_password_rotates_without_a_restart() {
     assert!(!body.contains("quiet-harbor-ledger"), "echoed: {body}");
 
     // Clearing a slot's password does **not** open it. Per-slot mode fails
-    // closed, so removing the key bars the slot — which is the useful answer
+    // closed, so removing the key bars the slot, which is the useful answer
     // during live abuse, and the opposite of what a naive reading expects.
     let response = post(
         server.local_addr,
@@ -754,7 +754,7 @@ async fn the_scoped_port_serves_the_same_http_surface() {
     server.shutdown().await;
 }
 
-/// A WebSocket client is counted the same whichever port it used — the ports
+/// A WebSocket client is counted the same whichever port it used: the ports
 /// differ in what they send, not in what they are.
 #[tokio::test]
 async fn the_scoped_port_accepts_websocket_clients() {
@@ -908,7 +908,7 @@ async fn the_tracker_is_gated_when_an_admin_token_is_configured() {
     server.shutdown().await;
 }
 
-/// A standalone pahoa configures no token, and serves the tracker openly —
+/// A standalone pahoa configures no token, and serves the tracker openly,
 /// which is the deployment the CORS headers exist for.
 #[tokio::test]
 async fn the_tracker_is_open_when_no_token_is_configured() {
@@ -1080,7 +1080,7 @@ async fn filters_are_read_and_edited_as_a_resource() {
 /// **`PUT []` and `DELETE` are different things on a slot**, and the difference
 /// is the only way to exempt one slot from the room's filter.
 ///
-/// They were the same at first — empty meant delete — which left full exemption
+/// They were the same at first (empty meant delete) which left full exemption
 /// expressible only as an inert rule. `PUT []` now sets the resource to empty
 /// (inherit nothing); `DELETE` removes it (inherit again).
 #[tokio::test]
@@ -1113,7 +1113,7 @@ async fn an_empty_slot_filter_differs_from_no_slot_filter() {
         "an inherited filter and an empty one look identical without this"
     );
 
-    // An explicit empty one is the slot's own, and inherits nothing — so
+    // An explicit empty one is the slot's own, and inherits nothing, so
     // `effective` goes empty too, which is the exemption.
     let (_, json) = filter_call(addr, "PUT", slot, "[]").await;
     assert_eq!(json["inherited"], serde_json::json!(false));
@@ -1355,7 +1355,7 @@ async fn packets_are_counted_by_slot_and_command() {
         "and must not also be attributed to the slot it created:\n{body}"
     );
 
-    // A pair nobody has sent has no series at all — the sparseness that keeps a
+    // A pair nobody has sent has no series at all: the sparseness that keeps a
     // 2000-slot room's exposition from being mostly zeroes.
     assert!(
         !body.contains(r#"cmd="SetNotify""#),
@@ -1471,7 +1471,7 @@ async fn a_hostile_slot_name_cannot_break_out_of_its_label() {
         body.contains(r#"slot="3""#),
         "the row has to be rendered for this test to prove anything:\n{body}"
     );
-    // The name still appears — inside its label, quote escaped, which is the
+    // The name still appears, inside its label, quote escaped, which is the
     // point. What must not happen is any of it becoming a line of its own.
     assert!(
         body.contains(r#"player="a\"} 999 pahoa_owned{x=""#),
@@ -1534,7 +1534,7 @@ async fn start_with_datastore() -> Server {
 ///
 /// It reads `status.save.*` field by field and answers `None` for anything it
 /// cannot find or cannot read as the type it expects, so a rename here does not
-/// break puna — it makes puna quietly record nothing, forever. That is the
+/// break puna: it makes puna quietly record nothing, forever. That is the
 /// failure this pins: `last_save_micros` became `last_save_seconds` and changed
 /// from an integer to a float, and nothing on either side would have said so.
 /// See `HANDOFF.md` in the puna repository.
@@ -1595,7 +1595,7 @@ async fn the_status_document_reports_the_data_store() {
     // Counters are process-global and shared with every other test in this
     // binary, so these are floors rather than equalities.
     assert!(store["applied"].as_u64().unwrap() >= 2, "{store}");
-    // Seconds, and a float — the units question the whole surface answers the
+    // Seconds, and a float: the units question the whole surface answers the
     // same way. `as_f64` on an integer JSON number succeeds, so this asserts
     // the name and the unit; the type is pinned by `is_f64`.
     assert!(store["apply_seconds"].is_f64(), "{store}");

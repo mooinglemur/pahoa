@@ -36,7 +36,7 @@ server`, `protocol error`, `no pong within the keepalive timeout`, or the
 wording of whatever close the room ordered. Treat the set as open.
 
 The keepalive one is the reason this field exists. That timeout is noticed by a
-connection's writer task, which knows a `ConnId` and nothing else — so the log
+connection's writer task, which knows a `ConnId` and nothing else, so the log
 line for it names no slot and never could. The actor, which does know the slot,
 writes it here.
 
@@ -79,7 +79,7 @@ writes it here.
   answers "why can nobody join slot 4" months later.
 
 **Only DeathLink among bounces.** `Bounce` is a general relay that forks and trackers use for their
-own traffic, and unlike checks its volume is unbounded — checks are capped by the seed's location
+own traffic, and unlike checks its volume is unbounded: checks are capped by the seed's location
 count, deaths are not. Journaling all of it would let one chatty client dominate a room's history.
 
 ## Why the option set is written twice
@@ -87,14 +87,14 @@ count, deaths are not. Journaling all of it would let one chatty client dominate
 `option_changed` says what moved; the `options` line that follows says what the rules now are. The
 redundancy is the point: without it, reconstructing the room's configuration at any moment means
 replaying every change from the beginning and hoping none were dropped. `options` is also written at
-every start — not only the first — because a restart is exactly when the configuration can have
+every start (not only the first), because a restart is exactly when the configuration can have
 changed underneath the room.
 
 ## Who it is for
 
 **The organizer of one room**, and that audience is the whole design. The same events could be
 logged to stderr and shipped to a log aggregator, which is the right answer for an *operator*
-debugging across rooms — but it is the wrong one here, on three counts that are about access rather
+debugging across rooms, but it is the wrong one here, on three counts that are about access rather
 than durability.
 
 - **Authorization.** Loki isolates by tenant and has no label-level access control, so "this
@@ -110,7 +110,7 @@ than durability.
   free.
 
 None of this argues against also shipping logs. The two are one event stream for two consumers with
-different lifetimes and different authorization stories — **Loki for operators, the journal for the
+different lifetimes and different authorization stories: **Loki for operators, the journal for the
 room**. What the journal deliberately is *not* is a second copy of the operational log: nothing about
 checks goes to stderr.
 
@@ -121,13 +121,13 @@ that decided the shape, measured on a 2000-slot seed with 341,851 locations:
 
 | | cost | share of the release |
 |---|---|---|
-| the release itself, no journal | 283 ms | — |
+| the release itself, no journal | 283 ms | baseline |
 | formatting those checks as JSON inline | 418 ms | 148% |
 | formatting **and** writing to a drained pipe | 809 ms | 286% |
 | writing to a *stalled* consumer | did not finish in 12 s | unbounded |
 | **what pahoa does: `try_send` a `Copy` record** | **2.5 ms** | **0.9%** |
 
-So the actor pushes plain numbers into a bounded channel and a thread does everything else — name
+So the actor pushes plain numbers into a bounded channel and a thread does everything else: name
 resolution, JSON, the write. Two consequences worth stating:
 
 - **[`CheckRecord`](../crates/pahoa-room/src/effect.rs) carries ids, not names.** Resolving four
@@ -140,18 +140,18 @@ resolution, JSON, the write. Two consequences worth stating:
   not good enough.
 
 The buffer holds 2<sup>19</sup> records, which is more than the largest burst a single release can
-produce on any real seed — so the drop path is reserved for a disk that has genuinely stopped, not
+produce on any real seed, so the drop path is reserved for a disk that has genuinely stopped, not
 for ordinary play.
 
 ## Incarnations, and telling a crash from a quiet night
 
-The file spans every run of a room — that is the whole reason it lives beside the save rather than in
-the log stream — so `started` and `stopped` are what divide it into the runs that produced it. Each
+The file spans every run of a room (that is the whole reason it lives beside the save rather than in
+the log stream), so `started` and `stopped` are what divide it into the runs that produced it. Each
 carries the `version` and the git `build_rev`, which is what makes "did this room's behavior change
 under it" answerable months later, when the version number alone has been reused by a dozen builds.
 
 **A `started` with no `stopped` before it is an unclean stop.** That is the design rather than a gap
-in it: a process killed outright — `SIGKILL`, an OOM kill, a node disappearing — writes nothing,
+in it: a process killed outright (`SIGKILL`, an OOM kill, a node disappearing) writes nothing,
 because there is nothing left that could write it. So the absence is the signal, and it is legible to
 somebody who never saw the pod. Writing a closing record optimistically at startup was the obvious
 alternative and would state the opposite of the truth in exactly the case worth detecting.
@@ -162,7 +162,7 @@ alternative and would state the opposite of the truth in exactly the case worth 
 
 ## Durability
 
-The writer flushes every 1024 records, after one second of quiet, and on the save timer — so the
+The writer flushes every 1024 records, after one second of quiet, and on the save timer, so the
 journal and the save agree about how much a hard kill can cost. An `fsync` per check would make a
 release disk-bound for a guarantee nobody asked for: the save file makes the same bargain for the
 same reason.
@@ -172,11 +172,11 @@ The idle second matters because a count alone scales the wrong way for a reader.
 room with somebody watching the feed was the room whose file was worst.
 
 **`started` is flushed the moment it is written**, ahead of any of that. It is the marker that says
-the previous incarnation never stopped, so a room that dies in its first second — which is when a bad
-config, a wedged mount or an OOM kill takes one — has to have already left the evidence.
+the previous incarnation never stopped, so a room that dies in its first second (which is when a bad
+config, a wedged mount or an OOM kill takes one) has to have already left the evidence.
 
 At shutdown the actor's handle is dropped, which closes the channel, and the process joins the writer
-before exiting — so a clean stop never leaves records in a buffer.
+before exiting, so a clean stop never leaves records in a buffer.
 
 ## Size
 
@@ -216,20 +216,20 @@ Several of the events above are worth a note on why they are shaped as they are:
 - **`admin` is one record for every verb, written at the dispatch point.** A bespoke record per
   handler would have been more precise and would have rotted: a new admin verb is journaled here
   because it is an admin verb, not because whoever added it remembered. It also settles an
-  inconsistency — `!getitem` in chat has always been a `cheat`, while the same grant through `/send`
+  inconsistency: `!getitem` in chat has always been a `cheat`, while the same grant through `/send`
   used to leave no trace at all, so whether an action was recorded depended on which door the
   operator came through. It records the command **as asked for**, so a refused verb still appears;
   what came of it is in the reply the operator got.
 - **`release` and `collect` carry a `trigger`, which only the room knows.** There are three ways into
-  a release — the automatic sweep after a goal, an operator through the admin API, and the slot's own
-  `!release` — and all three produce the same flood of checks and the same announcement to clients,
+  a release (the automatic sweep after a goal, an operator through the admin API, and the slot's own
+  `!release`), and all three produce the same flood of checks and the same announcement to clients,
   so nothing downstream can tell them apart. A player giving up on their own world is not an
   organizer clearing one. `group` is the fourth value: a group slot collecting because its last
   member did, which has no instigator of its own.
 
   Both records are written **before** the checks they cause, like `goal`, so the line explaining a
   flood sits above it rather than under three thousand lines of it. `items` counts the locations the
-  batch will *newly* check, computed before any of them are — so a world already half-finished by
+  batch will *newly* check, computed before any of them are, so a world already half-finished by
   hand reports the remainder rather than its whole size, and a release with nothing left reports
   zero.
 
@@ -246,7 +246,7 @@ Several of the events above are worth a note on why they are shaped as they are:
   and most change nothing. Tags are worth recording when they do move: they decide whether a
   connection may claim the goal, whether it receives chat, and whether it counts as a game client.
   "Changed" means the *set* changed, as the reference decides it (`MultiServer.py:2025`), so a
-  client that reorders its tags or repeats one records nothing — and neither does it announce
+  client that reorders its tags or repeats one records nothing, and neither does it announce
   anything to the room, which is the same comparison.
 - **The link records carry both who sent it and who the packet said sent it.** `source` is copied
   straight out of the bounce payload, so it is the client's unvalidated claim and nothing stops one
@@ -257,19 +257,19 @@ Several of the events above are worth a note on why they are shaped as they are:
   importance.** A link fires on a discrete game event, so its rate is bounded by play; a fork's or a
   tracker's own relay traffic is bounded by nothing and would let one chatty client dominate the
   file. The conventions that qualify live in one table (`LINKS`), so another is a row rather than a
-  branch — only `DeathLink` was recorded at first, which left the history unable to answer "why did
+  branch: only `DeathLink` was recorded at first, which left the history unable to answer "why did
   I get a trap I never earned".
 - **`RingLink` is not journaled, though upstream counts it as a link.** It shares a running currency
   balance, so it fires on every coin picked up or spent: a continuous delta rather than a discrete
   event anybody later asks about. It fails the volume test above, which is the test that decides
-  this table, and it was only ever in it for symmetry with the other two. **Relaying is unchanged**
-  — RingLink bounces reach every client that asked for them, exactly as before; this is about what
+  this table, and it was only ever in it for symmetry with the other two. **Relaying is unchanged**:
+  RingLink bounces reach every client that asked for them, exactly as before; this is about what
   reaches the file.
 
 - **`hints` carries both balances, not just the cost.** Hint price is a percentage of a slot's own
   location count and can be changed mid-room with `!admin /option hint_cost`, so a cost recorded in
   isolation cannot be checked against anything afterwards. `points_before` and `points_after` can. A
-  hint for an item at an already-checked location is free, and shows up as the two being equal —
+  hint for an item at an already-checked location is free, and shows up as the two being equal,
   which is the distinction an organizer is usually being asked to adjudicate.
 - **`cheat` exists because no `check` can account for it.** `!getitem` moves an item with no location
   behind it, so without this line the history reads as a complete account of where every item came

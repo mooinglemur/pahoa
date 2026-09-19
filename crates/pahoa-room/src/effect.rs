@@ -6,7 +6,7 @@
 //! materialize the whole cascade in memory; a sink lets the transport encode
 //! and fan out each chunk as it is produced, holding peak memory at one chunk.
 //!
-//! Recipient resolution — including the `NoText` and tracker-tag filters —
+//! Recipient resolution, including the `NoText` and tracker-tag filters,
 //! happens inside the room, which owns the client registry. The sink just
 //! receives a resolved `&[ConnId]`.
 
@@ -17,7 +17,7 @@ use pahoa_proto::ServerPacket;
 /// Who a broadcast is for, described rather than enumerated.
 ///
 /// This is deliberately *intent*, not a resolved `&[ConnId]`. Materializing a
-/// list would put an O(connections) walk in the room for every broadcast — at
+/// list would put an O(connections) walk in the room for every broadcast: at
 /// 6000 connections and ~3,500 broadcasts in a mass release, that is over 20
 /// million pushes of work the room should never be doing. Instead the transport
 /// keeps the membership indexes and expands these itself, in parallel, off the
@@ -41,7 +41,7 @@ pub enum Recipients {
     /// Everyone on a full feed, plus the connections of the slot this is
     /// *about*.
     ///
-    /// For messages attributable to one slot — a join, a part, a cheat-console
+    /// For messages attributable to one slot: a join, a part, a cheat-console
     /// grant. A scoped connection wants these for itself and not for the other
     /// two thousand slots, which is most of what makes its feed quiet. See
     /// `docs/scoped-feed.md`.
@@ -76,7 +76,7 @@ pub enum CloseReason {
     ///
     /// Carries no reason: the shard's close message holds a `&'static str`, and
     /// an operator's sentence reaches the client as a `PrintJSON` sent just
-    /// before this — which keeps an allocation off the broadcast path for the
+    /// before this, which keeps an allocation off the broadcast path for the
     /// sake of one rare command.
     Kicked,
 }
@@ -103,7 +103,7 @@ pub trait EffectSink {
     /// something the transport reads back afterwards. A transport filters
     /// [`Recipients::AllText`] against its own copy of `auth`, so if it learns
     /// about a client authenticating only after the handler returns, that
-    /// client is filtered out of its own join announcement — it watches
+    /// client is filtered out of its own join announcement: it watches
     /// everyone else arrive and never sees itself.
     ///
     /// Defaulted to nothing, because only a real transport keeps a second copy
@@ -133,14 +133,14 @@ pub trait EffectSink {
 
     /// One location was checked, for the room's durable history.
     ///
-    /// An effect rather than something the room writes, for the usual reason —
+    /// An effect rather than something the room writes, for the usual reason:
     /// the room owns no files and has no clock beyond what it is handed. The
     /// transport decides whether anyone is listening, and a sink that is not
     /// journaling does nothing at all here.
     ///
     /// **Deliberately carries ids, not names.** A release pushes every location
-    /// a slot owns through this in one burst — 341,851 of them on a 2000-slot
-    /// room — and this runs on the task that owns all room state. Resolving
+    /// a slot owns through this in one burst (341,851 of them on a 2000-slot
+    /// room) and this runs on the task that owns all room state. Resolving
     /// four names per record would put the allocations on that thread; the
     /// record is `Copy`, and whatever consumes it resolves names on its own
     /// time. See `docs/journal.md`.
@@ -160,8 +160,8 @@ pub trait EffectSink {
 ///
 /// **Only the room knows, and it is not recoverable from the checks.** The three
 /// causes read completely differently to somebody reconstructing what happened
-/// — a player giving up on their own world is not an organizer clearing one,
-/// and neither is the automatic sweep that follows a goal — but all three
+/// (a player giving up on their own world is not an organizer clearing one,
+/// and neither is the automatic sweep that follows a goal) but all three
 /// produce the identical flood of `check` records and the identical
 /// announcement to clients.
 ///
@@ -222,8 +222,8 @@ impl JournalEvent {
     ///
     /// # The pair is what makes the history readable across restarts
     ///
-    /// A journal spans every incarnation of a room by design — that is the
-    /// whole reason it lives beside the save rather than in the log stream —
+    /// A journal spans every incarnation of a room by design (that is the
+    /// whole reason it lives beside the save rather than in the log stream)
     /// but nothing in it said where one incarnation ended and the next began.
     /// A reader looking at a gap in the timestamps could not tell a quiet
     /// night from a crash, and could not tell which build produced the records
@@ -231,8 +231,8 @@ impl JournalEvent {
     ///
     /// **A [`started`](Self::started) with no [`stopped`](Self::stopped) before
     /// it is an unclean stop, and that is deliberate rather than a gap in the
-    /// record.** A process killed outright — `SIGKILL`, an OOM kill, a node
-    /// disappearing — writes nothing, because there is nothing that could
+    /// record.** A process killed outright (`SIGKILL`, an OOM kill, a node
+    /// disappearing) writes nothing, because there is nothing that could
     /// write it. So the absence *is* the signal, and it is available to a
     /// reader who never saw the pod. The alternative would be a shutdown record
     /// written optimistically at start, which would say the opposite of the
@@ -259,7 +259,7 @@ impl JournalEvent {
     /// `POST /admin/v1/shutdown`.
     ///
     /// The version is repeated here rather than left to the matching
-    /// [`started`](Self::started) so that each record stands on its own — a
+    /// [`started`](Self::started) so that each record stands on its own: a
     /// reader tailing from a point in the middle sees a `stopped` whose build
     /// it never saw announced, and the same reasoning already makes `options`
     /// re-state itself on every start.
@@ -283,7 +283,7 @@ impl JournalEvent {
     /// **Only ever written after authentication succeeds**, which is what keeps
     /// this from being a way to write to somebody's disk: a port scan, a wrong
     /// password and a refused version all reach the room and produce nothing
-    /// here. It is one record per *connection*, not per player — a slot running
+    /// here. It is one record per *connection*, not per player: a slot running
     /// a game, a text client and a tracker joins three times, which is the
     /// thing an organizer is usually trying to account for.
     pub fn connected(
@@ -322,7 +322,7 @@ impl JournalEvent {
     /// Pairs with [`connected`](Self::connected), so an unauthenticated
     /// connection that drops writes neither.
     /// `reason` distinguishes a player who quit from one whose connection
-    /// died — the same record either way without it, and the difference is
+    /// died: the same record either way without it, and the difference is
     /// exactly what someone reading a history months later wants to know.
     pub fn disconnected(
         at: f64,
@@ -358,7 +358,7 @@ impl JournalEvent {
     ///
     /// Worth recording because tags are not cosmetic: they decide whether a
     /// connection may claim the goal, whether it receives chat at all, and
-    /// whether it counts as a game client — so a slot whose behavior changed
+    /// whether it counts as a game client, so a slot whose behavior changed
     /// mid-room changed it here.
     pub fn tags_changed(
         at: f64,
@@ -387,7 +387,7 @@ impl JournalEvent {
     ///
     /// The one status transition worth a line of its own: it is irreversible,
     /// it is what an organizer is asked to adjudicate, and it is what triggers
-    /// auto-release and auto-collect — so the `check` records that follow are
+    /// auto-release and auto-collect, so the `check` records that follow are
     /// otherwise unexplained. The others (`Ready`, `Playing`) churn as clients
     /// come and go and say nothing durable.
     pub fn goal(at: f64, key: crate::SlotKey, player: &str, game: &str) -> Self {
@@ -414,7 +414,7 @@ impl JournalEvent {
     /// journal describing a room that changed for no reason: an operator could
     /// conjure items, force hints, rename a slot, kick a player or release a
     /// world, and the history showed only the consequences. Worse, it was
-    /// *inconsistent* — `!getitem` typed into chat is recorded as a `cheat`,
+    /// *inconsistent*: `!getitem` typed into chat is recorded as a `cheat`,
     /// while the same grant through `/send` was invisible, so the artifact used
     /// for adjudication depended on which door the operator came through.
     ///
@@ -425,7 +425,7 @@ impl JournalEvent {
     ///
     /// **Nothing secret reaches `detail`, and that is enforced here rather than
     /// inherited.** The one command carrying a free value is `/option`. That
-    /// path refuses every password-bearing option — but it refuses them in the
+    /// path refuses every password-bearing option, but it refuses them in the
     /// *handler*, and this record is written before dispatch, so leaning on
     /// that refusal would write `server_password: topsecret` into a file that
     /// outlives the room every time an operator tried it and was told no. The
@@ -451,15 +451,15 @@ impl JournalEvent {
     ///
     /// # The consequence was recorded and the cause was not
     ///
-    /// Both of these produce a flood of `check` records — a release pushes
-    /// every location a slot still owns through the check path — and both
+    /// Both of these produce a flood of `check` records (a release pushes
+    /// every location a slot still owns through the check path) and both
     /// announce themselves to clients as a `PrintJSON`. Neither wrote anything
     /// to the file, so a reader saw two hundred items arrive at once with
     /// nothing above them saying why.
     ///
     /// It was not hiding in `chat` either. That records what a player *typed*,
     /// so an in-game `!release` left the line `player: !release` and no
-    /// indication of whether the room allowed it — a release refused by
+    /// indication of whether the room allowed it: a release refused by
     /// `release_mode` and one that emptied a world read identically.
     ///
     /// # Emitted before the checks it causes
@@ -467,7 +467,7 @@ impl JournalEvent {
     /// Same ordering as [`goal`](Self::goal) and for the same reason: the
     /// explanation belongs above the flood rather than buried under three
     /// thousand lines of it. `items` is therefore the count of locations this
-    /// will newly check, computed before any of them are — locations the slot
+    /// will newly check, computed before any of them are: locations the slot
     /// had already checked are excluded, so it is what actually moved rather
     /// than the size of the world.
     pub fn release_or_collect(
@@ -541,7 +541,7 @@ impl JournalEvent {
     ///
     /// Clearing **locks** the slot rather than opening it, so `set: false` is
     /// the more consequential of the two and the reason this is recorded at
-    /// all — "why can nobody join slot 4" is answerable from here.
+    /// all: "why can nobody join slot 4" is answerable from here.
     pub fn slot_password_changed(at: f64, slot: u32, set: bool) -> Self {
         Self::new(
             "slot_password_changed",
@@ -610,8 +610,8 @@ impl JournalEvent {
     ///
     /// # DeathLink is not the only one
     ///
-    /// The server relays all of them identically — they are ordinary `Bounce`
-    /// traffic with a well-known tag — and recording only `DeathLink` was a
+    /// The server relays all of them identically (they are ordinary `Bounce`
+    /// traffic with a well-known tag) and recording only `DeathLink` was a
     /// reasonable guess at what matters and an incomplete one: "why did I get a
     /// trap I never earned" is precisely the question an organizer gets asked,
     /// and it was the one thing the history could not answer.
@@ -621,12 +621,12 @@ impl JournalEvent {
     /// bounded by play. A fork's or a tracker's own relay traffic is bounded by
     /// nothing, and journaling all of it would let one chatty client dominate
     /// a file somebody else has to read. That test is what keeps `RingLink`
-    /// out, upstream calling it a link notwithstanding — see [`crate::LINKS`]
+    /// out, upstream calling it a link notwithstanding. See [`crate::LINKS`]
     /// for which conventions are recorded and why.
     ///
     /// `kind` is the record type, so a reader dispatches on `deathlink` or
-    /// `traplink`, and `extra` carries the convention's own payload — `cause`,
-    /// `trap_name` — beside the fields they share. It is merged at the top
+    /// `traplink`, and `extra` carries the convention's own payload (`cause`,
+    /// `trap_name`) beside the fields they share. It is merged at the top
     /// level rather than nested so that the `deathlink` record keeps the exact
     /// shape it already had, and so a fourth convention needs no new shape.
     ///
@@ -634,7 +634,7 @@ impl JournalEvent {
     ///
     /// **These can disagree and the record deliberately carries both.** `source`
     /// is copied out of the bounce payload, so it is whatever the sending
-    /// client chose to put there — unvalidated, and nothing stops a client
+    /// client chose to put there: unvalidated, and nothing stops a client
     /// naming somebody else. `team`, `slot` and `player` come from the
     /// authenticated connection the packet arrived on, so they are the room's
     /// own answer to who sent it and cannot be spoofed.
@@ -674,7 +674,7 @@ impl JournalEvent {
     ///
     /// Built from the same text that went to players, which for `!admin` is the
     /// masked form. Journaling anything earlier in that path would undo the
-    /// masking into a file that outlives the room — the worst possible place
+    /// masking into a file that outlives the room: the worst possible place
     /// for a password to reappear.
     pub fn chat(at: f64, key: crate::SlotKey, text: &str) -> Self {
         Self::new(

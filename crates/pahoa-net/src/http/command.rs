@@ -2,8 +2,8 @@
 //!
 //! A tagged enum rather than a command line. Feeding the existing `!` dispatcher
 //! a string would have looked cheaper and self-syncing, but every one of those
-//! handlers still needs a target supplied from outside — they are
-//! connection-scoped — so most of the saving evaporates, and the caller's UI
+//! handlers still needs a target supplied from outside (they are
+//! connection-scoped) so most of the saving evaporates, and the caller's UI
 //! degrades to a text box with no validation and no slot picker. A typed set
 //! also makes an unknown command a `400` rather than a confusing text reply.
 //!
@@ -46,7 +46,7 @@ pub fn parse(body: &[u8]) -> Result<AdminCommand, String> {
             item: text(object, "item")?,
         }),
         // A separate verb rather than a count on `send_item`, mirroring the
-        // reference's naming — and `send_item` stays the one-copy spelling so
+        // reference's naming, and `send_item` stays the one-copy spelling so
         // the common case needs no count at all.
         "send_multiple" => Ok(AdminCommand::SendMultiple {
             slot: slot(object)?,
@@ -71,7 +71,7 @@ pub fn parse(body: &[u8]) -> Result<AdminCommand, String> {
             location: text(object, "location")?,
         }),
         // One verb with a boolean rather than the reference's two, because
-        // `forbid_release` does not forbid anything — it clears an exemption.
+        // `forbid_release` does not forbid anything: it clears an exemption.
         // A caller reading `{"allowed": false}` is far less likely to expect a
         // denial than one reading `forbid_release`.
         "allow_release" => Ok(AdminCommand::AllowRelease {
@@ -151,7 +151,7 @@ pub fn parse(body: &[u8]) -> Result<AdminCommand, String> {
 ///
 /// `{"password": "…"}` sets one; `{"password": null}` clears it, which is how a
 /// slot is returned to having none. An absent key is the same as null, so an
-/// empty body is a clear rather than an error — there is no other thing it
+/// empty body is a clear rather than an error: there is no other thing it
 /// could reasonably mean.
 pub fn slot_password(body: &[u8]) -> Result<Option<String>, String> {
     if body.is_empty() {
@@ -329,7 +329,7 @@ mod tests {
         );
     }
 
-    /// `amount` is required rather than defaulting to one — a caller reaching
+    /// `amount` is required rather than defaulting to one: a caller reaching
     /// for `send_multiple` means to send several, and a silent default of one
     /// would look like a working command that did a fraction of the job.
     #[test]

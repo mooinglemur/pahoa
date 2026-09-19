@@ -3,8 +3,8 @@
 
 This answers the one M4 question the Rust tests structurally cannot: the
 synthetic test client never offers `permessage-deflate`, so it says nothing
-about whether a *real* client — whose `websockets` library offers compression by
-default — tolerates having it declined. That answer decides whether M8
+about whether a *real* client, whose `websockets` library offers compression by
+default, tolerates having it declined. That answer decides whether M8
 (permessage-deflate) can be deferred or has to move up.
 
 Run it against Archipelago's checkout so `CommonClient` and `NetUtils` are the
@@ -61,8 +61,8 @@ def main():
     def text_parser(connected, data_package):
         """Archipelago's own `PrintJSON` renderer over a minimal client context.
 
-        `NetUtils.RawJSONtoTextParser` is the real thing — its handler dispatch
-        on part `type` is exactly what a wrong part type would break — but
+        `NetUtils.RawJSONtoTextParser` is the real thing (its handler dispatch
+        on part `type` is exactly what a wrong part type would break) but
         `CommonClient.CommonContext` is not usable here: importing it loads the
         world system, which this venv deliberately does not have. So the three
         lookups the handlers touch are supplied directly. They are reverse maps

@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 #
 # arbitrary_precision is required for the same reason and with the same force.
 # Python's ints are unbounded, and a client storing a bitfield wider than 64
-# bits is not hypothetical — one reached a live room. Without this, serde_json
+# bits is not hypothetical: one reached a live room. Without this, serde_json
 # folds any integer literal past u64 into an f64 *during parsing*, so the digits
 # are gone before the room sees the packet: `2361183241434822606848` came back
 # as `2.3611832414348226e+21`, silently, with no error anywhere. See

@@ -2,7 +2,7 @@
 //!
 //! The startup banner names the exact tree a room was built from, which is the
 //! first question anyone asks about a room behaving oddly and the one thing a
-//! version number cannot answer — `0.1.0` is every build for months.
+//! version number cannot answer: `0.1.0` is every build for months.
 //!
 //! **The container build has no `.git`.** `.dockerignore` excludes it, and
 //! deliberately: it is large, it changes on every commit, and including it
@@ -19,7 +19,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PAHOA_BUILD_REV");
     // A commit, a checkout or a staged change moves one of these. A change that
     // is merely *written* moves neither, so the `+` can lag until something
-    // else forces a rebuild — accepted, because the alternative is re-running
+    // else forces a rebuild, accepted, because the alternative is re-running
     // `git status` on every build of every crate.
     for path in [".git/HEAD", ".git/index"] {
         if let Some(git) = find_upward(path) {

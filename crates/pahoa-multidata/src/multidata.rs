@@ -27,7 +27,7 @@ pub const MAX_FORMAT_VERSION: u8 = 3;
 /// **Here rather than in `pahoa-room`, because this is the crate that checks
 /// it.** `validate` refuses a seed demanding a newer server, and a caller that
 /// links only the parser previously had to transcribe this constant from
-/// another crate — or, more honestly, skip the check entirely rather than rest
+/// another crate, or, more honestly, skip the check entirely rather than rest
 /// it on a number copied across a repository boundary. It is a fact about what
 /// the parser will accept, so it belongs beside the parser.
 ///
@@ -39,7 +39,7 @@ pub const SERVER_VERSION: Version = Version::new(0, 6, 7);
 ///
 /// **Without a ceiling here, `read_to_end` on a zlib stream is a decompression
 /// bomb.** zlib reaches about 1032:1, so the only bound was whatever the caller
-/// was willing to hand over — an orchestrator accepting 256 MiB uploads was
+/// was willing to hand over: an orchestrator accepting 256 MiB uploads was
 /// implicitly offering 264 GiB of inflate to one HTTP request.
 ///
 /// 64 MiB against a sixteen-seed corpus whose largest member inflates to
@@ -49,8 +49,8 @@ pub const SERVER_VERSION: Version = Version::new(0, 6, 7);
 /// times larger than this server is designed for while turning an unbounded
 /// allocation into a bounded one.
 ///
-/// A caller may well cap harder — an orchestrator that knows its own upload
-/// limits should — but a constant here is the one every caller gets for free,
+/// A caller may well cap harder (an orchestrator that knows its own upload
+/// limits should) but a constant here is the one every caller gets for free,
 /// and a standalone `pahoa` has no other.
 pub const MAX_PICKLE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -65,7 +65,7 @@ pub const MAX_PICKLE_BYTES: u64 = 64 * 1024 * 1024;
 /// Bytes are the wrong unit for that, which is why this is counted separately
 /// from [`MAX_PICKLE_BYTES`] and from the reader's object budget. The corpus
 /// maximum is **2,975** across all slots, so 100,000 is thirty-three times
-/// anything real — and deliberately the same number the orchestrator upstream
+/// anything real, and deliberately the same number the orchestrator upstream
 /// of this uses, so the two cannot disagree about what a room may be asked to
 /// load.
 pub const MAX_PRECOLLECTED_ITEMS: usize = 100_000;
@@ -211,7 +211,7 @@ impl MultiData {
             int_list_map(v.opt("precollected_items"), &root.key("precollected_items"))?;
         // **In `from_py` rather than in `validate`**, because `validate` is a
         // policy check a caller opts into and this is a refusal that has to
-        // hold for anyone who types a seed at all — including a tool that only
+        // hold for anyone who types a seed at all, including a tool that only
         // ever inspects one. The tree is already built by here, so this does
         // not save the parse; what it bounds is the room afterwards, which is
         // where this field's cost actually lives.
@@ -355,13 +355,13 @@ impl MultiData {
         DataPackage::merge(&self.embedded_datapackage, &self.games())
     }
 
-    /// Slots that have **progress to report** — checks, a goal, a completion
+    /// Slots that have **progress to report**: checks, a goal, a completion
     /// percentage.
     ///
     /// Players only. A spectator has nothing to report here and would be a
     /// `0/0` row; a group is not a participant at all.
     ///
-    /// This is not the same question as "who may connect" — see
+    /// This is not the same question as "who may connect". See
     /// [`Self::connectable_slots`]. The two came apart the moment a spectator
     /// appeared, and using one where the other belongs is how a spectator goes
     /// missing from a roster or shows up as an idle player.
@@ -373,10 +373,10 @@ impl MultiData {
 
     /// Every team in this seed, ascending. **Always exactly one, team 0.**
     ///
-    /// Archipelago's data model is team-aware throughout — `(team, slot)` keys
+    /// Archipelago's data model is team-aware throughout: `(team, slot)` keys
     /// everything the server owns, the wire carries a `team` field, and
-    /// `MultiServer.py` threads a team through hints, item queues and status —
-    /// but **nothing can produce a second one**. Generation writes
+    /// `MultiServer.py` threads a team through hints, item queues and status.
+    /// But **nothing can produce a second one**. Generation writes
     /// `{name: (0, player)}` unconditionally (`Main.py:337`), and the server
     /// seeds `self.clients = {0: {}}` at load and never grows it
     /// (`MultiServer.py:521`), so a seed naming any other team raises inside
@@ -395,7 +395,7 @@ impl MultiData {
     /// Every `(team, slot)` a client may connect as, ascending.
     ///
     /// The roster question. One team today, so this is `connectable_slots` with
-    /// a team on it — which is the point: a surface written against this keeps
+    /// a team on it, which is the point: a surface written against this keeps
     /// working when there is more than one, where a surface walking slots alone
     /// would show half the participants and look right.
     pub fn team_slots(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
@@ -403,7 +403,7 @@ impl MultiData {
             .flat_map(move |team| self.connectable_slots().map(move |(slot, _)| (team, *slot)))
     }
 
-    /// Slots a client may **connect as** — players and spectators, groups
+    /// Slots a client may **connect as**: players and spectators, groups
     /// excluded.
     ///
     /// The roster question: who needs a password, who appears on a room page,

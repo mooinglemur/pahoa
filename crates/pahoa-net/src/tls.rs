@@ -1,7 +1,7 @@
 //! Terminating TLS on the room port, with the certificate reloaded in place.
 //!
 //! `rustls` over the `ring` provider. Neither links against the host, which is
-//! what keeps the static musl build and the `scratch` image intact —
+//! what keeps the static musl build and the `scratch` image intact:
 //! `native-tls` would not, and `aws-lc-rs` would want cmake and a much larger C
 //! surface.
 //!
@@ -16,7 +16,7 @@
 //! only new handshakes see the new chain.
 //!
 //! **Polling, not inotify.** The kubelet does not rewrite a mounted Secret in
-//! place — it stages the new values in a fresh directory and swaps a `..data`
+//! place: it stages the new values in a fresh directory and swaps a `..data`
 //! symlink, so a watch on the resolved path sees nothing and a watch on the
 //! directory needs to understand the swap. A `stat` every 30 seconds is
 //! indifferent to how the update was performed, and a renewal that takes an
@@ -95,7 +95,7 @@ impl CertResolver {
     ///
     /// Deliberately cannot fail the room. A Secret caught mid-update, or a
     /// chain that does not match its key, leaves the previous certificate
-    /// serving and says so — the alternative is a room that stops answering
+    /// serving and says so: the alternative is a room that stops answering
     /// because of a file it was already holding a working copy of. The stamp is
     /// only advanced on success, so a bad pair is retried on the next tick
     /// rather than latched.
@@ -148,7 +148,7 @@ pub fn acceptor(resolver: Arc<CertResolver>) -> tokio_rustls::TlsAcceptor {
         .with_no_client_auth()
         .with_cert_resolver(resolver);
 
-    // HTTP/1.1 is the only thing spoken on this port — the WebSocket upgrade
+    // HTTP/1.1 is the only thing spoken on this port: the WebSocket upgrade
     // and the admin API both ride on it. Advertising `h2` would promise a
     // protocol pahoa does not implement, and a browser would take it.
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -196,8 +196,8 @@ fn certified_key(paths: &TlsPaths) -> io::Result<Arc<CertifiedKey>> {
     let key = load_key(&paths.key)?;
     // `from_der` rather than assembling the pair by hand, because it also checks
     // the key against the leaf certificate's public key. That is precisely the
-    // mismatch a Secret caught mid-renewal produces — a new chain next to the
-    // old key — and catching it here is what keeps the previous certificate
+    // mismatch a Secret caught mid-renewal produces (a new chain next to the
+    // old key) and catching it here is what keeps the previous certificate
     // serving instead of swapping in one that fails every handshake.
     let certified =
         CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())

@@ -9,7 +9,7 @@
 //! like one that spends fifty nanoseconds. That matters more here than
 //! elsewhere: these operations run on the actor task, the single thread that
 //! owns all room state, so their cost is not paid by the client that asked for
-//! it — it is paid by everybody.
+//! it: it is paid by everybody.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +20,8 @@ use std::time::Duration;
 /// no entry, because a gap and a zero say different things on a dashboard.
 ///
 /// **Cardinality is bounded by construction.** The key is only ever one of the
-/// eighteen operation names or the literal `"unknown"` — see [`record_failure`]
-/// — so a client cannot mint series by inventing operations.
+/// eighteen operation names or the literal `"unknown"` (see [`record_failure`])
+/// so a client cannot mint series by inventing operations.
 static FAILURES: LazyLock<RwLock<HashMap<String, AtomicU64>>> = LazyLock::new(RwLock::default);
 
 static APPLIED: AtomicU64 = AtomicU64::new(0);
@@ -75,8 +75,8 @@ pub struct ApplyStats {
     /// The worst single sequence since the room started.
     ///
     /// **A high-water mark, not a histogram, and it only catches a stall that
-    /// ended.** An operation that never returns — which is what
-    /// `[] * 10**12` did before it was fixed — records nothing at all, because
+    /// ended.** An operation that never returns (which is what
+    /// `[] * 10**12` did before it was fixed) records nothing at all, because
     /// there is no "after" to subtract from. The thing that shows *that* is
     /// `pahoa_mailbox_depth` climbing and never draining.
     pub max: Duration,

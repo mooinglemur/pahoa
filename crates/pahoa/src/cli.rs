@@ -5,7 +5,7 @@
 //! **rejecting what it does not understand**. The parser this replaces looked
 //! for a flag by name and took the token after it, which meant a misspelled
 //! `--save-dirr` was silently ignored and started a room that persisted
-//! nothing — the failure an operator finds out about after the restart.
+//! nothing: the failure an operator finds out about after the restart.
 //!
 //! So: unknown options are an error, `--flag=value` works, options may come
 //! before the positional, and a flag given twice is a mistake rather than a
@@ -133,7 +133,7 @@ pub fn parse(argv: &[String], spec: &[Opt]) -> Result<Parsed, String> {
 fn unknown(name: &str, spec: &[Opt]) -> String {
     let mut msg = format!("unknown option {name:?}");
     if let Some(guess) = closest(name, spec) {
-        msg.push_str(&format!(" — did you mean {guess}?"));
+        msg.push_str(&format!("; did you mean {guess}?"));
         return msg;
     }
     let mut names: Vec<&str> = spec.iter().map(|o| o.name).collect();

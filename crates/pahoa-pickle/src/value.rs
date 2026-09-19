@@ -52,7 +52,7 @@ pub enum PyObj {
     None,
     Bool(bool),
     Int(i64),
-    /// A Python int too large for `i64`. Rare but real — see [`crate::BigInt`].
+    /// A Python int too large for `i64`. Rare but real. See [`crate::BigInt`].
     /// The reader narrows to `Int` whenever it fits, so a given value has
     /// exactly one representation and equality stays meaningful.
     Big(BigInt),

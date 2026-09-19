@@ -2,7 +2,7 @@
 //!
 //! Vectors come from `Utils.get_fuzzy_results` / `get_intended_text` via
 //! `tools/gen-fuzzy-vectors.py`, so this also confirms that
-//! `strsim::damerau_levenshtein` is the same algorithm jellyfish provides —
+//! `strsim::damerau_levenshtein` is the same algorithm jellyfish provides:
 //! `strsim` also ships the *restricted* OSA variant, which would differ on
 //! some inputs and be very hard to notice.
 

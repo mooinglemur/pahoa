@@ -3,7 +3,7 @@
 //! This is the number the whole milestone exists for. With context takeover a
 //! compressor carries its window between messages, so the same payload
 //! compresses to *different bytes* for every connection and one broadcast costs
-//! one compression per recipient — 17 million of them across a 2000-slot mass
+//! one compression per recipient: 17 million of them across a 2000-slot mass
 //! release at 6000 connections. Declaring `server_no_context_takeover` makes
 //! compression a pure function of the payload, so a shard compresses once and
 //! hands the same `Bytes` to everyone it serves.
@@ -30,11 +30,11 @@ const CLIENTS: usize = 64;
 /// Both measure `pahoa_net::ws::deflate::compressions()`, which is a
 /// **process-wide** counter, by sampling it around an action. Cargo runs the
 /// tests in one binary concurrently, so without this the other test's
-/// compressions land inside the measurement window — reliably enough under a
+/// compressions land inside the measurement window, reliably enough under a
 /// loaded machine to fail about one full-workspace run in three, and never when
 /// this file is run on its own, which is the worst way for a flake to behave.
 /// Async-aware rather than `std`, because the guard is held across the awaits
-/// that do the measuring — a blocking lock there would park a runtime worker.
+/// that do the measuring: a blocking lock there would park a runtime worker.
 ///
 /// **Taken before the setup, not just around the measurement.** Holding it only
 /// over the sampling window is not enough and was still failing under load: the
@@ -60,7 +60,7 @@ fn load() -> Option<Arc<MultiData>> {
 
 /// A client that negotiates deflate but never decodes anything.
 ///
-/// It only has to *exist* and be counted as a deflate recipient — what is being
+/// It only has to *exist* and be counted as a deflate recipient: what is being
 /// measured happens on the server, before a byte reaches the socket. Building
 /// it by hand also keeps the test independent of any client library, none of
 /// which implement permessage-deflate anyway.
@@ -307,7 +307,7 @@ async fn a_broadcast_is_compressed_once_per_shard_not_once_per_connection() {
     assert!(
         compressions <= SHARDS as u64,
         "a broadcast to {CLIENTS} connections cost {compressions} compressions; \
-         it should cost at most {SHARDS}, one per shard — \
+         it should cost at most {SHARDS}, one per shard; \
          server_no_context_takeover is what makes the result shareable"
     );
     assert!(
@@ -333,7 +333,7 @@ async fn a_connection_without_deflate_costs_no_compression_at_all() {
     let server = start(data).await;
 
     // A room where nobody negotiated the extension must never invoke the
-    // compressor — the deflated variant is built lazily, only when a shard
+    // compressor: the deflated variant is built lazily, only when a shard
     // actually has a recipient for it.
     let mut client = RawClient::connect(server.local_addr, false).await;
     client.send(&connect_packet(&name, &game)).await;
@@ -361,9 +361,9 @@ async fn a_connection_without_deflate_costs_no_compression_at_all() {
 ///
 /// The test above proves the compressor is never *invoked* for a room with no
 /// deflate recipients. This is the sharper question, and the one that breaks a
-/// client rather than wasting a cycle: with a deflate connection open — so the
+/// client rather than wasting a cycle: with a deflate connection open, so the
 /// compressed variant of every broadcast exists and is sitting in the shard's
-/// memo — does the plain connection still get the plain one? A client that did
+/// memo, does the plain connection still get the plain one? A client that did
 /// not negotiate the extension cannot decode an RSV1 frame at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_broadcast_reaches_each_connection_in_the_form_it_negotiated() {
@@ -372,7 +372,7 @@ async fn a_broadcast_reaches_each_connection_in_the_form_it_negotiated() {
         return;
     };
     // This test compresses, and the other two measure the process-wide
-    // compression counter by sampling it around an action — so it has to be
+    // compression counter by sampling it around an action, so it has to be
     // serialized against them for the same reason they are against each other.
     // See `COUNTER`.
     let _exclusive = COUNTER.lock().await;
@@ -404,7 +404,7 @@ async fn a_broadcast_reaches_each_connection_in_the_form_it_negotiated() {
     plain.drain().await;
 
     // Long and repetitive, so it is over the 128-byte floor and compresses to
-    // well under the original — a short line is sent plain to everyone and
+    // well under the original: a short line is sent plain to everyone and
     // would make both halves of this pass for the wrong reason.
     let chat = "deflate ".repeat(64);
     squeezed
@@ -432,7 +432,7 @@ async fn a_broadcast_reaches_each_connection_in_the_form_it_negotiated() {
     );
 
     // And the metric says the same thing the wire does. Two clients, two slots,
-    // one compressing and one not — which is the correlation the metric exists
+    // one compressing and one not, which is the correlation the metric exists
     // to expose, and it can only be built where the handshake's answer and the
     // slot's game are both in hand.
     let body = admin_metrics(&server).await;

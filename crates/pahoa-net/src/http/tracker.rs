@@ -1,7 +1,7 @@
 //! Rendering `/api/tracker` and `/api/static_tracker`.
 //!
 //! A faithful mirror of the reference WebHost's endpoints, including the parts
-//! that are only the way they are because of how Flask serializes Python — see
+//! that are only the way they are because of how Flask serializes Python. See
 //! `docs/tracker.md`. Deviating anywhere makes this a *different* API that
 //! merely resembles the reference, which is the one thing it must not be.
 
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 pub fn tracker(data: &TrackerData) -> Value {
     // The reference walks two different sets, and the difference is invisible
     // until a seed has a spectator or an item-link group in it:
-    // `get_all_players()` — players only — for every per-player array, and
+    // `get_all_players()` (players only) for every per-player array, and
     // `get_all_slots()` for hints alone. A spectator has no progress to report
     // and a group has no client behind it.
     let players: Vec<&pahoa_room::tracker::TrackerSlot> =
@@ -69,7 +69,7 @@ pub fn static_tracker(data: &TrackerData) -> Value {
             "slot": g.slot, "name": g.name, "members": g.members,
         })).collect::<Vec<_>>(),
 
-        // A checksum manifest, not the packages themselves — which is what the
+        // A checksum manifest, not the packages themselves, which is what the
         // reference emits here, and why this document is kilobytes rather than
         // megabytes. A tracker fetches the real data separately and caches it
         // by checksum.
@@ -93,7 +93,7 @@ pub fn static_tracker(data: &TrackerData) -> Value {
 ///
 /// An array rather than an object, because the reference's `NetworkItem` is a
 /// `NamedTuple` and Flask renders those as tuples. pahoa's own `NetworkItem`
-/// serializes as a *map* — that is what the WebSocket protocol wants — so this
+/// serializes as a *map* (that is what the WebSocket protocol wants) so this
 /// cannot reuse it.
 fn item(i: &pahoa_proto::NetworkItem) -> Value {
     json!([i.item, i.location, i.player, i.flags])
@@ -114,7 +114,7 @@ fn hint(h: &pahoa_multidata::Hint) -> Value {
     ])
 }
 
-/// RFC 1123, as the reference emits — `Mon, 17 Aug 2026 18:22:09 GMT` — and
+/// RFC 1123, as the reference emits (`Mon, 17 Aug 2026 18:22:09 GMT`) and
 /// `null` for a slot that has not acted.
 ///
 /// Not RFC 3339, which is what `/admin/v1/status` uses. The two surfaces answer

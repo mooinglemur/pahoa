@@ -3,7 +3,7 @@
 Everything here runs **at development or release time only**. None of it ships,
 and the server never executes Python. The point of several of these is to
 compare pahoa against Archipelago's *actual* implementation rather than against
-a second reading of it — a transcription error in a reimplemented reference
+a second reading of it: a transcription error in a reimplemented reference
 would be copied into both sides and prove nothing.
 
 ## Setup
@@ -18,7 +18,7 @@ python3 -m venv .venv
     orjson certifi platformdirs pathspec setuptools
 ```
 
-That is the *client and server* subset — deliberately not `kivy` or the
+That is the *client and server* subset, deliberately not `kivy` or the
 generation stack, which none of this needs and which are slow to build. Scripts
 set `ModuleUpdate.update_ran = True` to skip Archipelago's interactive
 dependency installer.
@@ -26,7 +26,7 @@ dependency installer.
 A world failing to import (`zilliandomizer`, say) is harmless: nothing here
 loads the world system.
 
-## Generators — output is committed, so tests need no Python
+## Generators: output is committed, so tests need no Python
 
 | script | produces | pins |
 |---|---|---|
@@ -49,7 +49,7 @@ PYTHONHASHSEED=0 ~/src/Archipelago/.venv/bin/python tools/gen-hint-vectors.py \
     > crates/pahoa-room/tests/hint_vectors.jsonl
 ```
 
-`PYTHONHASHSEED=0` only makes the *generating* run reproducible — the vectors
+`PYTHONHASHSEED=0` only makes the *generating* run reproducible: the vectors
 deliberately do not encode hint order, because Archipelago's own is not stable
 across its own restarts (`Hint.__hash__` includes the entrance string, and
 CPython randomizes string hashing per process). The vector carries the seed
@@ -60,7 +60,7 @@ name and the test refuses to run against a different fixture.
 production: subclass and override `_load_game_data`, so the world system is
 never imported.
 
-## Differential checks — run against a live server
+## Differential checks: run against a live server
 
 ```sh
 cargo build --release
@@ -97,11 +97,11 @@ bits 11. The first of those is the load-bearing one: without it, identical
 payloads compress to different bytes per connection and a broadcast costs one
 compression per recipient instead of one per shard.
 
-## Playing a whole seed — `play-seed.py`
+## Playing a whole seed: `play-seed.py`
 
 M9's correctness half. Every player slot connects, checks every location it
 owns, receives what it is owed, and claims its goal; then a final connection
-audits the room — no missing locations, the checked count matches the multidata,
+audits the room: no missing locations, the checked count matches the multidata,
 and `!status` agrees everyone is done.
 
 ```sh
@@ -110,14 +110,14 @@ and `!status` agrees everyone is done.
     --multidata crates/pahoa-pickle/tests/fixtures/<seed>.archipelago
 ```
 
-Real in the ways that matter — Archipelago's `NetUtils.encode`/`decode`, its
+Real in the ways that matter: Archipelago's `NetUtils.encode`/`decode`, its
 `websockets` (so deflate is negotiated as a player's client would), its slot
-metadata — and deliberately not a *game* client, since the server cannot tell
+metadata. Deliberately not a *game* client, since the server cannot tell
 the difference and what is under test is the multiworld's completion rules.
 `--slots N` plays only the first N for a quicker check. Exits non-zero on any
 mismatch.
 
-## Load testing — a separate track, and it has to be
+## Load testing: a separate track, and it has to be
 
 The Python server cannot host 2000 slots at all, so differential testing proves
 *fidelity* at small scale and can say nothing about *scale*.
@@ -127,7 +127,7 @@ cargo run --release -p pahoa-net --example loadtest -- \
     crates/pahoa-pickle/tests/fixtures/SYNTH_2000slot.archipelago 6000
 ```
 
-Four phases — connect storm, steady mix, mass release cascade, reconnect storm —
+Four phases (connect storm, steady mix, mass release cascade, reconnect storm)
 against an in-process server, so the numbers the plan names are read directly
 rather than inferred: actor mailbox depth, outbound bytes against the global
 budget, lag disconnects, compressions, RSS.
@@ -143,7 +143,7 @@ connections that are not actually slow), and the load client must not inflate
 what it receives (at 6000 connections the client-side inflate costs far more
 than the server-side compression, so the harness becomes the bottleneck).
 
-## WebSocket conformance — Autobahn
+## WebSocket conformance: Autobahn
 
 pahoa owns its WebSocket layer (`crates/pahoa-net/src/ws/`), because no crate
 can send a *pre-compressed shared* frame and that is what one-broadcast-to-6000
@@ -171,11 +171,11 @@ multidata's `locations` table for the slot you are connecting as.
 
 ## Fixtures and inspection
 
-- `inspect-multidata.py` — reference implementation of `pahoa inspect`, compared
+- `inspect-multidata.py`: reference implementation of `pahoa inspect`, compared
   line for line by `crates/pahoa/tests/inspect_differential.rs`.
-- `dump-pickle.py` — canonical rendering of a pickle, compared byte for byte by
+- `dump-pickle.py`: canonical rendering of a pickle, compared byte for byte by
   `crates/pahoa-pickle/tests/fixtures.rs`.
-- `make-large-fixture.py` — synthesizes the 2000-slot scale fixture. Explicitly
+- `make-large-fixture.py`: synthesizes the 2000-slot scale fixture. Explicitly
   synthetic: ids come from a real seed so names resolve, but placement is
   mechanical, so it is right for parse cost, `LocationStore` and fan-out, and
   wrong for anything about reachability.
@@ -191,5 +191,5 @@ than passing silently when they are absent.
   import, which a bare venv is not: 33 of them fail on missing dependencies
   here. Since its output deletes entries, it refuses to run rather than emit a
   silently short table. The current entries were established by reading the
-  source instead — `grep -rn hint_blacklist worlds/` finds every one, since it
+  source instead: `grep -rn hint_blacklist worlds/` finds every one, since it
   is always a class-level assignment.

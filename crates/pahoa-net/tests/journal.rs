@@ -77,7 +77,7 @@ fn a_second_run_appends_to_the_first_rather_than_replacing_it() {
 /// busy room passes `FLUSH_EVERY` constantly and is always fresh; a quiet room
 /// used to reach the disk only when the actor called `flush()` on the save
 /// tick, which puna deploys at 30 seconds. So a room with somebody watching the
-/// feed — one check every few seconds, nowhere near a thousand — was the room
+/// feed (one check every few seconds, nowhere near a thousand) was the room
 /// whose file was worst: half a minute of nothing, then a burst.
 ///
 /// Deliberately no `journal.flush()` and no `writer.finish()` before the read.
@@ -109,7 +109,7 @@ fn a_tail_below_the_batch_size_is_flushed_without_anybody_asking() {
          anything reading this file is as stale as the save interval: {body}"
     );
 
-    // The handles are still live, which is the whole point — this is a running
+    // The handles are still live, which is the whole point: this is a running
     // room, not a shutdown.
     drop(journal);
     writer.finish();
@@ -138,7 +138,7 @@ fn a_record_carries_resolved_names_for_both_sides() {
     assert_eq!(row["location"], 5_606_192);
     let expected = &data.slot_info[&1].name;
     assert_eq!(row["finder_name"], expected.as_str());
-    // Resolved, not a fallback — the point of doing this in the writer rather
+    // Resolved, not a fallback: the point of doing this in the writer rather
     // than storing the string per record.
     let location_name = row["location_name"].as_str().unwrap();
     assert!(
@@ -147,7 +147,7 @@ fn a_record_carries_resolved_names_for_both_sides() {
     );
 }
 
-/// A player name containing a quote must not make the file unparseable — the
+/// A player name containing a quote must not make the file unparseable: the
 /// worst place to discover an escaping bug is a history nobody reads until
 /// months later.
 #[test]
@@ -160,7 +160,7 @@ fn a_name_needing_escapes_still_produces_valid_json() {
 
     let (journal, writer) = Journal::open(&dir, data, names).expect("opens");
     // An unknown receiver takes the fallback path, which builds its name from
-    // the id — the escaping still has to hold for every field.
+    // the id, and the escaping still has to hold for every field.
     journal.record(record(5_606_192, 1, u32::MAX));
     drop(journal);
     writer.finish();
@@ -172,8 +172,8 @@ fn a_name_needing_escapes_still_produces_valid_json() {
     }
 }
 
-/// Nothing recorded still leaves a well-formed, empty file rather than no file
-/// — an organizer asking for a quiet room's history should get an empty answer,
+/// Nothing recorded still leaves a well-formed, empty file rather than no
+/// file: an organizer asking for a quiet room's history should get an empty answer,
 /// not a missing one.
 #[test]
 fn a_room_with_no_checks_still_has_a_journal() {
@@ -196,7 +196,7 @@ fn a_room_with_no_checks_still_has_a_journal() {
 /// This is the guarantee the old `1 << 19` constant bought, and the reason it
 /// mattered: `release_player` feeds every location a slot owns through the
 /// check path in one call, so a channel smaller than that would put the drop
-/// path — documented as reserved for a disk that has genuinely stopped — on the
+/// path (documented as reserved for a disk that has genuinely stopped) on the
 /// ordinary release of a large room, silently losing history.
 ///
 /// Sizing from the seed keeps it exactly, because a location can only ever
@@ -226,8 +226,8 @@ fn the_buffer_always_covers_a_whole_room_release() {
 ///
 /// `sync_channel` allocates its whole ring up front and stamps every slot, so
 /// this is resident from startup whether or not anything is ever queued. At the
-/// old flat constant a 1-slot, 97-location room held 524,288 slots of 56 bytes
-/// — 28 MiB, about half the process's RSS, for a seed whose every location
+/// old flat constant a 1-slot, 97-location room held 524,288 slots of 56
+/// bytes: 28 MiB, about half the process's RSS, for a seed whose every location
 /// together is 97 records.
 #[test]
 fn a_tiny_seed_does_not_reserve_a_huge_seeds_buffer() {

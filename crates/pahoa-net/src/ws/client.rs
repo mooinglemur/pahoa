@@ -1,7 +1,7 @@
 //! The client half of the WebSocket layer.
 //!
 //! Exists for the load driver, which has to negotiate permessage-deflate to
-//! measure anything meaningful about compression — and no WebSocket crate does
+//! measure anything meaningful about compression, and no WebSocket crate does
 //! that, which is why this layer is here in the first place. It is deliberately
 //! minimal: no fragmentation on send, no close-handshake bookkeeping beyond
 //! echoing, because the traffic it generates is Archipelago's, which does
@@ -11,7 +11,7 @@
 //! serves TLS could not be driven by this at all while it opened its own
 //! socket, which left two things unmeasurable: puna's load generator against
 //! any real room, every one of which is `wss://`, and pahoa's own `loadtest`
-//! example against pahoa's own TLS listener — so the acceptor, the session
+//! example against pahoa's own TLS listener, so the acceptor, the session
 //! setup and the cost of a thousand handshakes had never been under load from
 //! the harness written to find exactly that kind of problem.
 //!
@@ -32,7 +32,7 @@ pub struct Client<S = TcpStream> {
     session: Session,
     buf: BytesMut,
     deflater: Option<Deflater>,
-    /// Masking keys need only be varied, not unpredictable — masking protects
+    /// Masking keys need only be varied, not unpredictable: masking protects
     /// intermediaries from cache poisoning, not the payload from being read.
     counter: u32,
     pub deflate: bool,
@@ -81,7 +81,7 @@ impl Client<TcpStream> {
     /// Consume whatever has already arrived without waiting for more.
     ///
     /// The load driver's connections exist mostly to *receive*, and a client
-    /// that stops reading is indistinguishable from one that is too slow — the
+    /// that stops reading is indistinguishable from one that is too slow: the
     /// server would drop it, and the run would measure the wrong thing.
     ///
     /// **`TcpStream` only**, because it is built on `try_read` and `AsyncRead`
@@ -112,7 +112,7 @@ impl Client<TcpStream> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
-    /// Upgrade over a stream somebody else connected — a TLS session, a pipe, a
+    /// Upgrade over a stream somebody else connected: a TLS session, a pipe, a
     /// duplex in a test.
     ///
     /// `host` is what goes in the `Host:` header. The caller owns SNI and
@@ -152,7 +152,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
                 format!("upgrade refused: {}", response.lines().next().unwrap_or("")),
             ));
         }
-        // Anything past the blank line is already WebSocket traffic — pahoa
+        // Anything past the blank line is already WebSocket traffic: pahoa
         // sends `RoomInfo` unprompted, so this is the common case rather than a
         // corner one.
         let leftover = buf.split_off(end);
@@ -269,7 +269,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S> {
 /// something else sends.
 ///
 /// The load driver needs this: polling for readable bytes on a timer makes the
-/// *client* the bottleneck, and the server would then drop it for lagging —
+/// *client* the bottleneck, and the server would then drop it for lagging,
 /// turning a measurement of the server into a measurement of the harness.
 pub struct Reader<R = tokio::net::tcp::OwnedReadHalf> {
     read: R,
@@ -287,8 +287,8 @@ pub struct Writer<W = tokio::net::tcp::OwnedWriteHalf> {
 impl<R: AsyncRead + Unpin> Reader<R> {
     /// Next message, awaiting rather than polling. `None` on close.
     ///
-    /// Pings are *not* answered here — the writer half owns the socket for
-    /// writing — but Archipelago's server does not ping, so nothing depends on
+    /// Pings are *not* answered here (the writer half owns the socket for
+    /// writing) but Archipelago's server does not ping, so nothing depends on
     /// it in this configuration.
     pub async fn recv(&mut self) -> io::Result<Option<String>> {
         loop {
@@ -317,7 +317,7 @@ impl<R: AsyncRead + Unpin> Reader<R> {
     ///
     /// For load generation, where the question is what the *server* costs. A
     /// client that fully inflates every broadcast is far more expensive than the
-    /// server that compressed it once — at 6000 connections the harness would
+    /// server that compressed it once: at 6000 connections the harness would
     /// become the bottleneck and the run would measure the harness. The server
     /// still does all of its own work: the extension is negotiated, the payload
     /// is compressed, the bytes are written.
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn absent_window_parameters_mean_the_maximum() {
         // RFC 7692: an omitted `*_max_window_bits` is not "the default we like",
-        // it is "unconstrained" — guessing lower would fail to inflate.
+        // it is "unconstrained": guessing lower would fail to inflate.
         let response = "HTTP/1.1 101 Switching Protocols\r\n\
              Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n";
         assert_eq!(parse_accepted(response), Some((15, 15, false)));

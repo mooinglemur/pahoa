@@ -3,7 +3,7 @@
 //! Scope is deliberately closed. Decoding four real `.archipelago` files
 //! (75/35/17630 slots/games/locations being the largest) yields a union of
 //! exactly 33 opcodes, all protocol 4. Anything outside that set is refused
-//! with [`Error::UnsupportedOpcode`] rather than handled generically — a
+//! with [`Error::UnsupportedOpcode`] rather than handled generically: a
 //! narrow, auditable reader beats a permissive one for a format that is both
 //! attacker-influenced and a remote-code-execution vector in its native runtime.
 
@@ -51,8 +51,8 @@ mod op {
 
 /// Valid pickle opcodes we deliberately do not implement, named so the error
 /// says which one rather than just a byte. Everything here is either legacy
-/// text-protocol, an opcode Archipelago has never been observed to emit, or —
-/// in the case of the `*_GLOBAL`/`INST` family — a construct we refuse on
+/// text-protocol, an opcode Archipelago has never been observed to emit, or,
+/// in the case of the `*_GLOBAL`/`INST` family, a construct we refuse on
 /// principle because it names arbitrary importable objects.
 fn known_unsupported(opcode: u8) -> Option<&'static str> {
     Some(match opcode {
@@ -105,7 +105,7 @@ const MAX_DEPTH: usize = 256;
 /// **This is the only bound that survives a well-compressed payload.** The cost
 /// of decoding is a function of opcode *count*, not of input size: a one-byte
 /// integer is two bytes of pickle and becomes a tree node an order of magnitude
-/// larger, so a caller that caps what it hands us — even strictly — still
+/// larger, so a caller that caps what it hands us, even strictly, still
 /// leaves millions of objects reachable. A byte cap on the input is a
 /// necessary layer and not a sufficient one.
 ///
@@ -117,14 +117,14 @@ const MAX_DEPTH: usize = 256;
 /// It crashed the reference server it was uploaded to.
 ///
 /// Against that, a sixteen-seed corpus: the largest real seed decodes 1,321,953
-/// opcodes and a synthetic 2000-slot seed — the size this server is designed
-/// for — decodes 2,379,014, costing about 200 MB. Four million leaves that
+/// opcodes and a synthetic 2000-slot seed (the size this server is designed
+/// for) decodes 2,379,014, costing about 200 MB. Four million leaves that
 /// roughly 1.7× of room while refusing the attack outright.
 ///
 /// **The limit is also the memory ceiling**, which is what keeps it from being
 /// set casually high: refusal happens *at* the limit, so the budget is what an
 /// attacker can still make this allocate before being told no. At roughly 80
-/// bytes of tree per object that is around 550 MB — survivable, bounded, and
+/// bytes of tree per object that is around 550 MB: survivable, bounded, and
 /// the price of leaving real seeds room to grow.
 ///
 /// **A limit that refuses a legitimate seed is a worse bug than the one it
@@ -143,7 +143,7 @@ pub struct Reader<'a> {
     /// stack index so materialization on shrink is a tail scan.
     live: Vec<(usize, usize)>,
     /// Memo indices this stream actually fetches. `None` means "unknown, so
-    /// track everything" — the safe fallback when the pre-scan gives up.
+    /// track everything": the safe fallback when the pre-scan gives up.
     referenced: Option<std::collections::HashSet<u32>>,
     allowlist: &'a Allowlist,
     /// Objects built so far, against [`MAX_OBJECTS`].
@@ -155,7 +155,7 @@ pub struct Reader<'a> {
 /// Almost nothing does. A 2000-slot multidata memoizes hundreds of thousands of
 /// values but fetches only a few thousand, and effectively never re-fetches a
 /// large container. Knowing the target set up front means unreferenced entries
-/// cost nothing at all — no clone on MEMOIZE, no materialization on pop — which
+/// cost nothing at all (no clone on MEMOIZE, no materialization on pop) which
 /// is what keeps [`MemoSlot::Live`] tracking from being expensive.
 ///
 /// Returns `None` if the stream cannot be scanned, in which case the caller
@@ -266,7 +266,7 @@ fn scan_memo_refs(buf: &[u8]) -> Option<std::collections::HashSet<u32>> {
 /// Pickle memoizes a container the moment it is *created*, i.e. while it is
 /// still empty, then fills it, and may fetch it back later with BINGET. CPython's
 /// memo holds a reference, so that fetch sees the filled container. Snapshotting
-/// the value at MEMOIZE time instead yields an empty one — silent corruption
+/// the value at MEMOIZE time instead yields an empty one: silent corruption
 /// anywhere a structure aliases the same list, dict or set twice.
 ///
 /// So mutable containers are tracked by stack position while they are still
@@ -314,8 +314,8 @@ impl<'a> Reader<'a> {
                 break;
             }
             self.live.pop();
-            // Only clone here — once per aliased container, at the point it is
-            // consumed — rather than on every MEMOIZE.
+            // Only clone here, once per aliased container, at the point it is
+            // consumed, rather than on every MEMOIZE.
             self.memo[memo_idx] = MemoSlot::Value(self.stack[stack_idx].clone());
         }
     }
@@ -378,8 +378,8 @@ impl<'a> Reader<'a> {
             });
         }
         // **Counted here because this is the only door.** Every object this
-        // reader builds is pushed exactly once — elements are pushed before a
-        // container pops them into itself — so one counter on one function
+        // reader builds is pushed exactly once (elements are pushed before a
+        // container pops them into itself) so one counter on one function
         // bounds the whole tree, and a new opcode cannot forget to pay.
         //
         // Deliberately never decremented: the budget is for the whole decode

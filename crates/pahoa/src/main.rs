@@ -1,4 +1,4 @@
-//! pahoa — an Archipelago multiworld server.
+//! pahoa: an Archipelago multiworld server.
 //!
 //! Argument parsing, wiring, and three subcommands: `serve`, `inspect`, and a
 //! `selftest` that exists because a static binary in a `scratch` image has no
@@ -28,7 +28,7 @@ use tracing::level_filters::LevelFilter;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const USAGE: &str = "\
-pahoa — Archipelago multiworld server
+pahoa: Archipelago multiworld server
 
 USAGE:
     pahoa serve <file.archipelago> [options]
@@ -42,25 +42,25 @@ SERVE OPTIONS
     --port <n>               Listen port (default 38281)
     --filtered-port <n>      A second port serving the scoped feed: a client
                              connecting here receives only what concerns its own
-                             slot. Needs no client support — the port is the
+                             slot. Needs no client support: the port is the
                              interface.
     --save-dir <dir>         Where the room persists itself
     --save-interval <secs>   Save cadence (default 60)
     --journal                Append the room's history to history.jsonl in the
-                             save directory: one JSON line per event — checks,
-                             cheats, hints, chat, DeathLinks, option changes —
+                             save directory: one JSON line per event (checks,
+                             cheats, hints, chat, DeathLinks, option changes)
                              continuing across restarts. Needs --save-dir, and
                              is not in the log stream.
     --ping-interval <secs>   WebSocket keepalive cadence (default 20, 0 off).
-                             The server is the only side that pings — clients
-                             turn theirs off — so an idle connection is silent
+                             The server is the only side that pings, clients
+                             turn theirs off, so an idle connection is silent
                              without this, and middleboxes reap silent flows.
     --ping-timeout <secs>    How long a client has to answer a ping before it is
                              dropped (default 20, 0 never drops). Not a retry
                              allowance: TCP does not lose pings, so this is
                              headroom for a busy client to reply.
     --outbound-budget <MiB>  Cap on queued outbound data across all clients.
-                             Defaults to 288 KiB per slot, floored at 64 MiB —
+                             Defaults to 288 KiB per slot, floored at 64 MiB:
                              a 2000-slot room gets 562 MiB, a small one 64.
     --shards <n>             Fan-out width, 1 to 32. Defaults to one shard per
                              512 expected connections (3 per slot), so a
@@ -78,7 +78,7 @@ SERVE OPTIONS
                              by --shards; a broadcast lands in every shard, so
                              the width buys no broadcast headroom at all. This
                              memory sits OUTSIDE --outbound-budget, and it is
-                             the width that multiplies it — the startup line
+                             the width that multiplies it. The startup line
                              reports what the two together reserve.
     --log-level <level>      trace, debug, info, warn, error (default info).
                              Logs go to stderr.
@@ -169,7 +169,7 @@ const INSPECT_OPTS: &[Opt] = &[flag("--help", &["-h"])];
 /// `!release` and `!collect` test their mode with `"enabled" in mode`, so every
 /// spelling means something for them. `!remaining` and `!countdown` compare for
 /// **equality**, so a value like `auto-enabled` would match no branch and sit
-/// there doing nothing — which is why their choices are narrower here, as they
+/// there doing nothing, which is why their choices are narrower here, as they
 /// are in the reference's own argparse (`MultiServer.py:2618-2643`).
 const RELEASE_MODES: &[Permission] = &[
     Permission::Auto,
@@ -232,7 +232,7 @@ const LOG_LEVELS: &[(&str, LevelFilter)] = &[
     ("error", LevelFilter::ERROR),
 ];
 
-/// Also accepted, and not advertised — the same bargain [`Opt::aliases`] makes.
+/// Also accepted, and not advertised: the same bargain [`Opt::aliases`] makes.
 /// These are Python `logging`'s spellings, which is what anyone arriving from
 /// the reference server's `--loglevel` will type.
 const LOG_LEVEL_ALIASES: &[(&str, LevelFilter)] = &[
@@ -315,7 +315,7 @@ fn serve_command(argv: &[String]) -> Result<(), String> {
 
     // Which of those were actually asked for. A save restores all of them and
     // wins, so `serve::run` needs to know which ones the operator will be
-    // surprised to see overruled — a flag left off cannot be overruled, since
+    // surprised to see overruled: a flag left off cannot be overruled, since
     // its value is the default the save is replacing anyway.
     //
     // Both halves of the test are needed: `is_set` only knows about bare flags,
@@ -488,7 +488,7 @@ fn one_path<'a>(args: &'a cli::Parsed, cmd: &str) -> Result<&'a str, String> {
 
 /// Strict mode parsing, for the command line only.
 ///
-/// [`Permission::from_text`] is deliberately lenient — it reproduces the
+/// [`Permission::from_text`] is deliberately lenient: it reproduces the
 /// reference's substring test, where an unrecognized word quietly becomes
 /// `disabled`. That is right for a multidata field and wrong for a flag: an
 /// operator who types `--release-mode enable` should be told, not handed a room
@@ -525,8 +525,8 @@ fn log_level(text: &str) -> Result<LevelFilter, String> {
 ///
 /// The split is on whether a subscriber has been installed, and it is exactly
 /// the right question. Before `init_logging` there is nowhere for an event to
-/// go — a bad `--log-format` value genuinely cannot be reported as JSON, since
-/// the format is what failed to parse — and after it, `eprintln!` would put a
+/// go (a bad `--log-format` value genuinely cannot be reported as JSON, since
+/// the format is what failed to parse) and after it, `eprintln!` would put a
 /// bare prose line into the stream `--log-format json` exists to keep
 /// machine-readable. That line is the *fatal* one, so it is the worst possible
 /// one to lose: a shipper configured to reject non-JSON would drop precisely
@@ -551,7 +551,7 @@ fn report(result: Result<(), String>) -> ExitCode {
 
 /// Known-answer checks over both foundation crates.
 ///
-/// This exists so a built artifact can prove itself in the target environment —
+/// This exists so a built artifact can prove itself in the target environment:
 /// a static musl binary in a scratch image has no test runner, and "it linked"
 /// is not the same as "it computes the right answers".
 fn selftest() -> Result<(), String> {
@@ -576,7 +576,7 @@ fn selftest() -> Result<(), String> {
     }
 
     // Bignum passthrough. This exact value appears in real multidata as
-    // slot_data[..]["seed_name"], and exceeds u64 — LONG1 with 9 little-endian
+    // slot_data[..]["seed_name"], and exceeds u64: LONG1 with 9 little-endian
     // bytes.
     let big = from_slice(
         b"\x80\x04\x8a\x09\x2d\xe2\x10\x8f\xa3\x8f\xbe\x16\x03.",

@@ -7,7 +7,7 @@ or a refusal. Getting one of those boundaries wrong spends a player's hint
 points on the wrong item, so the scoring is pinned against the real function
 rather than against a reading of it.
 
-Uses Archipelago's `Utils` directly, which in turn uses jellyfish — so this also
+Uses Archipelago's `Utils` directly, which in turn uses jellyfish, so this also
 confirms `strsim::damerau_levenshtein` is the same algorithm jellyfish provides.
 
     ~/src/Archipelago/.venv/bin/python tools/gen-fuzzy-vectors.py \\

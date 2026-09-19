@@ -145,7 +145,7 @@ mod tests {
         //
         // Pickle memoizes the dict while it is still EMPTY, fills it, and only
         // then fetches it back with BINGET. A reader that snapshots the value at
-        // MEMOIZE time silently yields `[{"a": 1}, {}]` — the second reference
+        // MEMOIZE time silently yields `[{"a": 1}, {}]`, the second reference
         // frozen at its empty state. CPython's memo holds a reference, so both
         // entries are the same filled dict.
         let stream = b"\x80\x04\x95\x10\x00\x00\x00\x00\x00\x00\x00\x5d\x94\x28\x7d\x94\x8c\x01\x61\x94\x4b\x01\x73\x68\x01\x65\x2e";
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn builds_enum_via_reduce() {
-        // NetUtils.SlotType(1) — STACK_GLOBAL, arg, TUPLE1, REDUCE
+        // NetUtils.SlotType(1): STACK_GLOBAL, arg, TUPLE1, REDUCE
         let v = decode(b"\x80\x04\x8c\x08NetUtils\x8c\x08SlotType\x93K\x01\x85R.").unwrap();
         assert_eq!(
             v.as_instance_of("NetUtils", "SlotType").unwrap(),

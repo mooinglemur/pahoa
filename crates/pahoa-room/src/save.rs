@@ -4,7 +4,7 @@
 //!
 //! Archipelago persists a pickled dict (`MultiServer.py:656-683`). Reading that
 //! back would need a pickle *writer* and bit-exact serialization of CPython's
-//! Mersenne Twister state — the riskiest half of `pahoa-pickle` — bought for an
+//! Mersenne Twister state, the riskiest half of `pahoa-pickle`, bought for an
 //! interop nobody has asked for. The plan cut it deliberately. What is kept is
 //! the *contents*: this stores everything `get_save` does, plus one thing it
 //! does not (see [`Snapshot::allow_releases`]), and nothing it treats as
@@ -20,7 +20,7 @@
 //!   `Arc::make_mut`, so taking one is a refcount bump per slot and nothing is
 //!   copied until the next write to a slot that a save is still holding.
 //! - [`Snapshot::encode`] is pure CPU on a background thread and may take its
-//!   time. It sorts, so the same state always produces the same bytes — which
+//!   time. It sorts, so the same state always produces the same bytes, which
 //!   is what makes "restore round-trips" a testable claim rather than a hope.
 //!
 //! # Encoding
@@ -31,7 +31,7 @@
 //! - a slot's checked locations are sorted and **delta-encoded**, so ids that
 //!   are eight bytes apiece in memory cost one or two on disk;
 //! - hint entrance strings go in a **table** and are referenced by index. Every
-//!   hint is held twice — once by the finder, once by the receiver — so even a
+//!   hint is held twice (once by the finder, once by the receiver) so even a
 //!   seed with unique entrances pays for each string once instead of twice.
 //!
 //! Neither is speculative: both are measured in `tests/save_scale.rs`, which is
@@ -56,7 +56,7 @@ const MAGIC: &[u8; 8] = b"PAHOASAV";
 /// **2 added `locked_slots`**, appended after the timers. Reading is gated on
 /// the version rather than on whether bytes remain, and that is deliberate: the
 /// body's length and CRC are both checked before any field is parsed, so
-/// "ran out of bytes" would be a sound test here — but it would also make every
+/// "ran out of bytes" would be a sound test here, but it would also make every
 /// future trailing field silently optional, and a save that lost its tail to a
 /// bug rather than to truncation would then load with defaults instead of
 /// failing. Gating on the version keeps "this field is absent" a fact about the
@@ -65,7 +65,7 @@ const MAGIC: &[u8; 8] = b"PAHOASAV";
 /// The cost is that a rolled-back server refuses a newer save outright. That is
 /// the intended trade for a field carrying access control: a lock that quietly
 /// stopped holding after a downgrade is worse than a room that will not start.
-/// **3 added `filters`**, as JSON rather than typed fields — see
+/// **3 added `filters`**, as JSON rather than typed fields. See
 /// [`crate::filter`] for why that is the last bump this feature should need.
 pub const FORMAT_VERSION: u8 = 3;
 
@@ -154,8 +154,8 @@ pub struct Snapshot {
     /// Slots an administrator has barred from connecting.
     ///
     /// **Saved because a lock that a restart lifted would be worse than no
-    /// lock at all.** The reason to bar a slot — a griefer, a mistaken entry, a
-    /// player asked to stop until an organizer sorts something out — outlives
+    /// lock at all.** The reason to bar a slot (a griefer, a mistaken entry, a
+    /// player asked to stop until an organizer sorts something out) outlives
     /// any one process, and a room that quietly re-admits them on its next
     /// deploy fails in exactly the moment it was set up for. Added in format
     /// version 2; see [`FORMAT_VERSION`].
@@ -165,9 +165,9 @@ pub struct Snapshot {
     /// each slot's own under its `team_slot` spelling.
     ///
     /// **Stored as the rules' JSON rather than as typed fields**, deliberately.
-    /// The matcher vocabulary is open-ended — bounce tags alone are a
+    /// The matcher vocabulary is open-ended (bounce tags alone are a
     /// convention rather than a schema, with `TrapLink` already the second
-    /// entry and not the last — so encoding it would mean a `FORMAT_VERSION`
+    /// entry and not the last) so encoding it would mean a `FORMAT_VERSION`
     /// bump, and a rollback boundary, every time a rule gained a field. The
     /// datastore's values are carried the same way and for the same reason.
     /// Validation therefore happens where the rules enter, in
@@ -364,7 +364,7 @@ impl Snapshot {
             w.key(key);
         }
 
-        // Values keep their own key order — `preserve_order` is load-bearing,
+        // Values keep their own key order: `preserve_order` is load-bearing,
         // because a client sees that order echoed back in `Retrieved`.
         let mut stored: Vec<_> = self.stored_data.iter().collect();
         stored.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -386,7 +386,7 @@ impl Snapshot {
             }
         }
 
-        // Version 2. Sorted for a stable encoding, as everywhere else here — a
+        // Version 2. Sorted for a stable encoding, as everywhere else here: a
         // save whose bytes change when nothing changed defeats the dirty check.
         let mut locked = self.locked_slots.clone();
         locked.sort_unstable();
@@ -586,7 +586,7 @@ impl Snapshot {
 /// Passwords are deliberately absent. They used to be the first two fields
 /// here, and because [`Room::restore`](crate::Room::restore) assigns the
 /// decoded options wholesale, a saved password silently replaced the configured
-/// one on every restart — so rotating a password appeared to work and then
+/// one on every restart, so rotating a password appeared to work and then
 /// reverted, and the configured value was never authoritative. The environment
 /// is the only source now, re-read on every start, which is also what lets a
 /// live rotation survive a restart.
@@ -690,7 +690,7 @@ impl Writer {
     }
 
     /// An enum discriminant. Paired with [`Reader::tag`] so the two sides
-    /// cannot drift apart on whether the value is zigzagged — discriminants are
+    /// cannot drift apart on whether the value is zigzagged: discriminants are
     /// small and non-negative, and zigzagging them would only cost bytes.
     fn tag(&mut self, v: i64) {
         self.uvar(v as u64);
@@ -838,7 +838,7 @@ mod tests {
     fn a_huge_count_fails_instead_of_reserving_for_it() {
         // A save comes off a shared filesystem, so a length in it is a claim,
         // not a fact. `Reader::count` checks every length that drives an
-        // allocation against what is actually left — without that, one corrupt
+        // allocation against what is actually left. Without that, one corrupt
         // varint is a multi-gigabyte `with_capacity` and an OOM at startup.
         let mut w = Writer::default();
         w.uvar(u32::MAX as u64); // a seed name of four billion bytes
@@ -911,7 +911,7 @@ mod tests {
         }
 
         // And what comes back carries none of them, so a wholesale assignment
-        // could only ever clear what was configured — which is why
+        // could only ever clear what was configured, which is why
         // `Room::restore` puts them back explicitly.
         let decoded = decode_options(&mut Reader::new(&body)).expect("decodes");
         assert_eq!(decoded.password, None);

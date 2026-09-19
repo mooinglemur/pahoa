@@ -5,10 +5,10 @@ Two functions produce nearly every line of chat a room emits, and both are
 easy to get subtly wrong by writing out what the message *reads* like instead
 of what it *is*:
 
-- `MultiServer.json_format_send_event` — the item feed. It sends bare **ids**
+- `MultiServer.json_format_send_event`: the item feed. It sends bare **ids**
   with `item_id`/`location_id` part types, not resolved names, and it has a
   separate "found their" phrasing when a slot sends to itself.
-- `NetUtils.Hint.as_network_message` — the hint line, including the entrance
+- `NetUtils.Hint.as_network_message`: the hint line, including the entrance
   clause and the trailing status label.
 
 Encoding goes through `NetUtils.encode`, so the vectors are byte-exact and also

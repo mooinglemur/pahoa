@@ -2,8 +2,8 @@
 //!
 //! # Why the file is committed
 //!
-//! `MultiData::parse` has no encoder beside it — a seed can be read and never
-//! written — so a malicious one cannot be synthesized in a test. The only way to
+//! `MultiData::parse` has no encoder beside it (a seed can be read and never
+//! written) so a malicious one cannot be synthesized in a test. The only way to
 //! keep this refused is to hold the real sample, and that is what
 //! `tests/fixtures/poisoned_multidata.archipelago` is: 38,559 bytes, no personal
 //! data, and the actual file that crashed an Archipelago host in the wild.
@@ -13,7 +13,7 @@
 //!
 //! One slot, one location, and 11,422,785 copies of the integer zero in
 //! `precollected_items`. Pure repetition, so it inflates **593:1** where real
-//! seeds manage between 2.29:1 and 4.55:1 — 38 KB of file becomes 22 MB of
+//! seeds manage between 2.29:1 and 4.55:1: 38 KB of file becomes 22 MB of
 //! pickle and, before these limits, **1.55 GiB of peak RSS** through this
 //! parser. Upstream reportedly pays about a gigabyte per room for it, because
 //! `precollected_items` outlives the parse as items handed to a slot at connect.
@@ -25,7 +25,7 @@
 //!
 //! - the **inflate cap** bounds a bomb whose input is small,
 //! - the **object budget** bounds what is built from bytes that were already
-//!   admitted — the only one that survives a payload compressing legitimately,
+//!   admitted: the only one that survives a payload compressing legitimately,
 //!   since cost is a function of opcode count rather than of input size,
 //! - the **start-inventory cap** bounds what the *room* holds afterwards, which
 //!   is where this file's real cost lives and which bytes cannot express.
@@ -111,7 +111,7 @@ fn the_object_budget_binds_before_the_inflate_cap_could() {
 /// **The limits must clear every real seed, with room to spare.**
 ///
 /// A limit that refuses a legitimate seed is a worse bug than the one it fixes,
-/// and it fails quietly — on an organizer's upload rather than here. These are
+/// and it fails quietly, on an organizer's upload rather than here. These are
 /// the corpus figures the constants were argued against, kept as a test so that
 /// lowering one has to confront them.
 #[test]
@@ -125,8 +125,8 @@ fn the_limits_clear_the_largest_seed_anyone_has() {
     // **Where the object budget actually runs out**, measured independently by
     // the orchestrator's own generator rather than extrapolated: a synthetic
     // 3000-slot, 250-location seed decodes 3,857,136 opcodes and inflates to
-    // 16.09 MiB. Nobody has generated one for a real game — the largest real
-    // seed either side has seen is 96 slots — but a 2000-slot room is a size
+    // 16.09 MiB. Nobody has generated one for a real game (the largest real
+    // seed either side has seen is 96 slots) but a 2000-slot room is a size
     // this fleet runs, so 3000 is a plausible stress size rather than a
     // hypothetical one.
     //
@@ -266,8 +266,8 @@ fn the_start_inventory_cap_refuses_by_name() {
 
 /// **The inflate cap, with nothing else in the way.**
 ///
-/// The poisoned fixture cannot test this — it inflates to 22 MB, comfortably
-/// under the limit — so the bomb is built here. It need not be valid pickle:
+/// The poisoned fixture cannot test this (it inflates to 22 MB, comfortably
+/// under the limit) so the bomb is built here. It need not be valid pickle:
 /// the point is that the refusal happens during decompression, before a single
 /// object is constructed.
 ///
@@ -281,7 +281,7 @@ fn the_inflate_cap_refuses_a_bomb_before_decoding_anything() {
     let over = pahoa_multidata::MAX_PICKLE_BYTES as usize + 1024;
     let mut file = vec![3u8]; // format byte
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-    // Zeros, so this compresses to a few kilobytes — the whole point of a bomb.
+    // Zeros, so this compresses to a few kilobytes: the whole point of a bomb.
     let chunk = vec![0u8; 1 << 20];
     let mut written = 0;
     while written < over {

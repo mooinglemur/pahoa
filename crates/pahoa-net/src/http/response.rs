@@ -2,7 +2,7 @@
 //!
 //! Every response closes the connection. That is what the WebSocket path's
 //! error responses already do, and it keeps this surface free of a keep-alive
-//! state machine for clients — curl, a kubelet probe, an orchestrator — that
+//! state machine for clients (curl, a kubelet probe, an orchestrator) that
 //! send one request and read one answer.
 
 /// A rendered answer, built before anything is written.

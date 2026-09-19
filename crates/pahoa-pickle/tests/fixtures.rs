@@ -1,6 +1,6 @@
 //! Decodes real `.archipelago` multidata and checks it against CPython.
 //!
-//! Fixtures are not committed — they are large and not ours to redistribute —
+//! Fixtures are not committed (they are large and not ours to redistribute)
 //! so this test reads whatever `.archipelago` files sit in `tests/fixtures/`
 //! (gitignored). Populate it by copying or symlinking the seeds you want
 //! covered:

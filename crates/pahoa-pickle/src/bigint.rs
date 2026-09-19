@@ -1,7 +1,7 @@
 //! Arbitrary-precision integers, for the Python ints that do not fit in `i64`.
 //!
 //! These are rare but real. A live multidata carries
-//! `slot_data[n]["seed_name"] == 56979137468180783661` — larger than `u64`, let
+//! `slot_data[n]["seed_name"] == 56979137468180783661`: larger than `u64`, let
 //! alone `i64`. `slot_data` is opaque and forwarded verbatim to clients in
 //! `Connected`, so the value has to survive a decode/encode round trip exactly;
 //! saturating or truncating it would silently corrupt a world's own state.

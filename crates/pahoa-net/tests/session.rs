@@ -1,7 +1,7 @@
 //! End-to-end sessions over real WebSockets.
 //!
-//! These drive the whole stack — listener, reader task, actor, shards, writer
-//! task — with clients that speak the wire protocol exactly as a real
+//! These drive the whole stack (listener, reader task, actor, shards, writer
+//! task) with clients that speak the wire protocol exactly as a real
 //! Archipelago client does.
 
 use futures_util::{SinkExt, StreamExt};
@@ -153,7 +153,7 @@ fn first_player(data: &MultiData) -> (u32, String, String) {
 ///
 /// Deliberately ahead of any fixture's floor rather than matching a real
 /// client: a seed carries a *per-slot* minimum client version, and a slot that
-/// demands more than this is refused — correctly — which leaves a test waiting
+/// demands more than this is refused, correctly, which leaves a test waiting
 /// for a `Connected` that will never arrive. The fixture that prompted this
 /// number has a slot requiring 0.7.0.
 ///
@@ -344,8 +344,8 @@ async fn the_item_feed_reaches_a_bystander() {
         .await;
 
     // The feed is a broadcast, so an uninvolved player still sees it. `b`'s own
-    // join and tutorial lines now arrive *after* its `Connected` — the reply to
-    // `Connect` comes first — so scan for the one this test is about rather
+    // join and tutorial lines now arrive *after* its `Connected` (the reply to
+    // `Connect` comes first) so scan for the one this test is about rather
     // than taking whichever PrintJSON lands next.
     let mut printed = b.wait_for("PrintJSON").await;
     for _ in 0..10 {
@@ -466,13 +466,13 @@ async fn many_clients_sustain_a_release_cascade() {
     server.shutdown().await;
 }
 
-/// A joining client must receive its *own* join announcement — **after** the
+/// A joining client must receive its *own* join announcement, **after** the
 /// `Connected` that answers its `Connect`.
 ///
 /// Two bugs meet here, so the test asserts both.
 ///
 /// The shards filter `AllText` against their own copy of `auth`, and the room
-/// published that flag only after the whole handler returned — so the join
+/// published that flag only after the whole handler returned, so the join
 /// broadcast went out while the shard still saw the joiner as unauthenticated,
 /// and everyone received the message except the client it was about. That
 /// cannot be caught a level down: `Recorder` resolves recipients against the
@@ -481,7 +481,7 @@ async fn many_clients_sustain_a_release_cascade() {
 ///
 /// The order is the second. `Connected` is the reply to `Connect` and has to
 /// arrive first, even though `MultiServer.py:1936-1939` announces the join
-/// *before* sending it — the reference's announcements are `async_start`
+/// *before* sending it: the reference's announcements are `async_start`
 /// tasks that cannot run until the handler yields, so its wire order is the
 /// reverse of its source order. A client written against the reference is
 /// entitled to `Connected` first, and one of them refuses the connection
@@ -537,7 +537,7 @@ async fn a_joining_client_sees_its_own_join_announcement() {
 /// **`Connected` is the first thing a client hears after `Connect`.**
 ///
 /// A client is entitled to treat the reply to `Connect` as the next packet it
-/// receives — the protocol documents `Connected` as that reply — and at least
+/// receives (the protocol documents `Connected` as that reply) and at least
 /// one refuses the connection outright with
 /// `IllegalResponse { expected: "Connected", received: "PrintJSON" }` when
 /// anything else arrives first.
@@ -580,7 +580,7 @@ async fn connected_precedes_every_other_packet() {
     server.shutdown().await;
 }
 
-/// **The send half, over a real socket** — the only place it can be tested.
+/// **The send half, over a real socket**: the only place it can be tested.
 ///
 /// A slot's *receive* filter runs in the room and a `Recorder` sees it, but the
 /// send half runs in the shard, where a broadcast's audience is expanded. The
@@ -607,14 +607,14 @@ async fn a_send_filter_keeps_one_print_type_away_from_a_client() {
 
     // Say something. The room broadcasts it as a Chat, which this slot filters.
     client.send(json!([{"cmd": "Say", "text": "hello"}])).await;
-    // And run a command, whose reply is a different print type — the positive
+    // And run a command, whose reply is a different print type: the positive
     // control, so a test that filtered *everything* could not pass.
     client
         .send(json!([{"cmd": "Say", "text": "!players"}]))
         .await;
 
     // The control has to be **ordered after** the chat, or the scan can finish
-    // before the chat would have arrived and pass without proving anything —
+    // before the chat would have arrived and pass without proving anything,
     // which is exactly what an earlier version of this test did, happily
     // filtering `Hint` and still reporting no chat. `!players` is a `Say`, so
     // the room broadcasts its echo as Chat *before* replying with a
@@ -652,8 +652,8 @@ async fn a_send_filter_keeps_one_print_type_away_from_a_client() {
 
 /// The tag announcement, through the real transport rather than a `Recorder`.
 ///
-/// `no_text` is *derived* from the tags, and it is the transport — not the room
-/// — that expands a text broadcast's audience against its own copy of it. So a
+/// `no_text` is *derived* from the tags, and it is the transport, not the room,
+/// that expands a text broadcast's audience against its own copy of it. So a
 /// client that drops `NoText` and is then handed a broadcast exercises a seam
 /// the room-level tests cannot reach: there, recipients resolve against the
 /// room, which is right by construction.
@@ -661,7 +661,7 @@ async fn a_send_filter_keeps_one_print_type_away_from_a_client() {
 /// What this does **not** pin is the ordering. The actor re-pushes membership
 /// after every batch and the shards take control messages ahead of frames, so
 /// the window where an announcement could overtake the update that belongs with
-/// it is real but not reliably reproducible — the room closes it by pushing
+/// it is real but not reliably reproducible: the room closes it by pushing
 /// membership inline, and a test that tried to observe that would be a coin
 /// toss dressed up as an assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -686,7 +686,7 @@ async fn dropping_no_text_starts_delivering_text_again() {
 
     // Its own tag change is the first *broadcast* text it is entitled to, and
     // it arrives only if the transport learned about the change before the
-    // broadcast went out — which is why the room tells it first. The tutorial
+    // broadcast went out, which is why the room tells it first. The tutorial
     // line beats it here and proves nothing either way: that one is a direct
     // send, and `no_text` never applied to it.
     let announced = client.wait_for_print("TagsChanged").await;

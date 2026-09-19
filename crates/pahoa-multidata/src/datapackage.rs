@@ -10,8 +10,8 @@
 //! name groups, so a custom apworld this build has never heard of still resolves
 //! its own names.
 //!
-//! **The fourth, `hint_blacklist`, is serialized nowhere** — it is Python class
-//! data the reference reads out of its installed worlds — so it is compiled into
+//! **The fourth, `hint_blacklist`, is serialized nowhere**: it is Python class
+//! data the reference reads out of its installed worlds, so it is compiled into
 //! this binary instead. See [`crate::hint_blacklist`] for what that trades away.
 //!
 //! The one case the seed cannot cover is a package WebHost has *stripped* to
@@ -175,7 +175,7 @@ impl GameNames {
     ///
     /// Sorted, and deduplicated where a group shares an item's name. Python
     /// builds a `set` here, so ties in the fuzzy ranking that follows resolve
-    /// in whatever order CPython's hashing produced — not reproducible even
+    /// in whatever order CPython's hashing produced: not reproducible even
     /// between its own runs. A deterministic order costs nothing (both sources
     /// are already sorted maps, so this is a merge, not a sort) and makes the
     /// outcome testable.
@@ -232,7 +232,7 @@ pub struct DataPackage {
 ///
 /// There is no "missing hint blacklist" any more: the table is compiled in, so
 /// every game gets one, and a game absent from it gets an empty set rather than
-/// an unknown one — the same answer the reference gives a world that sets none.
+/// an unknown one: the same answer the reference gives a world that sets none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergeReport {
     /// Games taken from the multidata's embedded package.
@@ -249,8 +249,8 @@ impl DataPackage {
     /// the outbound budget was blind to: it sized itself from the slot count,
     /// while a client's largest single download scales with the number of
     /// *games*. A live 189-slot room carrying 106 games answers one
-    /// `GetDataPackage` with 6.19 MB — twenty-four times the per-connection
-    /// share — and thirty clients fetching at once want more than the whole
+    /// `GetDataPackage` with 6.19 MB, twenty-four times the per-connection
+    /// share, and thirty clients fetching at once want more than the whole
     /// budget the slot count produced.
     ///
     /// An estimate rather than a serialization: the point is to size a limit,
@@ -308,8 +308,8 @@ impl DataPackage {
     ///
     /// `needed` is the set of games present in the seed. Everything comes from
     /// the multidata's own embedded package except the hint blacklist, which is
-    /// serialized nowhere and comes from the table compiled into this binary —
-    /// see [`crate::hint_blacklist`].
+    /// serialized nowhere and comes from the table compiled into this binary.
+    /// See [`crate::hint_blacklist`].
     pub fn merge(
         embedded: &BTreeMap<String, GamePackage>,
         needed: &HashSet<String>,
@@ -341,8 +341,8 @@ impl DataPackage {
             games.insert(game.clone(), GameNames::new(merged));
         }
 
-        // Every game can carry Archipelago's own items and locations — the
-        // cheat console, `Nothing` — so their ids resolve in any game's
+        // Every game can carry Archipelago's own items and locations (the
+        // cheat console, `Nothing`) so their ids resolve in any game's
         // context. Only the id->name direction is merged, exactly as the
         // reference does (`MultiServer.py:364-368`): `item_name_to_id` stays
         // the game's own, which is what `!hint` matches names against.
@@ -404,7 +404,7 @@ mod tests {
     }
 
     /// The blacklist is serialized nowhere, so it has to come from the table
-    /// compiled in — and it has to reach a game whose names came from the seed.
+    /// compiled in, and it has to reach a game whose names came from the seed.
     #[test]
     fn the_built_in_hint_blacklist_is_grafted_onto_embedded_data() {
         let embedded = BTreeMap::from([(
@@ -438,7 +438,7 @@ mod tests {
     }
 
     /// Absence means "hints everything", which is what the reference gives a
-    /// world that sets no `hint_blacklist` — not an error and not a warning.
+    /// world that sets no `hint_blacklist`: not an error and not a warning.
     #[test]
     fn a_game_with_no_built_in_entry_hints_everything() {
         let embedded = BTreeMap::from([("Balatro".into(), pkg(&[("Joker", 1)], &[]))]);
@@ -449,7 +449,7 @@ mod tests {
     }
 
     /// Upload replaces the package with {version, checksum}. With no snapshot to
-    /// fall back to, the game is unresolved and names degrade — the room still
+    /// fall back to, the game is unresolved and names degrade: the room still
     /// hosts, and the caller is told.
     #[test]
     fn a_webhost_stripped_stub_is_reported_as_unresolved() {

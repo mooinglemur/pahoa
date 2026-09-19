@@ -9,7 +9,7 @@
 //! matter which way the journal decision goes:
 //!
 //! 1. **`snapshot()` is flat.** Its cost tracks the slot count, not the number
-//!    of checks — otherwise every save stalls the actor for as long as the room
+//!    of checks. Otherwise every save stalls the actor for as long as the room
 //!    has been running, and the whole "disk is write-only" invariant collapses.
 //! 2. **A save with one in flight does not stall the room.** Holding a snapshot
 //!    makes the next write to each touched slot copy it once; that must stay
@@ -44,7 +44,7 @@ fn a_full_save_is_cheap_enough_to_decide_the_journal_question() {
 
     // **The control**: one check each, so every slot is present in every map a
     // snapshot walks, but almost nothing is in them. This is what isolates the
-    // claim — same slot population as the full room below, three orders of
+    // claim: same slot population as the full room below, three orders of
     // magnitude fewer checks.
     for &slot in &slots {
         let first: Vec<i64> = data
@@ -130,7 +130,7 @@ fn a_full_save_is_cheap_enough_to_decide_the_journal_question() {
     // no entries in any map a snapshot walks, so it measures ~3µs of option
     // cloning while the full room measures ~1ms of `Arc::clone` across two
     // thousand slots. Comparing them made `empty * 10` worth ~30µs of a 1ms
-    // budget, so the assertion was really a hardcoded `full < 1ms` — an
+    // budget, so the assertion was really a hardcoded `full < 1ms`: an
     // absolute wall-clock bound on an unoptimized build, and it sat close
     // enough to the true value that ordinary load pushed it over.
     //
@@ -147,7 +147,7 @@ fn a_full_save_is_cheap_enough_to_decide_the_journal_question() {
     );
 
     // And a ceiling on the absolute number, which is the question the module
-    // header poses — is a full snapshot cheap enough to hold the actor for.
+    // header poses: is a full snapshot cheap enough to hold the actor for.
     // Deliberately ~50x the measured value: this exists to catch a snapshot
     // that started encoding or deep-copying, not to police scheduling noise.
     assert!(
@@ -163,7 +163,7 @@ fn a_save_in_flight_does_not_stall_the_room() {
     }
     // Copy-on-write has a cost, and this is where it lands: the first write to
     // a slot after a snapshot copies that slot. It must be paid per slot
-    // touched, not per slot in the room — otherwise a save turns the next check
+    // touched, not per slot in the room. Otherwise a save turns the next check
     // batch into a full-room copy, which is the stall the `Arc`s exist to
     // avoid.
     let data = load(FIXTURE).unwrap();
@@ -198,7 +198,7 @@ fn a_save_in_flight_does_not_stall_the_room() {
 
     eprintln!("check batch: {free:?} with no save in flight, {copying:?} with one");
 
-    // The held snapshot must still show the pre-batch state — that is what
+    // The held snapshot must still show the pre-batch state: that is what
     // makes it a point-in-time copy rather than a live view.
     let held_count = held
         .location_checks

@@ -2,14 +2,14 @@
 //!
 //! pahoa knows about a directory. In the target cluster that is a subdirectory
 //! of a CephFS RWX volume, under Docker it is a volume per room, and in tests it
-//! is a temp dir — one code path for all three. Object storage is a backup tier
+//! is a temp dir: one code path for all three. Object storage is a backup tier
 //! written by ordinary tooling (`restic`, `rclone`) against the same tree, not
 //! something this crate has ever heard of.
 //!
 //! # What a shared filesystem changes
 //!
-//! CephFS does not fail fast. An MDS failover **blocks** — seconds to tens of
-//! seconds, and the same during recovery or rebalance — rather than returning an
+//! CephFS does not fail fast. An MDS failover **blocks**, seconds to tens of
+//! seconds, and the same during recovery or rebalance, rather than returning an
 //! error. So every call here may hang for an unbounded time, and the design
 //! answer is that none of it happens anywhere the room can notice: writes run on
 //! a blocking thread that the actor never awaits, and a save that fails is
@@ -27,8 +27,8 @@
 //! writes straight over the row).
 //!
 //! There is deliberately no previous-generation copy. Temp+rename plus the
-//! format's checksum covers tearing and truncation, and everything else —
-//! media rot, an operator mistake, a bad deploy — is what the backup tier is
+//! format's checksum covers tearing and truncation, and everything else
+//! (media rot, an operator mistake, a bad deploy) is what the backup tier is
 //! for. Keeping a `.prev` here would double the write volume to cover a case
 //! the CronJob already covers better.
 //!
@@ -37,7 +37,7 @@
 //! RWX means two pods genuinely can mount the same directory: a NotReady node
 //! whose kubelet is still running, or a controller that starts a replacement
 //! before the old room is gone. Both would then write whole snapshots over each
-//! other — last writer wins, silently, which is the worst possible shape for
+//! other: last writer wins, silently, which is the worst possible shape for
 //! data loss. An exclusive `flock` held for the life of the process turns that
 //! into a refusal at startup with a clear message. The kernel CephFS client
 //! supports `flock` across nodes, which is what makes this work at all.
@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 /// Reading is deliberately not here. A restore happens once, at startup, before
 /// anything is serving, and the binary knows exactly which store it opened.
 pub trait SaveSink: Send + Sync + 'static {
-    /// Replace the saved state. Blocking, and expected to be — callers run it
+    /// Replace the saved state. Blocking, and expected to be: callers run it
     /// on a thread the room never waits for.
     fn store(&self, bytes: &[u8]) -> io::Result<()>;
 }
@@ -119,7 +119,7 @@ impl SaveStore {
     /// Replace the save atomically.
     ///
     /// Inherent as well as trait method so callers holding a concrete
-    /// `SaveStore` — the tests below, and startup — do not need the trait in
+    /// `SaveStore` (the tests below, and startup) do not need the trait in
     /// scope.
     pub fn store(&self, bytes: &[u8]) -> io::Result<()> {
         let target = self.path();
@@ -186,7 +186,7 @@ mod tests {
         store.store(b"second").unwrap();
         assert_eq!(store.load().unwrap().as_deref(), Some(&b"second"[..]));
 
-        // No temp files left behind — those would accumulate one per save.
+        // No temp files left behind: those would accumulate one per save.
         let strays: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())

@@ -64,7 +64,7 @@ impl ClientStatus {
     }
 
     /// The inverse of [`Self::as_text`], for surfaces that take a name rather
-    /// than the wire's number — the admin API, where `"goal"` is what an
+    /// than the wire's number: the admin API, where `"goal"` is what an
     /// operator would type and `30` is what they would have to look up.
     ///
     /// Kept beside `as_text` so the two spellings cannot drift apart, with a
@@ -157,7 +157,7 @@ impl HintStatus {
 }
 
 /// These are Python `IntEnum`/`IntFlag` types, so their integer value is the
-/// representation — on the wire and in any JSON we emit. serde's default enum
+/// representation, on the wire and in any JSON we emit. serde's default enum
 /// encoding would write the variant *name*, which a client would reject and
 /// which the protocol vectors catch immediately.
 macro_rules! int_enum_serde {

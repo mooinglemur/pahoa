@@ -20,7 +20,7 @@
 //! compressor state runs to tens of KB per connection, which at 6000
 //! connections would be gigabytes of window alone.
 //!
-//! The cost is a slightly worse ratio — no cross-message dictionary. For a
+//! The cost is a slightly worse ratio: no cross-message dictionary. For a
 //! repetitive `PrintJSON` firehose that is a small loss against a ~6000×
 //! saving. The reference server leaves context takeover on
 //! (`MultiServer.py:57-61`); this is a deliberate, spec-compliant divergence.
@@ -166,7 +166,7 @@ impl Inflater {
             //
             // Deliberately not `clamp`: it panics when the lower bound exceeds
             // the upper one, which happens as soon as fewer than 1024 bytes of
-            // headroom remain — a payload inflating to just under the cap would
+            // headroom remain: a payload inflating to just under the cap would
             // abort the process rather than be refused.
             let remaining = self.limit - out.len() + 1;
             let headroom = (out.len() * 2).max(1024).min(remaining);
@@ -311,7 +311,7 @@ mod tests {
         //
         // The mismatch is deliberately *not* asserted by decompressing here.
         // zlib-rs's raw inflate is lenient about an oversized window, so this
-        // side cannot reproduce the peer's failure — real clients (Python
+        // side cannot reproduce the peer's failure. Real clients (Python
         // `websockets`, Autobahn) do reject it, and that is where the end-to-end
         // check lives. What this pins is the fact that made the bug possible:
         // the window is part of the input, so a compressor chosen without it is
@@ -373,8 +373,8 @@ mod tests {
     fn a_payload_landing_near_the_cap_is_refused_rather_than_crashing() {
         // A `clamp` whose lower bound exceeds its upper bound panics, and with
         // `panic = "abort"` in release that is a remote crash rather than a
-        // refused message. The window is narrow — the last kilobyte before the
-        // cap — so it needs sizes either side of the boundary to catch.
+        // refused message. The window is narrow, the last kilobyte before the
+        // cap, so it needs sizes either side of the boundary to catch.
         for limit in [4096usize, 65536] {
             for size in [limit - 1, limit, limit + 1, limit + 1024] {
                 let payload = vec![b'z'; size];
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn a_client_keeping_its_context_is_followed_across_messages() {
         // Without `client_no_context_takeover` the peer's compressor carries its
-        // window forward, so ours has to as well — decompressing message two in
+        // window forward, so ours has to as well: decompressing message two in
         // isolation would fail.
         let mut d = Compress::new_with_window_bits(Compression::new(6), false, WINDOW_BITS);
         let mut stateful = |input: &[u8]| {

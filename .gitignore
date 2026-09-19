@@ -6,8 +6,8 @@
 # large and not ours to redistribute. See crates/pahoa-pickle/tests/fixtures.rs.
 #
 # Ignore those artifacts specifically rather than the whole directory, so that
-# small generated fixtures we *do* want committed — golden vectors, recorded
-# reference outputs from the differential harness — can live alongside them.
+# small generated fixtures we *do* want committed (golden vectors, recorded
+# reference outputs from the differential harness) can live alongside them.
 **/tests/fixtures/*.archipelago
 **/tests/fixtures/*.apsave
 **/tests/fixtures/*.zip

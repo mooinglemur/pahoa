@@ -17,7 +17,7 @@ pub struct NetConfig {
     ///
     /// A room that knows its seed should call [`shards_for`] instead. The
     /// worker-thread fallback here is a last resort for a caller that has no
-    /// slot count — it sizes a *topology* parameter from a *compute* one, and
+    /// slot count: it sizes a *topology* parameter from a *compute* one, and
     /// the two do not track each other. See [`shards_for`].
     pub shards: Option<usize>,
 
@@ -60,7 +60,7 @@ pub struct NetConfig {
     /// connect with `ping_interval=None` (`CommonClient.py:872`), explicitly
     /// turning theirs off, so a room that does not ping leaves an idle
     /// connection completely silent in both directions. Middleboxes reap silent
-    /// flows — commonly at 60s — and neither end is told, which produces a
+    /// flows, commonly at 60s, and neither end is told, which produces a
     /// connection both sides still believe in. Observed in the wild: a browser
     /// client that pings survived where a custom client that did not was
     /// dropped, from the same machine over the same path.
@@ -76,7 +76,7 @@ pub struct NetConfig {
     /// **Not an allowance for a lost ping.** TCP retransmits, so a ping cannot
     /// vanish the way a datagram heartbeat can; one outstanding probe is a
     /// sufficient test and "three strikes" would only add latency. This is
-    /// headroom for the peer's *application* to turn the frame around — a
+    /// headroom for the peer's *application* to turn the frame around: a
     /// single-threaded client inside a long frame, a congested path, a client
     /// whose own receive queue is behind.
     ///
@@ -98,7 +98,7 @@ pub struct NetConfig {
     /// once and its bytes go to every connection, so ratio multiplies by the
     /// connection count while CPU does not. Measured on a full 140-packet
     /// chunk, level 6 costs 175µs against level 1's 87µs and produces 3.6 KiB
-    /// against 8.7 KiB — across a mass release at 6000 connections that is
+    /// against 8.7 KiB: across a mass release at 6000 connections that is
     /// 63 GB versus 149 GB. Level 9 buys a further 0.9% for 73% more time.
     pub compression_level: u32,
 
@@ -114,8 +114,8 @@ pub struct NetConfig {
 
     /// Body bytes accepted on an HTTP request.
     ///
-    /// Generous for the largest admin command — a `say` with a long message is
-    /// still under a kilobyte — and small enough that a public endpoint cannot
+    /// Generous for the largest admin command (a `say` with a long message is
+    /// still under a kilobyte) and small enough that a public endpoint cannot
     /// be made to buffer on anyone's say-so.
     pub max_body_bytes: usize,
 
@@ -138,14 +138,14 @@ pub struct NetConfig {
     ///
     /// `None` runs one port. Both ports terminate the same TLS and serve the
     /// same HTTP surface; only the WebSocket feed differs, and the port is what
-    /// decides which a client gets — because the clients that need the quiet
+    /// decides which a client gets, because the clients that need the quiet
     /// feed cannot select a tag or a path. See `docs/scoped-feed.md`.
     pub filtered_port: Option<u16>,
 
     /// Serve the tracker without authentication even when an admin token is
     /// configured.
     ///
-    /// Off by default. With a token set, the tracker is gated behind it — an
+    /// Off by default. With a token set, the tracker is gated behind it: an
     /// open tracker on a public port lets an anonymous port scan read the
     /// participant list out of every room, which is what a room without a
     /// password relies on staying hidden. A standalone pahoa with no token
@@ -155,7 +155,7 @@ pub struct NetConfig {
 
     /// Bearer token for `/admin/v1/**`.
     ///
-    /// `None` makes the admin surface answer `404` — absent rather than merely
+    /// `None` makes the admin surface answer `404`: absent rather than merely
     /// locked, so a misconfiguration fails closed and is indistinguishable from
     /// a build that never had one.
     pub admin_token: Option<String>,
@@ -221,7 +221,7 @@ impl NetConfig {
 /// The outbound budget for a room of this size.
 ///
 /// The cap exists so a room survives clients that stop reading, so the size
-/// that makes sense follows the connection count — which follows the seed, not
+/// that makes sense follows the connection count, which follows the seed, not
 /// a constant. Players commonly run a game client plus a text client plus a
 /// tracker, so this sizes for **three connections per slot**, the same rule the
 /// rest of the design uses.
@@ -236,22 +236,22 @@ impl NetConfig {
 /// between them before anybody had played a turn.
 ///
 /// So the package is budgeted separately, for several clients fetching at once.
-/// Beyond that many the room degrades the way it is designed to — clients that
-/// cannot be served are dropped and reconnect — rather than by exhausting a cap
+/// Beyond that many the room degrades the way it is designed to (clients that
+/// cannot be served are dropped and reconnect) rather than by exhausting a cap
 /// sized for something else.
 ///
 /// The per-connection allowance below is deliberately *under*
 /// [`NetConfig::per_connection_budget_bytes`]: if the global cap were simply
 /// `connections × 256 KiB` it could never bind before every individual cap did,
 /// and it would stop being a backstop at all. M9 measured a **333 MiB** peak
-/// across 6000 connections through a mass release — about 58 KiB each — so
+/// across 6000 connections through a mass release, about 58 KiB each, so
 /// 96 KiB leaves real headroom above the worst case actually observed while
 /// still catching a runaway.
 ///
 /// The floor keeps a small room's cap from producing false lag disconnects: a
 /// 4-slot room can only ever queue 12 × 256 KiB = 3 MiB, so 64 MiB is twenty
-/// times its true worst case. It is a limit, not an allocation — nothing is
-/// reserved — so a generous floor costs nothing and a too-tight one costs
+/// times its true worst case. It is a limit, not an allocation (nothing is
+/// reserved) so a generous floor costs nothing and a too-tight one costs
 /// disconnects that the client did not deserve.
 pub fn outbound_budget_for(slots: usize, datapackage_bytes: usize) -> usize {
     /// Headroom per expected connection, under the per-connection cap so the
@@ -292,7 +292,7 @@ pub const MAX_SHARD_QUEUE_DEPTH: usize = 65536;
 /// # Why this does not follow the CPU quota
 ///
 /// It used to, and that was wrong twice over. Shard count is a **topology**
-/// decision — it follows how many connections there are to fan out to — while
+/// decision (it follows how many connections there are to fan out to) while
 /// the worker count is a **compute** one, and an orchestrator that sets
 /// `limits.cpu: 2` for a 2000-slot room means exactly that. Deriving one from
 /// the other left the only way to widen the fan-out being to buy a CPU ceiling
@@ -313,7 +313,7 @@ pub const MAX_SHARD_QUEUE_DEPTH: usize = 65536;
 ///
 /// Each shard compresses each broadcast at most once for its own deflate
 /// connections, so compression work is `O(shards)` per broadcast, not
-/// `O(connections)` — that is what makes fan-out cheap. But it does mean shards
+/// `O(connections)`: that is what makes fan-out cheap. But it does mean shards
 /// are not free: past some width the redundant compressions cost more than the
 /// narrower blast radius buys. 32 is the same ceiling
 /// [`detect_worker_threads`] clamps to, and at that width a 6000-slot room
@@ -341,13 +341,13 @@ pub fn shards_for(slots: usize) -> usize {
 ///
 /// - **A reconnect storm is per-connection.** Every connection comes back at
 ///   once, each buying its own replay, so what one shard sees is a burst from
-///   the connections *it* owns — and widening the fan-out really does lower
+///   the connections *it* owns, and widening the fan-out really does lower
 ///   what each shard needs, by the same factor.
 /// - **A release tail is per-broadcast, and does not divide by anything.**
 ///   [`crate::shard::Shards::broadcast`] puts one copy of the message into
 ///   *every* shard's inbox, so the broadcasts a room may have outstanding is
 ///   exactly the depth, however many shards there are. Widening the fan-out
-///   buys no broadcast headroom at all — it only multiplies what the same
+///   buys no broadcast headroom at all: it only multiplies what the same
 ///   headroom costs in memory.
 ///
 /// Sizing for the first alone made the two knobs **anti-correlated** for the
@@ -366,7 +366,7 @@ pub fn shards_for(slots: usize) -> usize {
 ///
 /// # Why the release burst is one broadcast per receiver slot
 ///
-/// A mass release amortizes on the full feed — 140 items to one broadcast — but
+/// A mass release amortizes on the full feed (140 items to one broadcast) but
 /// the scoped feed cannot: it emits one broadcast per distinct receiver slot,
 /// because each one carries only what concerns that slot. A release therefore
 /// costs about `min(locations per slot, slots)` broadcasts, which is why
@@ -380,7 +380,7 @@ pub fn shards_for(slots: usize) -> usize {
 /// # The ceiling binds above ~4,096 slots
 ///
 /// [`MAX_SHARD_QUEUE_DEPTH`] caps this, so past ~4,096 slots the number of
-/// concurrent releases covered falls below sixteen — ten at 6,000 slots. That
+/// concurrent releases covered falls below sixteen, ten at 6,000 slots. That
 /// is deliberate: the envelopes cost `shards × depth`, so the ceiling is what
 /// keeps a wide fan-out from reserving hundreds of megabytes for headroom that
 /// only ever needed to be one deep queue's worth. See [`shard_queue_bytes`].
@@ -406,14 +406,14 @@ pub fn shard_queue_depth_for(slots: usize, shards: usize) -> usize {
 /// Memory the shard inboxes can hold, which **nothing else accounts for**.
 ///
 /// [`NetConfig::outbound_budget_bytes`] is charged when a frame is queued for a
-/// *connection*, which happens after a shard has expanded the audience — so a
+/// *connection*, which happens after a shard has expanded the audience, so a
 /// message still sitting in a shard's inbox is outside the budget entirely. An
 /// orchestrator sizing a container against the budget has to add this.
 ///
 /// This is the **envelope** cost, and it is the part that is bounded: `depth ×
 /// shards` messages of [`ShardMsg`], all of it reserved by `mpsc::channel` up
-/// front. The payloads they point at are refcounted `Bytes` — one broadcast is
-/// a single allocation no matter how many shards hold it — so the payload
+/// front. The payloads they point at are refcounted `Bytes` (one broadcast is
+/// a single allocation no matter how many shards hold it) so the payload
 /// footprint is bounded by what the room has in flight rather than by the
 /// depth, and a queue this deep is only reached when the room is producing far
 /// more than it drains.
@@ -432,7 +432,7 @@ pub fn shard_queue_bytes(shards: usize, depth: usize) -> usize {
 ///
 /// **The share has to hold a whole data-package fetch, because clients do not
 /// ask for it in one piece.** A live 189-slot, 106-game room answered 1,825
-/// `GetDataPackage` requests across 130 connections — about fourteen each — and
+/// `GetDataPackage` requests across 130 connections, about fourteen each, and
 /// the reply to each is a separate frame. The oversize allowance exempts a
 /// message that is *individually* larger than the share; fourteen frames of
 /// forty kilobytes are each far smaller than that, so every one of them counted
@@ -442,8 +442,8 @@ pub fn shard_queue_bytes(shards: usize, depth: usize) -> usize {
 /// having done nothing but ask for the names of the games in the room. It
 /// reconnected, asked again, and was dropped again.
 ///
-/// Three earlier fixes missed it because they all addressed the *allowance* —
-/// when a single large payload may jump the share — and this path never touches
+/// Three earlier fixes missed it because they all addressed the *allowance*
+/// (when a single large payload may jump the share) and this path never touches
 /// the allowance at all. The room needed no item feed for it to happen, which
 /// is what finally ruled the earlier explanations out.
 ///
@@ -604,7 +604,7 @@ mod tests {
     /// **The derivation has to contribute on the path rooms actually take.**
     ///
     /// It did not. `shards_for` divides by 512 and the depth multiplied the
-    /// per-shard connection count by 8, and those cancel exactly — so every
+    /// per-shard connection count by 8, and those cancel exactly, so every
     /// room up to ~5,461 slots computed at or below the floor, the floor won,
     /// and the answer was always 4,096 however many slots the seed had. The
     /// formula only ever contributed once `MAX_SHARDS` clamped the divisor.
@@ -635,7 +635,7 @@ mod tests {
     ///
     /// `Shards::broadcast` puts one copy of the message into *every* shard's
     /// inbox, so the broadcasts a room may have outstanding is exactly the
-    /// depth — the width buys none. Deriving the depth by dividing by the width
+    /// depth: the width buys none. Deriving the depth by dividing by the width
     /// therefore made the two knobs anti-correlated for the burst that was
     /// actually binding: going from 2 shards to 12 cut the scarce number by six
     /// while multiplying what it cost in memory by the same factor.
@@ -653,15 +653,15 @@ mod tests {
             assert!(
                 depth >= needed,
                 "at {shards} shards a {SLOTS}-slot room holds {depth} broadcasts, \
-                 under the {needed} a release tail needs — and the width bought \
+                 under the {needed} a release tail needs, and the width bought \
                  none of it back"
             );
         }
     }
 
     /// The other shape still wins where it should: a fan-out pinned narrow
-    /// leaves each shard owning enough connections that a reconnect storm —
-    /// every one of them returning at once, each buying a full replay — is the
+    /// leaves each shard owning enough connections that a reconnect storm
+    /// (every one of them returning at once, each buying a full replay) is the
     /// larger of the two bursts.
     #[test]
     fn a_fan_out_pinned_narrow_is_sized_for_the_reconnect_storm() {
@@ -674,7 +674,7 @@ mod tests {
 
         // The failure from the dev cluster, in the arithmetic. Two shards owned
         // ~3000 connections each against the flat 4096, which is 1.4 messages
-        // per connection — less than one broadcast apiece.
+        // per connection: less than one broadcast apiece.
         assert!(
             shard_queue_depth_for(2000, 2) >= 2000 * 3 / 2,
             "a shard must be able to hold at least one message per connection \

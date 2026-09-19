@@ -1,8 +1,8 @@
 //! A typed model of Archipelago's `.archipelago` multidata.
 //!
 //! Turns the untyped [`pahoa_pickle::PyObj`] tree into the structures the
-//! server actually works with — slots, the location table, hints, versions, and
-//! the merged data package — reporting shape problems with the path that
+//! server actually works with (slots, the location table, hints, versions, and
+//! the merged data package) reporting shape problems with the path that
 //! failed rather than a bare type error.
 //!
 //! ```no_run

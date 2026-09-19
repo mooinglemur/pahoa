@@ -42,7 +42,7 @@ fn two_players(data: &pahoa_multidata::MultiData) -> [(u32, String, String); 2] 
 }
 
 /// A scoped connection is not derived from tags, and `ConnectUpdate` replaces
-/// the tag vector — so this is the test that the policy is sticky.
+/// the tag vector, so this is the test that the policy is sticky.
 ///
 /// Trackers send `ConnectUpdate` routinely to add `DeathLink`. If the policy
 /// lived in the tags it would be wiped here, silently, and the connection would
@@ -204,7 +204,7 @@ fn item_sends_are_routed_to_the_slots_they_concern() {
 }
 
 /// With nobody on the scoped port, the router does no work and addresses
-/// nothing to it — the property that keeps this free for ordinary rooms.
+/// nothing to it: the property that keeps this free for ordinary rooms.
 #[test]
 fn no_scoped_connections_means_no_scoped_traffic() {
     if skip_without(FIXTURE) {
@@ -266,7 +266,7 @@ fn resolution_separates_the_two_policies() {
         vec![full, scoped]
     );
     assert_eq!(room.resolve(&Recipients::AllTextAbout(a)), vec![full]);
-    // Scoped connections of one slot, and never a full-feed one on that slot —
+    // Scoped connections of one slot, and never a full-feed one on that slot:
     // it already had the message from the broadcast.
     assert_eq!(room.resolve(&Recipients::SlotScopedText(b)), vec![scoped]);
     assert!(room.resolve(&Recipients::SlotScopedText(a)).is_empty());

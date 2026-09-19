@@ -1,13 +1,13 @@
 //! The eighteen data-storage operations (`MultiServer.py:109-134`).
 //!
 //! Each is a Python expression applied to client-supplied JSON, so the work
-//! here is reproducing CPython's behavior — including the parts that look like
+//! here is reproducing CPython's behavior, including the parts that look like
 //! bugs, because clients may depend on them.
 //!
 //! Four deliberate divergences, all narrower than they sound:
 //!
 //! 1. **Bounded integer width.** Integers are arbitrary precision here as they
-//!    are in Python — a world storing its location checks as a 71-bit bitfield
+//!    are in Python: a world storing its location checks as a 71-bit bitfield
 //!    reached a live room, and back when this was an `i64` every `or` that set
 //!    a bit cost that player their connection. What is bounded is how *wide* a
 //!    value these operations will build: see [`MAX_INT_BITS`]. Python has no
@@ -36,7 +36,7 @@ pub const MAX_RESULT_LEN: usize = 16 * 1024 * 1024;
 /// Cap on the width of an integer these operations will accept or produce.
 ///
 /// 65,536 bits is 8 KiB, a little under 19,729 decimal digits, and 65,536
-/// independent bit flags — an order of magnitude beyond the largest Archipelago
+/// independent bit flags: an order of magnitude beyond the largest Archipelago
 /// world's location count, and the reported case that motivated arbitrary
 /// precision at all used 71 of them.
 ///
@@ -83,7 +83,7 @@ pub enum OpError {
     UnknownOperation(String),
 
     /// Python's own `OverflowError`: an integer too large to become a float,
-    /// which is what mixed int/float arithmetic needs. Not a divergence — the
+    /// which is what mixed int/float arithmetic needs. Not a divergence: the
     /// reference raises here too.
     #[error("integer too large to convert to a float")]
     Overflow,
@@ -102,7 +102,7 @@ pub enum OpError {
     /// `%` on a string is printf-style formatting in Python, not modulo:
     /// `"%s" % [1, "a"]` yields `[1, 'a']`, complete with Python's `repr`
     /// quoting. Reproducing that faithfully means reproducing `repr` for
-    /// arbitrary values, and a *partial* printf would be worse than none —
+    /// arbitrary values, and a *partial* printf would be worse than none:
     /// it would silently produce wrong strings for untested inputs.
     ///
     /// The protocol documents `mod` as numeric modulo, and no Archipelago
@@ -165,8 +165,8 @@ fn need_nums(op: &'static str, a: &Value, b: &Value) -> Result<(PyNum, PyNum), O
     match (pyvalue::as_num(a), pyvalue::as_num(b)) {
         (Some(x), Some(y)) => {
             // Checked on the way in as well as the way out. A value wider than
-            // the bound can still be *stored* and read back — storage is
-            // verbatim passthrough, and costs nothing — but it is not something
+            // the bound can still be *stored* and read back (storage is
+            // verbatim passthrough, and costs nothing) but it is not something
             // the actor will do arithmetic on.
             for n in [&x, &y] {
                 if let PyNum::Int(i) = n
@@ -256,7 +256,7 @@ fn mul(current: Value, arg: &Value) -> OpResult {
             _ => return None,
         };
         // CPython converts the count to a `Py_ssize_t` before it looks at the
-        // sequence at all, so one that does not fit raises `OverflowError` —
+        // sequence at all, so one that does not fit raises `OverflowError`,
         // even where the answer is obviously empty, and even when the count is
         // negative. `"" * 2**71` is an error; `"" * -1` is `""`.
         let Some(n) = n.to_i64() else {
@@ -277,8 +277,8 @@ fn mul(current: Value, arg: &Value) -> OpResult {
                     Err(OpError::ResultTooLarge)
                 } else if len == 0 {
                     // **An empty result needs no loop, and that is a fix rather
-                    // than a tidy-up.** `[] * 10**18` passes the length check —
-                    // zero times anything is zero — and then spun through
+                    // than a tidy-up.** `[] * 10**18` passes the length check
+                    // (zero times anything is zero) and then spun through
                     // `0..n` appending nothing, on the one task that owns all
                     // room state. Any authenticated client could stop a room
                     // dead with one `Set`. Found by the CPython vectors once
@@ -332,7 +332,7 @@ fn pow(current: &Value, arg: &Value) -> OpResult {
                 // those, so refusing them would be a divergence invented for
                 // nothing. `bits()` measures the magnitude: 0 for zero, 1 for
                 // ±1. The exponent cannot be zero here, so `0**0` is not this
-                // case — it goes down the ordinary path and gives 1.
+                // case: it goes down the ordinary path and gives 1.
                 return match (a.bits(), a.is_negative()) {
                     (0, _) => int_value(BigInt::ZERO),
                     // `(-1)**n` alternates, and `b.bit(0)` is `n` being odd.
@@ -342,7 +342,7 @@ fn pow(current: &Value, arg: &Value) -> OpResult {
                 };
             };
             // `pow(2, 10**9)` is 125 MB, and the reference server allocates it
-            // rather than refusing — so this has to be decided from the *size*
+            // rather than refusing, so this has to be decided from the *size*
             // of the answer, before any of it exists.
             let projected = if a.bits() <= 1 {
                 1
@@ -403,7 +403,7 @@ fn round(current: &Value, f: fn(f64) -> f64) -> OpResult {
 /// Two behaviors worth stating, both caught by the CPython vectors:
 ///
 /// - Python returns the **first** maximal element, so `max(1, 1.0)` is the int
-///   `1` while `max(1.0, 1)` is the float — visible in the emitted JSON.
+///   `1` while `max(1.0, 1)` is the float, visible in the emitted JSON.
 /// - Operands Python cannot order (`max(1, "a")`, anything with `None`) raise
 ///   `TypeError`. Quietly keeping the current value instead would leave the
 ///   client believing its write landed.
@@ -480,7 +480,7 @@ fn shift(current: &Value, arg: &Value, left: bool) -> OpResult {
                 int_value(a << count)
             } else {
                 // Python's `>>` is arithmetic, so shifting past the width
-                // saturates toward the sign rather than to zero — and a count
+                // saturates toward the sign rather than to zero, and a count
                 // too large to hold is simply "past the width".
                 let Some(count) = b.to_u64() else {
                     return int_value(if a.is_negative() {
@@ -525,7 +525,7 @@ fn remove(current: Value, arg: &Value) -> OpResult {
 /// (`MultiServer.py:72-83`).
 ///
 /// A list index at or beyond the length is guarded and becomes a no-op, and a
-/// missing dict key likewise — but a **negative** out-of-range index is not
+/// missing dict key likewise, but a **negative** out-of-range index is not
 /// guarded, and the resulting `IndexError` is not among the exceptions Python
 /// catches, so it propagates and drops the connection. That asymmetry is real
 /// behavior, so it is reproduced rather than tidied.
@@ -598,8 +598,8 @@ fn pop(current: Value, arg: &Value) -> OpResult {
 /// `update`: append-if-absent for lists, `dict.update` for dicts
 /// (`MultiServer.py:85-92`).
 ///
-/// The list branch builds `set(container)` first, so an unhashable element —
-/// a nested list or dict — raises `TypeError` and drops the connection. And
+/// The list branch builds `set(container)` first, so an unhashable element
+/// (a nested list or dict) raises `TypeError` and drops the connection. And
 /// membership uses Python equality, so `[1]` updated with `[1.0]` appends
 /// nothing.
 fn update(current: Value, arg: &Value) -> OpResult {
@@ -619,7 +619,7 @@ fn update(current: Value, arg: &Value) -> OpResult {
             }
             // ...and is computed **once**, before anything is appended
             // (`MultiServer.py:86-88`). Entries are therefore filtered against
-            // the original contents, not against the growing list — so
+            // the original contents, not against the growing list, so
             // duplicates *within* the entries are all appended. Testing against
             // `items` as it grows would silently collapse them.
             let original = items.clone();
@@ -644,7 +644,7 @@ fn update(current: Value, arg: &Value) -> OpResult {
             }
             Ok(Value::Object(map))
         }
-        // `dict.update` also accepts any iterable of pairs — including a
+        // `dict.update` also accepts any iterable of pairs, including a
         // string, which yields characters, each of which is then a 1-element
         // sequence and so a length error. An *empty* string yields nothing and
         // is a legitimate no-op.

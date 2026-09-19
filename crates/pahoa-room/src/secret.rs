@@ -14,7 +14,7 @@
 
 /// Compare two secrets in time that does not depend on **where** they differ.
 ///
-/// The length is not hidden — an unequal length returns early. That is a
+/// The length is not hidden: an unequal length returns early. That is a
 /// deliberate limit rather than an oversight: hiding it means hashing both
 /// sides first, and the length of a password is not the part worth protecting.
 /// What this does hide is the position of the first differing byte, which is

@@ -1,7 +1,7 @@
 //! The join and leave announcements.
 //!
-//! These are the most-read strings the server produces — every player watches
-//! them scroll past — and until this file existed nothing pinned them. They had
+//! These are the most-read strings the server produces (every player watches
+//! them scroll past) and until this file existed nothing pinned them. They had
 //! drifted from the reference in three separate ways at once: the parenthesized
 //! field held the game instead of the team, the verb sat where the tag list
 //! belongs, and a departure was announced only when the *last* connection for a
@@ -151,7 +151,7 @@ fn the_tutorial_line_follows_a_join_and_goes_only_to_the_joiner() {
 
 /// The bug that produced no departure messages at all.
 ///
-/// A slot commonly has two connections — a game client and a tracker. The
+/// A slot commonly has two connections: a game client and a tracker. The
 /// reference broadcasts a `Part` for each one that leaves; pahoa announced only
 /// when the slot emptied, so the common case was silent.
 #[test]
@@ -239,7 +239,7 @@ fn the_verb_follows_the_references_tag_priority_not_the_clients_order() {
 //
 // `ConnectUpdate` is answered with nothing at all, so this announcement is the
 // only evidence a player has that their tags took. Without it a client toggling
-// `DeathLink` cannot tell a working server from one dropping its packets — the
+// `DeathLink` cannot tell a working server from one dropping its packets. The
 // report that found this said exactly that: "it never seems to update the tags".
 
 /// Retag an existing connection.
@@ -357,7 +357,7 @@ fn a_deathlink_taken_on_after_connecting_receives_bounces() {
     }
     // The report this came from: everyone enables DeathLink in-game rather than
     // at connect time, and the bounces never arrived. Tag *state* was applied
-    // correctly all along — this pins that, so a future change to the
+    // correctly all along; this pins that, so a future change to the
     // announcement cannot quietly take the routing with it.
     let (mut room, _observer, players) = room_with_observer().unwrap();
     let (_, name, game) = &players[1];

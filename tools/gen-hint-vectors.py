@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate `!hint` selection vectors from Archipelago's own `get_hints`.
 
-This is M6's exit gate. Hint *ordering* cannot be matched — see the note below
-— but everything that decides **which** hints a player gets, and what they pay
+This is M6's exit gate. Hint *ordering* cannot be matched (see the note below)
+but everything that decides **which** hints a player gets, and what they pay
 for them, can be, and this drives the reference implementation to find out.
 
 The context is a real `MultiServer.Context` with only `_load_game_data`
@@ -16,7 +16,7 @@ selection block inside `get_hints` are all the genuine articles.
 `get_hints` splits its candidates into `set(hints) - ctx.hints[...]` and then
 shuffles the result. Set iteration order depends on `Hint.__hash__`, which
 includes the `entrance` string, and CPython randomizes string hashing per
-process — so for an entrance-randomized seed the reference does not even agree
+process, so for an entrance-randomized seed the reference does not even agree
 with itself between restarts. What *is* stable:
 
 - the candidate set (`collect_hints` / `collect_hint_location_id`)
@@ -122,8 +122,8 @@ def run_case(ctx, MultiServer, slot, text, for_location, checks):
 
     def spy_notify(team_, hints, **kwargs):
         # Wrapped, not replaced: the real `notify_hints` decides what actually
-        # gets *stored*, and its guard looks at the finding player's list — not
-        # the hinting slot's — so a placement the seed already hinted is
+        # gets *stored*, and its guard looks at the finding player's list, not
+        # the hinting slot's, so a placement the seed already hinted is
         # announced but not banked again. Reimplementing that here would be
         # exactly the transcription error these vectors exist to rule out.
         announced.extend(hints)
@@ -146,7 +146,7 @@ def run_case(ctx, MultiServer, slot, text, for_location, checks):
 
     # Announced and stored are not the same list. A hint the seed had already
     # placed in the *finding* player's list is announced and paid for, but
-    # `notify_hints` will not bank a second copy — so both are recorded.
+    # `notify_hints` will not bank a second copy, so both are recorded.
     free = [h for h in announced if h.found]
     granted = [h for h in announced if not h.found]
     stored = list(ctx.hints[team, slot])
@@ -189,8 +189,8 @@ def run_case(ctx, MultiServer, slot, text, for_location, checks):
 def resolve_candidates(ctx, MultiServer, team, slot, text, for_location):
     """The pool `get_hints` would build, without the payment step.
 
-    Mirrors the dispatch in `MultiServer.py:1707-1755` — id, group name, or
-    plain name — using the reference's own collectors for each branch.
+    Mirrors the dispatch in `MultiServer.py:1707-1755` (id, group name, or
+    plain name) using the reference's own collectors for each branch.
     """
     if not text:
         return []
@@ -235,7 +235,7 @@ def suggestion_is_tied(ctx, text, for_location, slot):
 
     `!hint` feeds the fuzzy matcher `all_item_and_group_names[game]`, which is a
     **`set`** (`MultiServer.py:248`). Set iteration order for strings follows
-    `PYTHONHASHSEED`, which CPython randomizes per process — so when several
+    `PYTHONHASHSEED`, which CPython randomizes per process, so when several
     candidates share the top score, *which* one the reference names is an
     artifact of the run rather than a property of Archipelago. Generating the
     same seed under four hash seeds gives four different suggestions.
@@ -265,7 +265,7 @@ def pick_scenarios(ctx):
     """Choose slots and item names that exercise the interesting branches.
 
     Derived from the multidata rather than hard-coded, so the same script works
-    against any fixture — but reported in the vector, so the Rust side drives
+    against any fixture, but reported in the vector, so the Rust side drives
     the identical case.
     """
     import collections
@@ -275,7 +275,7 @@ def pick_scenarios(ctx):
     scenarios = []
     # Compared against the enum rather than `str(...)`: `SlotType` is an
     # `IntEnum`, and since Python 3.11 that stringifies as "1", not
-    # "SlotType.player". The `or` fallback below hid that — every slot in the
+    # "SlotType.player". The `or` fallback below hid that: every slot in the
     # current fixture is a player, so the vectors were unaffected, but on a seed
     # with spectators or item-link groups it would have picked one of those.
     player_slots = [

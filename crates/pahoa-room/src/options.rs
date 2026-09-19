@@ -17,7 +17,7 @@ pub struct RoomOptions {
     /// Per-slot passwords, keyed by slot number.
     ///
     /// `None` means the mode is off. `Some` means it is **in force**, and a
-    /// slot missing from the map is **refused**, not admitted — the map says
+    /// slot missing from the map is **refused**, not admitted: the map says
     /// who holds a key, not who needs one.
     ///
     /// That is deliberate and it fails closed. `PAHOA_SLOT_PASSWORDS` arrives

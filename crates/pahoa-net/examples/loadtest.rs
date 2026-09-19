@@ -1,12 +1,12 @@
 //! M9's load track: 6000 connections against a live room.
 //!
 //! Differential testing proves *fidelity* at small scale and can say nothing
-//! about *scale* — the Python server cannot host this at all, which is most of
+//! about *scale*: the Python server cannot host this at all, which is most of
 //! why pahoa exists. So this is a separate track with its own instrument.
 //!
 //! It drives an in-process [`pahoa_net::Server`] rather than a socket to another
-//! binary, so the metrics the plan asks for — actor mailbox depth, outbound
-//! bytes against the global budget, lag disconnects, compressions — are readable
+//! binary, so the metrics the plan asks for (actor mailbox depth, outbound
+//! bytes against the global budget, lag disconnects, compressions) are readable
 //! directly instead of inferred.
 //!
 //! ```sh
@@ -17,12 +17,12 @@
 //!
 //! Three phases, in the order the plan names them:
 //!
-//! 1. **Connect storm** — all N connections join at once, each demanding
+//! 1. **Connect storm**: all N connections join at once, each demanding
 //!    `Connected` with its full `checked_locations` and item queue.
-//! 2. **Steady mix** — check traffic, chat and datastorage churn together.
-//! 3. **Mass release cascade** — every slot releases, which is the worst case
+//! 2. **Steady mix**: check traffic, chat and datastorage churn together.
+//! 3. **Mass release cascade**: every slot releases, which is the worst case
 //!    the whole fan-out design exists for.
-//! 4. **Reconnect storm** — every connection drops and rejoins at once, each
+//! 4. **Reconnect storm**: every connection drops and rejoins at once, each
 //!    demanding a full resync. This is the phase that most resembles a restart
 //!    in production.
 
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Fallible> {
     // --- phase 1: connect storm ------------------------------------------
     //
     // Players commonly run a game client plus a text client plus a tracker, so
-    // the connection count deliberately exceeds the slot count — several
+    // the connection count deliberately exceeds the slot count: several
     // connections share a slot, which is also what exercises the co-op path.
     let mark = Mark::now();
     let mut handles = Vec::with_capacity(target);
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Fallible> {
             // until the storm is over accumulates one announcement per other
             // connection. At this scale that is gigabytes of queued spam, and
             // the server would rightly drop connections that are not actually
-            // slow — the harness would have manufactured its own failure.
+            // slow: the harness would have manufactured its own failure.
             let (mut reader, mut writer) = client.into_split();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let read_task = tokio::spawn(async move {
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Fallible> {
                 // question is what the *server* costs, and a client that
                 // inflates every broadcast is more expensive than the server
                 // that compressed it once. The server still does all its own
-                // work — the extension is negotiated, the payload compressed,
+                // work: the extension is negotiated, the payload compressed,
                 // the bytes written.
                 if let Ok(n) = reader.discard().await {
                     MESSAGES.fetch_add(n, Ordering::Relaxed);
@@ -194,7 +194,7 @@ async fn main() -> Result<(), Fallible> {
     // thousands of item events, each fanned out to every connection.
     let mark = Mark::now();
     for tx in &senders {
-        // Each connection releases *its own* world — sending another slot's
+        // Each connection releases *its own* world: sending another slot's
         // location ids would simply be dropped as unknown, which is what makes
         // `!release` the right lever here rather than `LocationChecks`.
         let _ = tx.send(r#"[{"cmd":"Say","text":"!release"}]"#.to_string());
@@ -205,7 +205,7 @@ async fn main() -> Result<(), Fallible> {
     // --- phase 4: reconnect storm ----------------------------------------
     //
     // Every connection goes away and comes back at once, each demanding a full
-    // `Connected` resync — the shape of a server restart, and the phase where
+    // `Connected` resync: the shape of a server restart, and the phase where
     // the room is doing the most per-connection work it ever does.
     drop(senders);
     for reader in &readers {
@@ -269,8 +269,8 @@ async fn connect_and_join(
 
 /// Wait for the room to go quiet, or give up after `limit`.
 ///
-/// Quiet means the outbound budget is empty and the actor's mailbox has drained
-/// — measuring the moment work was *queued* rather than finished would flatter
+/// Quiet means the outbound budget is empty and the actor's mailbox has
+/// drained: measuring the moment work was *queued* rather than finished would flatter
 /// every number here.
 async fn settle(limit: Duration) {
     let deadline = Instant::now() + limit;
@@ -290,7 +290,7 @@ async fn settle(limit: Duration) {
 
 /// Counters at the start of a phase, so what a phase *caused* is separable from
 /// what happened before it. Cumulative totals hide exactly the thing worth
-/// knowing — which phase produced the lag disconnects.
+/// knowing: which phase produced the lag disconnects.
 #[derive(Clone, Copy)]
 struct Mark {
     at: Instant,

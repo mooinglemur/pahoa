@@ -8,7 +8,7 @@
 //!   (`MultiServer.py:900-917`).
 //!
 //! pahoa could only ever do the second, because `serde` failed the packet
-//! before the room saw it — so `"want_reply": 0`, `"password": 0` and a null
+//! before the room saw it, so `"want_reply": 0`, `"password": 0` and a null
 //! `name` each cost a player their connection where Archipelago would have told
 //! them what was wrong. Those were live reports, not hypotheticals.
 //!
@@ -99,7 +99,7 @@ fn a_wrongly_typed_argument_is_answered_where_the_reference_guards_it() {
         // `"text" not in args or type(args["text"]) is not str` (`:2176`).
         (r#"[{"cmd":"Say","text":7}]"#, "Say"),
         (r#"[{"cmd":"Say"}]"#, "Say"),
-        // `"keys" not in args or type(args["keys"]) != list` (`:2246`) — and
+        // `"keys" not in args or type(args["keys"]) != list` (`:2246`), and
         // the reference answers `Retrieve` here, not the command's own name.
         (r#"[{"cmd":"Get","keys":"a"}]"#, "Retrieve"),
         (r#"[{"cmd":"Get"}]"#, "Retrieve"),
@@ -191,7 +191,7 @@ fn a_connect_with_a_null_name_is_refused_rather_than_dropped() {
     let mut sink = Recorder::default();
     room.on_connect(conn, &mut sink);
 
-    // `args['name'] not in ctx.connect_names` is a lookup, not a type check —
+    // `args['name'] not in ctx.connect_names` is a lookup, not a type check:
     // a null simply matches no slot (`MultiServer.py:1913`).
     let frame = r#"[{"cmd":"Connect","password":null,"game":"Timespinner","name":null,
                      "uuid":"u","version":{"major":0,"minor":6,"build":8,"class":"Version"},
@@ -247,7 +247,7 @@ fn a_connect_the_reference_guards_answers_invalid_packet() {
 
 /// A wrongly-typed `items_handling` reaches the reference's setter, whose
 /// `value & 0b001` raises `TypeError` into the `except` that adds
-/// `InvalidItemsHandling` — so it is a refusal, not a disconnect.
+/// `InvalidItemsHandling`, so it is a refusal, not a disconnect.
 #[test]
 fn a_wrongly_typed_items_handling_is_refused_like_a_bad_flag_combination() {
     if skip_without(FIXTURE) {
@@ -284,7 +284,7 @@ fn a_wrongly_typed_items_handling_is_refused_like_a_bad_flag_combination() {
 // --- ignored -------------------------------------------------------------
 
 /// `register_location_checks` intersects the list with the slot's locations
-/// (`MultiServer.py:2042-2045`) — nothing type-checks it, so junk matches
+/// (`MultiServer.py:2042-2045`): nothing type-checks it, so junk matches
 /// nothing and the *rest of the batch* still registers.
 ///
 /// That last part is the point. Refusing the frame would lose a player every
@@ -321,7 +321,7 @@ fn junk_in_a_location_check_is_dropped_and_the_rest_still_counts() {
 // --- still fatal ---------------------------------------------------------
 
 /// The other half of the contract. Being lenient about the guarded fields must
-/// not quietly turn the *unguarded* ones lenient too — those raise in the
+/// not quietly turn the *unguarded* ones lenient too: those raise in the
 /// reference, and a server that answers where Archipelago closes is as wrong as
 /// one that closes where Archipelago answers.
 #[test]

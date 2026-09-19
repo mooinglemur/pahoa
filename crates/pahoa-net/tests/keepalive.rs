@@ -1,7 +1,7 @@
 //! What a keepalive timeout says about *who* stopped answering.
 //!
 //! The line an operator sees for this used to be `conn16131` and nothing more,
-//! and no other line in the room paired a `ConnId` with a slot — so "did a real
+//! and no other line in the room paired a `ConnId` with a slot, so "did a real
 //! player just drop, or was that a port scan?" was unanswerable from the log.
 //!
 //! It is unanswerable for a structural reason rather than an oversight. The
@@ -9,7 +9,7 @@
 //! half and a `ConnId`; the slot is the actor's, and the actor is not told why
 //! a connection ended. This pins the seam that now joins them: the writer
 //! reports its reason, the actor logs it against the slot, and it reaches the
-//! journal — where an organizer reading a history months later can tell a
+//! journal, where an organizer reading a history months later can tell a
 //! player who quit from a player whose connection kept dying.
 //!
 //! Driven over real sockets with a raw client, because "never answers a ping"
@@ -107,11 +107,11 @@ fn mask(text: &str) -> Vec<u8> {
 ///
 /// Reading the socket is *not* enough to stay alive, which is the trap this
 /// file fell into: the server counts pongs, and only a client sends those. It
-/// does not care what the payload is — "only one ping is ever outstanding, so
-/// any pong clears it" — so this need not echo anything.
+/// does not care what the payload is ("only one ping is ever outstanding, so
+/// any pong clears it") so this need not echo anything.
 const PONG: [u8; 6] = [0x8A, 0x80, 0, 0, 0, 0];
 
-/// Open a socket, upgrade it, and optionally authenticate — then hand it back
+/// Open a socket, upgrade it, and optionally authenticate, then hand it back
 /// without reading a byte, which is what makes the peer look dead.
 async fn connect(addr: std::net::SocketAddr, name: Option<&str>) -> TcpStream {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -152,7 +152,7 @@ fn disconnects(dir: &std::path::Path) -> Vec<serde_json::Value> {
     };
     body.lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        // `type`, not `event` — the tag the writer actually emits. Reading the
+        // `type`, not `event`: the tag the writer actually emits. Reading the
         // wrong key made every assertion below vacuously true.
         .filter(|v| v["type"] == "disconnected")
         .collect()
@@ -220,13 +220,13 @@ async fn a_slot_whose_peer_stops_answering_is_recorded_with_its_reason() {
 /// The other half, and the one that answers the operator's real question.
 ///
 /// A socket that never authenticated has no slot to name, so it writes no
-/// record at all — which is itself the answer. A keepalive timeout in the log
+/// record at all, which is itself the answer. A keepalive timeout in the log
 /// with nothing beside it in the journal was a scanner or a half-open socket,
 /// not a player who lost their game.
 ///
 /// **The authenticated client is what makes this mean anything.** Asserting an
 /// absence alone would pass on a server whose keepalive never fires, or whose
-/// journal never reaches disk — both of which this file has already been
+/// journal never reaches disk, both of which this file has already been
 /// through once. So one dead socket of each kind, and the run must produce
 /// exactly the one record.
 #[tokio::test]

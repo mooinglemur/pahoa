@@ -3,7 +3,7 @@
 //! Everything else pahoa is configured with is argv, deliberately. Secrets are
 //! the exception, because argv is readable inside the container with `ps` and,
 //! more to the point, in `kubectl get pod -o yaml`. An environment variable is
-//! *equally* visible there when it is written literally into a pod spec — the
+//! *equally* visible there when it is written literally into a pod spec: the
 //! win only materializes because the orchestrator sources these from a Secret
 //! with `envFrom`, which leaves nothing but a reference in the object.
 //!
@@ -33,20 +33,20 @@ pub struct Secrets {
     pub password: Option<String>,
     pub server_password: Option<String>,
     /// `None` when `PAHOA_SLOT_PASSWORDS` was not set at all. `Some` puts the
-    /// room in per-slot mode, in which a slot missing from the map is refused
-    /// — so an empty object is a **locked room**, not an unconfigured one.
+    /// room in per-slot mode, in which a slot missing from the map is refused,
+    /// so an empty object is a **locked room**, not an unconfigured one.
     pub slot_passwords: Option<BTreeMap<u32, String>>,
     /// Whether the room-wide password came from the environment.
     ///
     /// Needed because `--use-embedded-options` lets a seed's own
     /// `server_options` override the command line, and a password baked into a
-    /// seed must not be able to shadow the one the orchestrator configured —
+    /// seed must not be able to shadow the one the orchestrator configured:
     /// that is the same failure as a password persisted into `room.save`, and
     /// it makes rotation appear to work and then revert. Precedence is
     /// environment, then seed, then argv.
     pub password_from_env: bool,
     pub server_password_from_env: bool,
-    /// Bearer token for `/admin/v1/**`. Environment only — there is no flag,
+    /// Bearer token for `/admin/v1/**`. Environment only: there is no flag,
     /// because there is no case for one that outweighs putting it in `ps`.
     /// `None` makes the admin surface answer `404`.
     pub admin_token: Option<String>,
@@ -68,7 +68,7 @@ pub fn resolve(argv: FromArgv<'_>) -> Result<Secrets, String> {
 }
 
 /// The whole of the policy, with the environment injected so it can be tested
-/// without touching the process's own — which edition 2024 makes `unsafe` to
+/// without touching the process's own, which edition 2024 makes `unsafe` to
 /// mutate, and which parallel tests cannot share anyway.
 fn merge(argv: FromArgv<'_>, env: impl Fn(&str) -> Option<String>) -> Result<Secrets, String> {
     let mut warnings = Vec::new();
@@ -165,7 +165,7 @@ fn pick(
     }
 }
 
-/// `{"1": "…", "7": "…"}` — JSON object keys are strings, so the slot number
+/// `{"1": "…", "7": "…"}`. JSON object keys are strings, so the slot number
 /// arrives quoted.
 ///
 /// Deliberately flat and deliberately strict. This is a value an orchestrator
@@ -229,7 +229,7 @@ mod tests {
         assert!(s.warnings[0].contains("PAHOA_PASSWORD"));
     }
 
-    /// The flag still works — pahoa is also a tool someone runs by hand — but
+    /// The flag still works (pahoa is also a tool someone runs by hand) but
     /// it is worth a word, because that is a secret in `ps`.
     #[test]
     fn a_flag_alone_is_honored_with_a_warning() {
@@ -305,8 +305,8 @@ mod tests {
         assert!(both.is_err());
     }
 
-    /// A server password is a third, orthogonal thing — it gates `!admin`, not
-    /// joining — so it never conflicts with either mode.
+    /// A server password is a third, orthogonal thing: it gates `!admin`, not
+    /// joining, so it never conflicts with either mode.
     #[test]
     fn a_server_password_coexists_with_per_slot_passwords() {
         let s = merge(
@@ -351,7 +351,7 @@ mod tests {
     }
 
     /// An empty object parses, and means per-slot mode with nobody holding a
-    /// key — a **locked room**, since the mode fails closed. That is a
+    /// key: a **locked room**, since the mode fails closed. That is a
     /// legitimate thing to ask for and a dangerous thing to render by accident,
     /// so it is worth pinning.
     #[test]

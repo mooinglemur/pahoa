@@ -177,7 +177,7 @@ impl Server {
         // the writer tasks, so without this a client's last word from the room
         // is a TCP reset rather than "the room is closing".
         //
-        // Deliberately after the flush and deliberately bounded — this must
+        // Deliberately after the flush and deliberately bounded: this must
         // never be able to eat into the save's budget.
         tokio::time::sleep(CLOSE_LINGER).await;
     }
@@ -200,7 +200,7 @@ enum Due {
 /// different questions: `next_ping` is the keepalive cadence that has to beat a
 /// middlebox's idle reaper, and `judge_at` is how long the peer gets to answer.
 /// Collapsing them into a single timer would make the effective cadence
-/// `interval + timeout` — halving the keepalive rate, which is the half that
+/// `interval + timeout`, halving the keepalive rate, which is the half that
 /// matters when nothing else is on the wire.
 struct Keepalive {
     interval: Duration,
@@ -259,7 +259,7 @@ impl Keepalive {
             if !self.timeout.is_zero() {
                 self.judge_at = Some((now + self.timeout, self.pongs.load(Ordering::Relaxed)));
             }
-            // The payload is unused by anything — a peer must echo it back and
+            // The payload is unused by anything: a peer must echo it back and
             // pahoa does not check which ping a pong answers, because with one
             // outstanding at a time there is only ever one it could answer.
             return Due::Ping(ws::frame::build(ws::frame::OpCode::Ping, false, b""));
@@ -344,7 +344,7 @@ async fn serve_connection(
     stream.set_nodelay(true).ok();
 
     // 0x16 is the TLS handshake content type, and no HTTP method can begin with
-    // it — every one of those is uppercase ASCII. One byte is therefore enough
+    // it: every one of those is uppercase ASCII. One byte is therefore enough
     // to route, and asking for two would spin when only the first has arrived.
     let first = peek_first_byte(&stream, config.handshake_timeout).await?;
     let client_hello = first == Some(0x16);
@@ -395,7 +395,7 @@ const UPGRADE_TO_TLS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\n\
 ///
 /// **A WebSocket client is closed on without a reply, and that is deliberate
 /// even though a `426` is the correct status.** Archipelago clients are given a
-/// bare `host:port` and try `ws://` first — `CommonClient.py:857` prepends it
+/// bare `host:port` and try `ws://` first: `CommonClient.py:857` prepends it
 /// when the address carries no scheme. They recover through one specific
 /// heuristic: `websockets` raises `InvalidMessage` when the reply is not
 /// parseable HTTP, and `CommonClient.py:887-890` reads that as "probably
@@ -404,12 +404,12 @@ const UPGRADE_TO_TLS: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\n\
 /// retry fires and the player never learns any of this happened.
 ///
 /// A well-formed `426` breaks exactly that. `websockets` parses it fine and
-/// raises `InvalidStatusCode`, which is *not* the branch that retries — so the
+/// raises `InvalidStatusCode`, which is *not* the branch that retries, so the
 /// standards-correct answer is the one that strands a client the reference's
 /// accidental answer would have connected. Measured both ways rather than
 /// reasoned about.
 ///
-/// Anything that is not an upgrade — `curl`, a browser, a health check — still
+/// Anything that is not an upgrade (`curl`, a browser, a health check) still
 /// gets the `426` with its `Upgrade` header, because for those the legible
 /// answer is also the useful one and no fallback is riding on it.
 async fn refuse_plaintext(
@@ -439,7 +439,7 @@ async fn refuse_plaintext(
 /// Read the request head far enough to tell an upgrade from ordinary HTTP.
 ///
 /// Bounded by the same limits the real handshake uses, and any failure to read
-/// or parse answers `false` — the `426` is the safer thing to send to something
+/// or parse answers `false`: the `426` is the safer thing to send to something
 /// that did not manage to ask a question.
 async fn read_head(stream: &mut TcpStream, config: &NetConfig, buf: &mut Vec<u8>) -> bool {
     let deadline = tokio::time::Instant::now() + config.handshake_timeout;
@@ -479,7 +479,7 @@ async fn peek_first_byte(stream: &TcpStream, timeout: Duration) -> io::Result<Op
 /// Read the request and either upgrade, or answer it as HTTP.
 ///
 /// `Ok(None)` means the request was served over HTTP and the connection is
-/// finished — which is the ordinary outcome for a readiness probe or an admin
+/// finished, which is the ordinary outcome for a readiness probe or an admin
 /// call, not an error.
 async fn handshake<S>(
     stream: &mut S,
@@ -498,7 +498,7 @@ where
             // Counted here rather than in the router, because this is where
             // both halves of the exchange exist: the router never sees what its
             // answer weighed. Upgrades take the branch above and are not
-            // counted — an upgrade is an HTTP request in form only, and
+            // counted: an upgrade is an HTTP request in form only, and
             // everything it goes on to carry is the game's.
             crate::metrics::record_http(
                 crate::http::route_label(&exchange.request.path),
@@ -515,7 +515,7 @@ where
             // A broken upgrade, or a request too large to read, gets a status
             // rather than a silently dropped socket. Nothing here parsed into a
             // route to file under, so it is counted only as the malformed
-            // request it was — which is what a port scan looks like.
+            // request it was, which is what a port scan looks like.
             crate::metrics::record_http_malformed();
             ws::accept::reject(stream, &e).await;
             Err(e)
@@ -549,7 +549,7 @@ where
     // depth exists only so the channel is never the *tighter* limit: sized at
     // the message count the byte budget would already have refused, assuming a
     // 64-byte floor per message. Getting this wrong reintroduces exactly the
-    // bound-by-message-count behavior the byte budget replaced — a burst of
+    // bound-by-message-count behavior the byte budget replaced: a burst of
     // small chat frames would hit the channel long before the budget and drop
     // connections that were nowhere near their share.
     //
@@ -584,11 +584,11 @@ where
     }
 
     // Writer: owns the socket's write half for this connection's lifetime, and
-    // writes pre-built frames verbatim. It does no framing and no compression —
+    // writes pre-built frames verbatim. It does no framing and no compression:
     // that already happened once, in the shard, for every recipient at once.
     //
     // **It returns why it stopped**, because it is the only task that knows.
-    // The keepalive lives here, so "no pong" is a fact only this task holds —
+    // The keepalive lives here, so "no pong" is a fact only this task holds,
     // and the slot it belongs to is a fact only the actor holds. Handing the
     // reason back lets the two be put together where the log line is worth
     // reading; without it every writer-decided close reached the actor as an
@@ -675,7 +675,7 @@ where
     let mut buf = upgraded.leftover;
     // Wire bytes of the frames making up the message being assembled. `decode`
     // splits what it consumed out of `buf`, so the difference is exactly the
-    // frame — header, mask and compressed payload — which is what makes this
+    // frame (header, mask and compressed payload) which is what makes this
     // comparable with the outbound byte counter rather than with the inflated
     // text. Continuation frames accumulate until the message completes.
     let mut message_bytes = 0usize;
@@ -706,8 +706,8 @@ where
         }
 
         // **The writer finishing ends the connection.** Without this the reader
-        // waits on a peer that has already been told to go away — or, worse,
-        // one that was never able to hear it — and the socket stays open with
+        // waits on a peer that has already been told to go away, or, worse,
+        // one that was never able to hear it, and the socket stays open with
         // the room no longer tracking it. That is the half-open state a client
         // cannot detect: it believes it is playing, and nothing it sends is
         // heard. Both halves must drop for the socket to close, so the reader

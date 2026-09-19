@@ -1,8 +1,8 @@
 //! The `/` command set, reached through `!admin`.
 //!
 //! Ports `ServerCommandProcessor` (`MultiServer.py:2222-2560`). In the
-//! reference this is the *console* processor — the one an operator drives from
-//! the terminal the server was launched in — and `!admin` merely forwards into
+//! reference this is the *console* processor (the one an operator drives from
+//! the terminal the server was launched in) and `!admin` merely forwards into
 //! it once a client has logged in. Pahoa has no console, so this exists only
 //! for `!admin`, and everything an operator would otherwise reach here is on
 //! the HTTP admin API instead.
@@ -11,7 +11,7 @@
 //! one thing with no HTTP equivalent and no reason to gain one: changing a
 //! room's rules mid-game is an *organizer's* act, done from inside the game,
 //! and an organizer has a chat window rather than a bearer token. Commands that
-//! act on a player — release, collect, kick, send — are deliberately not here;
+//! act on a player (release, collect, kick, send) are deliberately not here;
 //! they exist on the admin API, which authenticates properly and does not put
 //! the operation in the room's chat log.
 //!
@@ -26,7 +26,7 @@
 //! save deliberately carries no secret, so a live change to one would revert at
 //! the next restart, in every deployment rather than only an orchestrated one.
 //! `/option password` and `/option server_password` are therefore refused
-//! explicitly rather than reported as unknown — they *are* recognized, and
+//! explicitly rather than reported as unknown: they *are* recognized, and
 //! saying so is the difference between a decision and a gap.
 //! [`Room::cmd_admin`](super::Room) states the rule the two halves come from.
 //!
@@ -81,8 +81,8 @@ impl Kind {
 
 /// What a successful `/option` has to tell connected clients.
 ///
-/// The three shapes are not interchangeable and the wrong one fails quietly —
-/// clients simply keep believing the old value — so this is an enum rather than
+/// The three shapes are not interchangeable and the wrong one fails quietly
+/// (clients simply keep believing the old value) so this is an enum rather than
 /// a condition at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Push {
@@ -96,7 +96,7 @@ enum Push {
     /// points or sends one slot's number to every slot.
     PerSlot,
     /// Nothing. `countdown_mode` and `item_cheat` have no client-side
-    /// representation — neither appears in `RoomInfo` — and `compatibility`
+    /// representation (neither appears in `RoomInfo`) and `compatibility`
     /// governs how the server reads packets rather than anything a client
     /// displays.
     Nothing,
@@ -156,7 +156,7 @@ impl Room {
         // conclude the shell is broken.
         lines.push(
             "Anything not starting with / is announced to the room as the server. \
-             Commands that act on a player — release, collect, send, kick — are on \
+             Commands that act on a player (release, collect, send, kick) are on \
              the HTTP admin API rather than here."
                 .to_string(),
         );
@@ -217,13 +217,13 @@ impl Room {
     /// Set one option, with no caller to reply to.
     ///
     /// Split out of [`Room::server_cmd_option`] so the HTTP admin API reaches
-    /// **exactly** this — the same names, the same value parsing, the same
+    /// **exactly** this: the same names, the same value parsing, the same
     /// refusals, the same `RoomUpdate` fan-out and the same journal records.
     /// Two implementations of "what may be set and to what" would drift, and
     /// the failure would be silent: a room whose rules disagree with what the
     /// surface that set them believes.
     ///
-    /// `Ok` carries the confirmation line, `Err` the refusal — more than one
+    /// `Ok` carries the confirmation line, `Err` the refusal: more than one
     /// line where the reason needs explaining.
     pub(super) fn apply_option(
         &mut self,
@@ -273,7 +273,7 @@ impl Room {
         out.mark_dirty();
         // An explicit audit record, with the option and its new value as
         // fields. The chat echo already shows that *someone ran a command*;
-        // this is the one that survives as data — and it is safe to log in a
+        // this is the one that survives as data, and it is safe to log in a
         // way `/options` is not, because the only options reachable here are
         // the ones with no secret in them.
         tracing::info!(
@@ -304,7 +304,7 @@ impl Room {
         // The reference takes Python's `int`, which accepts negatives and then
         // stores them. A negative hint cost makes hints *pay*, and a negative
         // compatibility level means nothing at all, so this rejects rather than
-        // reproducing it — the one place the parsing deliberately narrows.
+        // reproducing it: the one place the parsing deliberately narrows.
         let Ok(parsed) = value.parse::<u32>() else {
             return Err(format!(
                 "Could not read '{value}' as a whole number for {name}."
@@ -332,8 +332,8 @@ impl Room {
     fn set_mode_option(&mut self, name: &str, value: &str) -> Result<Push, String> {
         let lower = value.to_ascii_lowercase();
         // Accepts both spellings of `auto_enabled`. The reference's valid set
-        // holds the underscore, but pahoa *prints* the hyphen — `!options` and
-        // `--release-mode` both do — and rejecting the spelling the room just
+        // holds the underscore, but pahoa *prints* the hyphen (`!options` and
+        // `--release-mode` both do) and rejecting the spelling the room just
         // showed you would be an unforced trap.
         let normalized = lower.replace('-', "_");
 

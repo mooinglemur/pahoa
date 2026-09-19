@@ -3,7 +3,7 @@ use thiserror::Error;
 /// Where in the multidata a problem occurred, e.g. `slot_info[3].game`.
 ///
 /// Multidata shape drifts between Archipelago releases, so "expected a string"
-/// is nearly useless on its own — the whole value of a typed loader is saying
+/// is nearly useless on its own: the whole value of a typed loader is saying
 /// *which* field moved. Paths are built as the loader descends.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Path(String);

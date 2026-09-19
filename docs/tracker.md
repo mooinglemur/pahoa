@@ -21,24 +21,24 @@ Three details that are easy to get wrong, all confirmed against a live 185-slot 
   through Flask's encoder, so an item is `[item, location, player, flags]` and a hint is
   `[receiving_player, finding_player, location, item, found, entrance, item_flags, status]`.
   pahoa's `NetworkItem` has a custom `Serialize` that emits a *map*, because that is what the
-  WebSocket protocol wants — so the tracker needs its own serialization and cannot reuse the wire
+  WebSocket protocol wants, so the tracker needs its own serialization and cannot reuse the wire
   type. pahoa's `Hint` field order already matches the reference exactly.
 - **Timestamps are RFC 1123**, not RFC 3339: `"Mon, 17 Aug 2026 18:22:09 GMT"`, and `null` when no
-  connection has been made. This differs from `/admin/v1/status`, which is RFC 3339 — the tracker
+  connection has been made. This differs from `/admin/v1/status`, which is RFC 3339: the tracker
   matches the reference and the admin API matches its own contract.
 - **`static_tracker.datapackage` is only a checksum manifest**, `{game: {checksum, version}}`, not
   the packages themselves. 26 KB for 99 games. A tracker page fetches the real data separately and
   caches it by checksum.
 
 **Which slots appear where.** The reference walks two different sets and the difference is
-invisible until a seed has a spectator or an item-link group in it: `get_all_players()` — players
-only — feeds every per-player array, while `get_all_slots()` feeds `hints` alone. A spectator has no
+invisible until a seed has a spectator or an item-link group in it: `get_all_players()` (players
+only) feeds every per-player array, while `get_all_slots()` feeds `hints` alone. A spectator has no
 progress to report and a group has no client behind it. pahoa mirrors that split; see
 `MultiData::player_slots` against `MultiData::connectable_slots` for the same distinction on the
 room's own surfaces.
 
-`player_items_received` comes from the **remote** item queue — `(team, player, True)` in the
-reference — not the combined one.
+`player_items_received` comes from the **remote** item queue (`(team, player, True)` in the
+reference), not the combined one.
 
 `activity_timers` and `connection_timers` are **saved**, at whole-second resolution, which is all
 RFC 1123 can carry. An async routinely outlives the process serving it, and a room that restarted
@@ -49,7 +49,7 @@ a zero that would render as 1970.
 
 ## Who may read it
 
-**The tracker is gated behind the admin token whenever one is configured** — not only for
+**The tracker is gated behind the admin token whenever one is configured**, not only for
 `race_mode` seeds.
 
 The reference restricts race rooms because its tracker links are handed out publicly. pahoa's
@@ -58,7 +58,7 @@ with no authentication, so an **anonymous port scan can iterate rooms and read t
 out of each one**.
 
 The risk that creates is *identification*, not the names themselves. Running a room without a
-password is common — the reference makes it the default and most groups never change it — and what
+password is common (the reference makes it the default and most groups never change it), and what
 protects those rooms is that a scanner cannot tell which one is worth attacking. There is no index
 from a port number to whose game it is. An open tracker supplies exactly that index: sweep the port
 range, read the slot lists, find the one containing a high-visibility player, and now a stream's
@@ -70,7 +70,7 @@ unpassworded room has been silently relying on all along.
 
 So the rule is about deployment rather than seed:
 
-- **No admin token configured** — a standalone pahoa — and the tracker is open. This is the case the
+- **No admin token configured** (a standalone pahoa) and the tracker is open. This is the case the
   CORS headers exist for, and it stays browser-fetchable.
 - **A token configured**, which is what an orchestrated room has, and the tracker requires it like
   the rest of the admin surface. An orchestrator that proxies the tracker server-side holds the
@@ -79,8 +79,8 @@ So the rule is about deployment rather than seed:
   public tracker.
 
 `race_mode` is parsed and available, and deliberately does **not** enter into this: gating on the
-seed would leave the ordinary case open to the scan, and the ordinary case — an unpassworded room
-that expects to go unnoticed — is the one with the most to lose from being findable.
+seed would leave the ordinary case open to the scan, and the ordinary case (an unpassworded room
+that expects to go unnoticed) is the one with the most to lose from being findable.
 
 ## CORS
 
@@ -90,14 +90,14 @@ Both endpoints send `Access-Control-Allow-Origin: *`, as the reference does
 One intended deployment is that an orchestrator serves the tracker's static assets and its
 JavaScript fetches from the room, which is cross-origin: a different port alone is enough to make
 it so. Since these are plain `GET`s with no custom headers they are *simple requests*, so there is
-no preflight and no `OPTIONS` handler to write — the one response header is the whole of it.
+no preflight and no `OPTIONS` handler to write: the one response header is the whole of it.
 
 Two constraints that follow, and are worth not tripping over later:
 
 - **A gated tracker is not browser-fetchable.** Sending `Authorization` makes the request
   non-simple, which needs a preflight pahoa does not answer. That is the trade accepted above: an
   orchestrated room's tracker is fetched server-side by something holding the token, and only the
-  open cases — standalone, or `--open-tracker` — are reachable from a page.
+  open cases (standalone, or `--open-tracker`) are reachable from a page.
 - **`*` and credentials are mutually exclusive.** If cookies were ever needed the wildcard would be
   rejected by the browser, and pahoa would have to echo the specific `Origin` and add
   `Access-Control-Allow-Credentials`. Nothing here needs credentials.
@@ -108,7 +108,7 @@ the self-signed pair used in development.
 
 ## Caching
 
-`/api/tracker` is **60 seconds**, `/api/static_tracker` is **300** — the same windows the reference
+`/api/tracker` is **60 seconds**, `/api/static_tracker` is **300**, the same windows the reference
 memoizes with.
 
 This is not premature: the live document measured **2.7 MB** for a 185-slot room, dominated by
@@ -129,7 +129,7 @@ long as it stays connected.
 That is the thing pahoa can offer and a database-backed WebHost structurally cannot: the room
 already knows the moment a location is checked, because it is the thing that processed it. A
 tracker that holds a connection would see a check land in the same tick the sending client did,
-with no polling interval and no 2.7 MB re-render — the delta for one check is a few dozen bytes.
+with no polling interval and no 2.7 MB re-render: the delta for one check is a few dozen bytes.
 
 Shapes worth carrying over when it is built:
 
@@ -139,8 +139,8 @@ Shapes worth carrying over when it is built:
   grow a parallel one.
 - The initial snapshot should be the same document `/api/tracker` returns, so a client has one
   parser rather than two and can fall back to polling where the socket is unavailable.
-- Deltas want to be additive and idempotent — "these locations are now checked", "these items were
-  received" — so a client that misses one and reconnects can re-request the snapshot and be
+- Deltas want to be additive and idempotent ("these locations are now checked", "these items were
+  received"), so a client that misses one and reconnects can re-request the snapshot and be
   correct, rather than needing an ordered log.
 
 Until then the polling endpoints are the contract, and they are the fallback afterwards.

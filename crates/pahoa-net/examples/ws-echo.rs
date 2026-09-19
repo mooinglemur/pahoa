@@ -1,8 +1,8 @@
 //! A bare echo server on pahoa's WebSocket layer, for the Autobahn suite.
 //!
 //! pahoa itself speaks Archipelago, not echo, so conformance cannot be measured
-//! against it directly. This exposes the same [`pahoa_net::ws`] code — framing,
-//! permessage-deflate, fragmentation, the control-frame rules — with an echo on
+//! against it directly. This exposes the same [`pahoa_net::ws`] code (framing,
+//! permessage-deflate, fragmentation, the control-frame rules) with an echo on
 //! top, which is what `wstest` knows how to grade.
 //!
 //! ```sh
@@ -41,7 +41,7 @@ async fn echo(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
     stream.set_nodelay(true).ok();
 
     // Autobahn's limit cases go well past what Archipelago ever sends, so the
-    // caps here are deliberately generous — this is measuring conformance, not
+    // caps here are deliberately generous: this is measuring conformance, not
     // the production budget.
     let config = ws::accept::AcceptConfig {
         deflate: ws::handshake::DeflateConfig::default(),
@@ -69,7 +69,7 @@ async fn echo(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
 
     // The *negotiated* window, not the default. A client may cap ours below 11,
     // and compressing with a larger window than we promised emits
-    // back-references it cannot resolve — which only shows up once a payload is
+    // back-references it cannot resolve, which only shows up once a payload is
     // big enough to reach past the client's window.
     let mut deflater = upgraded
         .deflate

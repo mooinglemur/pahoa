@@ -1,7 +1,7 @@
 //! `pahoa inspect` must agree with `tools/inspect-multidata.py`, line for line.
 //!
-//! This is M1's exit gate. The two implementations share no code — the Python
-//! side reimplements the merge policy rather than importing Archipelago — so
+//! This is M1's exit gate. The two implementations share no code (the Python
+//! side reimplements the merge policy rather than importing Archipelago) so
 //! agreement over real seeds exercises slot typing, the location table, hints,
 //! version floors and the data-package merge against an independent reading of
 //! the format.

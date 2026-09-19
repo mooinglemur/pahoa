@@ -2,8 +2,8 @@
 //!
 //! `World.hint_blacklist` (`worlds/AutoWorld.py:312`) is *"any names that should
 //! not be hintable"*. The reference server reads it from the worlds it has
-//! installed — `MultiServer.py:343-344` walks `AutoWorldRegister.world_types`
-//! into `non_hintable_names` — and `!hint` refuses a match against it with
+//! installed (`MultiServer.py:343-344` walks `AutoWorldRegister.world_types`
+//! into `non_hintable_names`) and `!hint` refuses a match against it with
 //! `Sorry, "{name}" is marked as non-hintable.` (`MultiServer.py:1715`, `:1734`).
 //!
 //! **It is never serialized into multidata by anything.** It is Python class
@@ -13,7 +13,7 @@
 //!
 //! ## Why built in
 //!
-//! An external file has three states — present, absent and stale — and a server
+//! An external file has three states (present, absent and stale) and a server
 //! can only tell the first from the other two. A table compiled into the binary
 //! cannot be missing, cannot be stale relative to the code reading it, and
 //! cannot be forgotten by whoever deploys the room. That last one is not
@@ -30,7 +30,7 @@
 //! `tools/export-datapackage.py` regenerates this file from an Archipelago
 //! checkout and prints what changed, so the table stays derived rather than
 //! hand-copied. A game absent from it has an **empty** blacklist, which is
-//! exactly what the reference gives a world that does not set one — absence
+//! exactly what the reference gives a world that does not set one: absence
 //! here means "hints everything", not "unknown".
 
 /// Every non-empty `hint_blacklist` in the reference tree, by `World.game`.
@@ -44,7 +44,7 @@
 pub const HINT_BLACKLIST: &[(&str, &[&str])] = &[
     // worlds/alttp/__init__.py:232
     ("A Link to the Past", &["Triforce"]),
-    // worlds/cvcotm/__init__.py:79 — the Battle Arena reward, which is always a
+    // worlds/cvcotm/__init__.py:79: the Battle Arena reward, which is always a
     // Last Key when present.
     (
         "Castlevania - Circle of the Moon",
@@ -75,7 +75,7 @@ mod tests {
         );
     }
 
-    /// Absence means "hints everything", not "unknown" — the same answer the
+    /// Absence means "hints everything", not "unknown": the same answer the
     /// reference gives for a world that never sets the field.
     #[test]
     fn an_unlisted_game_blacklists_nothing() {

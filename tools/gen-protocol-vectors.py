@@ -78,8 +78,8 @@ def hint(recv, find, loc, item, found, entrance, flags, status):
 
 
 # The four `PrintJSON` part builders (`NetUtils.py:359-370`, `:388-390`).
-# Key order differs between them — `text` first, part-specific keys next, `type`
-# last — and it is observable, so these mirror the dict literals exactly.
+# Key order differs between them (`text` first, part-specific keys next, `type`
+# last) and it is observable, so these mirror the dict literals exactly.
 # `tools/gen-message-vectors.py` pins the same order against the real functions.
 def json_text(text, **kwargs):
     return {"text": str(text), **kwargs}
@@ -155,7 +155,7 @@ CASES["connected"] = {
     "checked_locations": [1, 2],
     # Int keys, as `ctx.slot_info` is `Dict[int, NetworkSlot]`
     # (`MultiServer.py:276`, sent verbatim at `:1961`). json turns them into
-    # strings without reordering, so the wire keys follow insertion order —
+    # strings without reordering, so the wire keys follow insertion order,
     # which for multidata is ascending slot number.
     "slot_info": {
         1: network_slot("Alice", "Timespinner", 1),

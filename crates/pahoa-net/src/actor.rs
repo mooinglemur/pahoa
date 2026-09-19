@@ -4,7 +4,7 @@
 //! observe a half-applied change. The rule that makes this fast rather than a
 //! bottleneck:
 //!
-//! > The actor awaits exactly one thing — its mailbox. Every outbound send is
+//! > The actor awaits exactly one thing: its mailbox. Every outbound send is
 //! > `try_send`. No parsing, no compression, no I/O, and no `.await` on a
 //! > channel or socket happens here.
 //!
@@ -38,14 +38,14 @@ pub enum ActorMsg {
         ///
         /// Decided by the listener and fixed for the connection's life, because
         /// a policy the client could change would be wiped by the next
-        /// `ConnectUpdate` — see `docs/scoped-feed.md`.
+        /// `ConnectUpdate`. See `docs/scoped-feed.md`.
         feed: pahoa_room::FeedPolicy,
     },
     Packets {
         conn: ConnId,
         packets: Vec<ClientPacket>,
         /// Wire bytes of the message these came in, carried because only the
-        /// actor knows which slot to charge them to — the reader task that
+        /// actor knows which slot to charge them to: the reader task that
         /// measured them has a `ConnId` and nothing else.
         bytes: usize,
     },
@@ -69,7 +69,7 @@ pub enum ActorMsg {
     /// The live figures the HTTP surface reports.
     ///
     /// Answered from inside the loop, where `&mut Room` already is, and replied
-    /// to through a `oneshot` — whose `send` never blocks, so the actor's
+    /// to through a `oneshot`, whose `send` never blocks, so the actor's
     /// "awaits exactly one thing, its mailbox" invariant survives even a caller
     /// that has already gone away.
     Live {
@@ -133,20 +133,20 @@ pub enum FilterEdit {
 #[derive(Debug)]
 pub enum FilterReply {
     Ok {
-        /// **This resource's own rules** — what `PUT`, `PATCH` and `DELETE`
+        /// **This resource's own rules**: what `PUT`, `PATCH` and `DELETE`
         /// operate on.
         ///
         /// `null` when there is no ruleset here at all, `[]` when there is one
-        /// and it is empty. Those are different states — for a slot, the first
-        /// inherits the room's filter and the second is an exemption from it —
+        /// and it is empty. Those are different states (for a slot, the first
+        /// inherits the room's filter and the second is an exemption from it)
         /// and the field that a caller edits is the one that should say so.
         /// [`FilterReply::Ok::inherited`] is a convenience derived from this,
         /// not the other way round.
         ///
         /// Deliberately not the effective filter. If a `GET` returned the
-        /// inherited rules, a `PATCH` would either merge into them — silently
+        /// inherited rules, a `PATCH` would either merge into them (silently
         /// forking the room's filter down onto the slot, so later room changes
-        /// stopped reaching it — or ignore what it had just shown. Both are
+        /// stopped reaching it) or ignore what it had just shown. Both are
         /// surprising; showing what is actually being edited is not.
         rules: serde_json::Value,
         /// What actually applies to this slot, which is the room's when the
@@ -154,7 +154,7 @@ pub enum FilterReply {
         effective: serde_json::Value,
         /// Whether `effective` came from the room rather than from here.
         ///
-        /// Derived — it is exactly `rules == null` on a slot — and kept because
+        /// Derived (it is exactly `rules == null` on a slot) and kept because
         /// it saves every caller encoding that rule for themselves.
         inherited: bool,
         /// How many rules a `DELETE` with a body took.
@@ -236,7 +236,7 @@ impl EffectSink for Dispatcher<'_> {
                 ));
             }
         }
-        // Tagged from the packets, before they become bytes — the shard sees
+        // Tagged from the packets, before they become bytes: the shard sees
         // only a frame and cannot tell a chat line from an item delivery.
         let tag = pahoa_room::filter::outbound_tag(msgs).map(std::sync::Arc::new);
         let msg = Outgoing::text(encode(msgs).as_bytes());
@@ -254,7 +254,7 @@ impl EffectSink for Dispatcher<'_> {
             crate::metrics::record_packet_out(msg.cmd());
         }
         // Encoded and framed once for every recipient across every shard.
-        // Compression deliberately happens further out, in the shards — see
+        // Compression deliberately happens further out, in the shards. See
         // `Shards::broadcast`.
         let tag = pahoa_room::filter::outbound_tag(msgs).map(std::sync::Arc::new);
         let msg = Outgoing::text(encode(msgs).as_bytes());
@@ -294,7 +294,7 @@ impl EffectSink for Dispatcher<'_> {
         // The client is told only the static half. The detail is the room's own
         // account of which argument of which command it could not survive, and
         // it is worth exactly as much to an operator as it would be to an
-        // attacker probing for one — so it goes to the log and not the wire.
+        // attacker probing for one, so it goes to the log and not the wire.
         if let CloseReason::ProtocolError(detail) = &reason {
             self.refusals.push((
                 conn,
@@ -381,7 +381,7 @@ impl Default for SaveConfig {
 ///
 /// The rule this exists to enforce: **at most one save is ever in flight, and
 /// the actor never waits for it.** Without the first half, a slow filesystem
-/// accumulates snapshots in memory — each pinning the `Arc`s it captured — and
+/// accumulates snapshots in memory, each pinning the `Arc`s it captured, and
 /// that is an out-of-memory path that only shows up on a bad day. Without the
 /// second, the room stalls for as long as the disk does.
 struct Saver {
@@ -403,7 +403,7 @@ impl Saver {
     /// Start a save if one is warranted and none is running.
     ///
     /// Returns immediately either way. A tick that arrives while a save is in
-    /// flight is *dropped* rather than queued — `dirty` stays set, so the next
+    /// flight is *dropped* rather than queued: `dirty` stays set, so the next
     /// free tick covers the same ground.
     fn maybe_start(&mut self, room: &Room) {
         let Some(store) = self.config.store.clone() else {
@@ -487,7 +487,7 @@ pub async fn run_with_saves(
     save_config: SaveConfig,
 ) {
     // Held apart from the `Saver` so that a `Dispatcher` can borrow it while
-    // `saver.dirty` is still being written — the two are independent, and
+    // `saver.dirty` is still being written: the two are independent, and
     // leaving the journal inside the config would make them look otherwise.
     let mut save_config = save_config;
     let journal = save_config.journal.take();
@@ -498,7 +498,7 @@ pub async fn run_with_saves(
     save_timer.tick().await;
 
     loop {
-        // The room says when it next wants poking — only a running countdown
+        // The room says when it next wants poking: only a running countdown
         // does today. With nothing pending this waits on the mailbox alone, so
         // an idle room costs nothing.
         let countdown = room
@@ -571,7 +571,7 @@ pub async fn run_with_saves(
                 crate::metrics::record_client_message();
                 // Once for the message, where `record_packet` below is once per
                 // packet in it. Resolved before any of them are handled, so a
-                // frame carrying `Connect` is charged to nobody — the same rule
+                // frame carrying `Connect` is charged to nobody: the same rule
                 // the packet counter follows.
                 crate::metrics::record_bytes_in(
                     room.client(conn)
@@ -662,7 +662,7 @@ pub async fn run_with_saves(
                     },
                     // The roster question, so spectators are included: an
                     // organizer needs to see a connected spectator. Walked as
-                    // `(team, slot)` — one team today, but a document listing
+                    // `(team, slot)`: one team today, but a document listing
                     // slots alone would silently show one team's worth of a
                     // room that had more.
                     slots: room
@@ -705,7 +705,7 @@ pub async fn run_with_saves(
                     // Only meaningful while per-slot mode is in force. Setting
                     // one stores it; clearing one *removes* the key, which
                     // under fail-closed semantics bars the slot rather than
-                    // opening it — the useful answer during live abuse.
+                    // opening it: the useful answer during live abuse.
                     match room.options.slot_passwords.as_mut() {
                         Some(passwords) => {
                             let set = password.is_some();
@@ -747,7 +747,7 @@ pub async fn run_with_saves(
 
                 let mut removed = 0;
                 // What this filter is *now*, distinguishing "inherits" (`None`)
-                // from "explicitly empty" — the two differ, and the difference
+                // from "explicitly empty": the two differ, and the difference
                 // is what lets a slot opt out of the room's filter entirely.
                 let existing = room.filter(key).cloned();
                 let mut current = existing.clone().unwrap_or_default();
@@ -832,7 +832,7 @@ pub async fn run_with_saves(
 /// stopped answering pings, and it holds a `ConnId` and a socket half; the slot
 /// is the actor's. So a keepalive timeout logged where it was noticed reads
 /// `conn16131` and nothing else, and no other line in the room pairs a `ConnId`
-/// with a slot — leaving an operator to guess whether a real player dropped.
+/// with a slot, leaving an operator to guess whether a real player dropped.
 ///
 /// Called *before* `on_disconnect`, which removes the client.
 ///
@@ -843,7 +843,7 @@ pub async fn run_with_saves(
 ///
 /// Archipelago logs none of this, which is defensible for a server an organizer
 /// runs in a terminal next to the client that is misbehaving. pahoa's rooms run
-/// in a pod, and the reports that reach it are secondhand — so a refusal the
+/// in a pod, and the reports that reach it are secondhand, so a refusal the
 /// server already understood in full has to leave a trace, or the next one
 /// costs another round of guessing.
 ///
@@ -854,7 +854,7 @@ pub async fn run_with_saves(
 /// **The client's own values never appear here.** `text` is the reference's
 /// wording or pahoa's, and `detail` is written by the handler that gave up;
 /// neither quotes the packet. That rules out the failure mode `DecodeFailed`
-/// avoids by dropping serde's message — a bad `Connect` writing a password into
+/// avoids by dropping serde's message: a bad `Connect` writing a password into
 /// a log an organizer pastes into a bug report.
 fn log_refusals(room: &Room, cmd: &'static str, refusals: &mut Vec<(ConnId, Refusal)>) {
     for (conn, refusal) in refusals.drain(..) {

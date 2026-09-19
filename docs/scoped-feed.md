@@ -5,7 +5,7 @@ what shipped follows it exactly, and the measurement at the end is from a real r
 
 A second listening port on which a client receives only the messages relevant to its own slot.
 APX reportedly had something like this, but it was never publicly available, so there is no
-reference implementation to port — this is a design task rather than a translation.
+reference implementation to port: this is a design task rather than a translation.
 
 ## Why a port rather than a path or a tag
 
@@ -13,7 +13,7 @@ The property that decides it: **it needs no client changes and no protocol exten
 unmodified client pointed at the scoped port transparently gets a quieter feed.
 
 That rules out both alternatives. A `Connect` tag requires client support, and the clients that
-most need this are exactly the ones nobody is going to modify — they cannot handle the `PrintJSON`
+most need this are exactly the ones nobody is going to modify: they cannot handle the `PrintJSON`
 firehose *and* have no mechanism for choosing a URL path either. A path on the one port has the
 same problem for the same reason.
 
@@ -26,7 +26,7 @@ The filter is easy to over-apply, and most of these are load-bearing:
 - `RoomInfo`, `Connected`, `DataPackage`
 - the slot's own `ReceivedItems`, and its own `RoomUpdate` / `checked_locations`
 - `Retrieved` / `SetReply` for its own subscriptions
-- **`Bounced` — DeathLink depends on it**
+- **`Bounced`: DeathLink depends on it**
 - **chat, in full.** Every `Say` from every slot reaches the scoped port unfiltered. This is settled
   rather than provisional and is not configurable: chat is what makes a room a room, it is
   low-volume next to the item feed it is being separated from, and a port that quietly swallowed it
@@ -47,7 +47,7 @@ typed is never dropped.**
 
 This is the distinction the implementation turns on. `NoText` is an *audience* filter: `Recipients`
 says **who**, the shard expands it against the membership it owns, and every recipient of a
-broadcast therefore gets byte-identical bytes — which is exactly what makes encode-once,
+broadcast therefore gets byte-identical bytes, which is exactly what makes encode-once,
 share-to-6000 work.
 
 A scoped connection on slot 42 needs a different **subset** of the ~140 `PrintJSON` packets inside
@@ -61,7 +61,7 @@ so it can append each message to per-slot buffers for those two slots as it goes
 non-empty ones. No filtering pass, no second traversal, no re-encoding.
 
 Each `ItemSend` lands in at most two buffers, so scoped encoding costs roughly 2× the full feed's
-message count — and only for slots that actually have a scoped listener, which the room can test
+message count, and only for slots that actually have a scoped listener, which the room can test
 against the `by_slot` index it already maintains. With nobody on the scoped port it is one `if` and
 no work at all.
 
@@ -69,15 +69,15 @@ The performance shape inverts on this port: scoped feeds are per-connection uniq
 compress-once-share-to-all does not apply. That is fine, because the volume per client is orders of
 magnitude smaller. The full-feed port keeps the shared-frame path. Measure both.
 
-Of the eleven `Recipients::AllText` emit sites, exactly **one** — the `ItemSend` chunking — needs the
+Of the eleven `Recipients::AllText` emit sites, exactly **one** (the `ItemSend` chunking) needs the
 routing treatment. The other ten are single messages that already carry a `slot` field, so they are
 one-line audience decisions.
 
 ## The trap: `MyText` must not live in `tags`
 
 `ConnectUpdate` calls `apply_tags`, which **replaces** the tag vector
-([room.rs:492](../crates/pahoa-room/src/room.rs#L492)). Trackers send `ConnectUpdate` routinely — to
-add `DeathLink`, for instance — so a server-applied tag would be silently wiped mid-session and the
+([room.rs:492](../crates/pahoa-room/src/room.rs#L492)). Trackers send `ConnectUpdate` routinely (to
+add `DeathLink`, for instance), so a server-applied tag would be silently wiped mid-session and the
 client would fall back to the full firehose with no error anywhere.
 
 The port-derived policy therefore has to be a **separate sticky field** on `Client`, set at accept
@@ -87,7 +87,7 @@ port sets a floor that `ConnectUpdate` cannot lower.
 ## Both ports serve the same HTTP surface
 
 When both listeners are active they are the same server, not a primary and a satellite: the HTTP
-surface — `/healthz`, `/api/v1/room`, `/admin/v1/**`, the tracker — is served identically on both,
+surface (`/healthz`, `/api/v1/room`, `/admin/v1/**`, the tracker) is served identically on both,
 and TLS terminates identically on both. Only the WebSocket feed differs.
 
 That is a constraint on the HTTP work (P4) rather than on this: the router has to be a thing a
@@ -109,4 +109,4 @@ A 75-slot seed, one client watching slot 2 on each port, while slot 1 releases i
 
 The four are the items that actually involved slot 2. Repeating it with a release of a slot that
 sends slot 2 nothing gives 94 against 0, while chat, the countdown and the release announcement
-still arrive on both — the filter drops firehose and never anything a human typed.
+still arrive on both: the filter drops firehose and never anything a human typed.

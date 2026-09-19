@@ -1,7 +1,7 @@
 //! Packets the server sends.
 //!
-//! Every variant is tagged by its `cmd` field. Three of them —
-//! `Retrieved`, `SetReply` and `Bounced` — are deliberately **not** typed:
+//! Every variant is tagged by its `cmd` field. Three of them,
+//! `Retrieved`, `SetReply` and `Bounced`, are deliberately **not** typed:
 //! Archipelago builds them by mutating the client's own request map in place
 //! and rebroadcasting it, unknown keys and all. See [`ServerPacket::Echo`].
 
@@ -68,7 +68,7 @@ pub enum ConnectionRefusedReason {
     IncompatibleVersion,
     InvalidPassword,
     InvalidItemsHandling,
-    /// **Not in the reference's set** — pahoa's own, for an administratively
+    /// **Not in the reference's set**: pahoa's own, for an administratively
     /// locked slot.
     ///
     /// The protocol has no reason for this and the list is closed, so the
@@ -77,7 +77,7 @@ pub enum ConnectionRefusedReason {
     /// `CommonClient.py:981` matches `InvalidSlot` first and stops cleanly,
     /// while an unrecognized reason on its own falls through to
     /// `raise Exception("Unknown connection errors: …")` and then reconnects on
-    /// a doubling delay — so a locked player would retry forever.
+    /// a doubling delay, so a locked player would retry forever.
     ///
     /// Ordering it first would be worse than useless for the same reason. The
     /// cost of the pairing is that a stock client tells a locked player their
@@ -102,8 +102,8 @@ pub enum ServerPacket {
     /// `Retrieved`, `SetReply` and `Bounced`.
     ///
     /// Archipelago does not construct these: it takes the client's request
-    /// object, overwrites `cmd` in place — which keeps `cmd` in its original
-    /// position — appends a few fields, and broadcasts the whole thing
+    /// object, overwrites `cmd` in place (which keeps `cmd` in its original
+    /// position) appends a few fields, and broadcasts the whole thing
     /// including any keys the client invented (`MultiServer.py:2167-2194`,
     /// `:2149-2160`).
     ///
@@ -148,7 +148,7 @@ pub struct Connected {
     /// Keyed on the slot number, **not** its string form.
     ///
     /// JSON has no integer keys, so this still goes out as
-    /// `{"1": …, "2": …}` — but a `BTreeMap<String, _>` would order those
+    /// `{"1": …, "2": …}`, but a `BTreeMap<String, _>` would order those
     /// keys lexicographically, emitting `"1","10","11",…,"2"`. The reference
     /// holds `Dict[int, NetworkSlot]` straight from the multidata
     /// (`MultiServer.py:551`, sent at `:1961`) and Python preserves insertion
@@ -191,7 +191,7 @@ pub struct LocationInfo {
 /// Always partial: only changed fields are sent.
 ///
 /// `checked_locations` is incremental when it comes from a location check but
-/// complete when it comes from `update_checked_locations` — same field name,
+/// complete when it comes from `update_checked_locations`: same field name,
 /// two meanings, and clients are expected to union rather than replace.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RoomUpdate {
@@ -240,7 +240,7 @@ pub struct DataPackage {
     ///
     /// Held rendered and shared rather than typed, because this is the one
     /// reply whose size comes from the *seed* rather than from anything a
-    /// client did — 1.1 MiB on a 35-game seed — and `GetDataPackage` is one of
+    /// client did (1.1 MiB on a 35-game seed) and `GetDataPackage` is one of
     /// the two packets accepted **before authentication**. Building it per
     /// request cost the actor 5.5 ms, which one socket in a loop turns into a
     /// room-wide stall, and a 6000-client reconnect storm turns into half a
@@ -307,7 +307,7 @@ impl ServerPacket {
     ///
     /// Borrowed rather than `&'static str` because of [`Self::Echo`], whose name
     /// lives in the map: it is whatever `echo` wrote there, which the room only
-    /// ever spells `Retrieved`, `SetReply` or `Bounced` — but the map is the
+    /// ever spells `Retrieved`, `SetReply` or `Bounced`, but the map is the
     /// authority, and reading it is what keeps this honest if that changes. An
     /// echo missing its `cmd` is not something the room can construct; it
     /// answers `Echo` rather than panicking on a map somebody else built.

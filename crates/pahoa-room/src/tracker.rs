@@ -1,7 +1,7 @@
 //! What the tracker API reads, taken off the room in one cheap pass.
 //!
-//! The document a tracker renders is large — measured at 2.7 MB for a 185-slot
-//! room — and rendering it is pure CPU. So this is deliberately *not* the JSON:
+//! The document a tracker renders is large, measured at 2.7 MB for a 185-slot
+//! room, and rendering it is pure CPU. So this is deliberately *not* the JSON:
 //! it is a snapshot of `Arc`s, taken while the actor holds `&mut Room` and
 //! costing a refcount bump per slot, which the HTTP task then serializes on its
 //! own thread. The same division `Room::snapshot` makes for saving, for the same
@@ -25,7 +25,7 @@ pub struct TrackerSlot {
     pub alias: Option<String>,
     pub status: ClientStatus,
     pub total_locations: usize,
-    /// Whether this slot has progress to report — a player, not a spectator or
+    /// Whether this slot has progress to report: a player, not a spectator or
     /// a group.
     ///
     /// The reference's tracker walks two different sets: `get_all_players()`
@@ -57,7 +57,7 @@ pub struct TrackerGroup {
 pub struct TrackerData {
     pub slots: Vec<TrackerSlot>,
     pub groups: Vec<TrackerGroup>,
-    /// `{game: (checksum, version)}` — the manifest the reference emits, not
+    /// `{game: (checksum, version)}`: the manifest the reference emits, not
     /// the packages themselves.
     pub datapackage: Vec<(String, Option<String>)>,
     /// Locations checked across every slot, per team.

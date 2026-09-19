@@ -2,7 +2,7 @@
 //!
 //! A frame is a JSON **array** of command objects, not a single object: a
 //! client may batch several commands into one WebSocket message, and the server
-//! processes them in order (`MultiServer.py:910-911`). Output is compact —
+//! processes them in order (`MultiServer.py:910-911`). Output is compact:
 //! serde_json's default separators already match Python's
 //! `separators=(',',':')`, and its UTF-8 passthrough matches `ensure_ascii=False`.
 
@@ -321,7 +321,7 @@ mod tests {
 
     /// `LocationScouts` is the one that reports the junk instead of ignoring
     /// it, because the reference checks that list element by element with its
-    /// own message — so the element has to survive decoding either way.
+    /// own message, so the element has to survive decoding either way.
     #[test]
     fn a_scouted_list_keeps_its_junk_for_the_handler_to_report() {
         let packets = decode(r#"[{"cmd":"LocationScouts","locations":[113.5]}]"#)
@@ -339,7 +339,7 @@ mod tests {
     //
     // Seen live: `"create_as_hint": false`, dropping a socket every time. The
     // reference reads it through `int(args.get("create_as_hint", 0))`, and
-    // `int(False)` is 0 — the ordinary "scout, do not hint" request — because
+    // `int(False)` is 0, the ordinary "scout, do not hint" request, because
     // `bool` is a subclass of `int` in Python.
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn every_inbound_number_tolerates_the_boolean_spelling() {
         // Each of these reaches Python arithmetic, an `isinstance(_, int)`, or
-        // a dict lookup — all of which take a bool without comment.
+        // a dict lookup, all of which take a bool without comment.
         let cases = [
             r#"[{"cmd":"LocationScouts","locations":[7],"create_as_hint":true}]"#,
             r#"[{"cmd":"CreateHints","locations":[7],"player":true,"status":false}]"#,
@@ -410,7 +410,7 @@ mod tests {
     //
     // Seen live: `Set: invalid type: integer 0, expected a boolean`, repeatedly,
     // on a room's ordinary data-storage traffic. The reference writes
-    // `if args.get("want_reply", False):` — a truth test on whatever `json`
+    // `if args.get("want_reply", False):`, a truth test on whatever `json`
     // produced, so `0` is simply false there and the packet is unremarkable.
 
     #[test]

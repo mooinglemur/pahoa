@@ -2,7 +2,7 @@
 //!
 //! The chat commands in [`super::commands`] are all connection-scoped:
 //! `!release` releases *the caller's* slot, and their replies go back to the
-//! caller's socket. An administrator has neither — the target is supplied, and
+//! caller's socket. An administrator has neither: the target is supplied, and
 //! the reply is a document rather than a message to a player.
 //!
 //! So this reuses the **primitives** those handlers sit on rather than the
@@ -13,8 +13,8 @@
 //! report success and change nothing.
 //!
 //! Where an administrator's action should read to players exactly as the chat
-//! one does, the announcement comes from the same primitive — `release_player`
-//! broadcasts its own line — so the two cannot drift.
+//! one does, the announcement comes from the same primitive (`release_player`
+//! broadcasts its own line) so the two cannot drift.
 
 use super::*;
 
@@ -91,7 +91,7 @@ pub enum AdminCommand {
     },
     /// Set a slot's completion status on its behalf.
     ///
-    /// No reference equivalent — upstream's only external writer of
+    /// No reference equivalent: upstream's only external writer of
     /// `client_game_state` is the slot's own `StatusUpdate` packet. This exists
     /// for the case that leaves no other way out: a player has finished but
     /// their client cannot say so.
@@ -169,7 +169,7 @@ fn is_secret_option(name: &str) -> bool {
 
 /// How one admin command is recorded: verb, target slot, and its arguments.
 ///
-/// `None` for the commands that change nothing — there is exactly one, and a
+/// `None` for the commands that change nothing. There is exactly one, and a
 /// history full of somebody refreshing a status page is a history nobody reads.
 fn journal_shape(command: &AdminCommand) -> Option<(&'static str, Option<u32>, serde_json::Value)> {
     use serde_json::json;
@@ -220,7 +220,7 @@ fn journal_shape(command: &AdminCommand) -> Option<(&'static str, Option<u32>, s
         ),
         AdminCommand::Alias { slot, alias } => ("alias", Some(*slot), json!({ "alias": alias })),
         // **Masked on the name, not on whether the command will succeed.**
-        // `/option` refuses every password-bearing option — but that refusal
+        // `/option` refuses every password-bearing option, but that refusal
         // happens in the handler, and this record is written before dispatch,
         // so relying on it would put `server_password: topsecret` in a file
         // that outlives the room every time an operator tried. The attempt is
@@ -247,7 +247,7 @@ impl Room {
         // rather than inside each handler is what keeps the history honest as
         // the surface grows: a command is journaled because it is an admin
         // command, not because whoever added it remembered to. It is also what
-        // makes the two doors agree — `!getitem` in chat has always been a
+        // makes the two doors agree: `!getitem` in chat has always been a
         // `cheat` record, while the same grant through `/send` used to be
         // invisible.
         //
@@ -366,8 +366,8 @@ impl Room {
 
     fn admin_countdown(&mut self, seconds: i64, out: &mut dyn EffectSink) -> AdminOutcome {
         // The same bound `!countdown` applies. An administrator may run one in a
-        // room where the mode denies it to players — that is what the mode is
-        // for — but not an unbounded one.
+        // room where the mode denies it to players (that is what the mode is
+        // for) but not an unbounded one.
         if !(0..=60 * 60).contains(&seconds) {
             return AdminOutcome::refused(format!(
                 "{seconds} is invalid. A countdown runs between 0 and 3600 seconds."
@@ -436,7 +436,7 @@ impl Room {
         // Deliberately not gated on `item_cheat`: that option decides whether
         // *players* may help themselves, and an administrator granting an item
         // is the sanctioned path it points people at.
-        // Plain text, not a typed `ItemCheat` — see `CheatAnnounce`. This is
+        // Plain text, not a typed `ItemCheat`. See `CheatAnnounce`. This is
         // the console path, and the reference announces it without the type,
         // the item or the receiving slot.
         match self.grant_items(
@@ -484,8 +484,8 @@ impl Room {
 
         // **Gate on the right pool before collecting**, which is what keeps
         // the two verbs actually distinct. `collect_hints_by_name` falls
-        // through to a location lookup when an item lookup misses — faithfully,
-        // because the reference's `get_hints` ends its chain the same way — and
+        // through to a location lookup when an item lookup misses, faithfully,
+        // because the reference's `get_hints` ends its chain the same way, and
         // the reference gets away with it by choosing the candidate pool
         // *first* (`MultiServer.py:1728-1731`), so a location name never
         // reaches the fallthrough on an item hint. The chat commands do the
@@ -504,7 +504,7 @@ impl Room {
                 };
                 pool.contains(&name)
             });
-        // An id addresses its target directly, with no name to gate on — the
+        // An id addresses its target directly, with no name to gate on. The
         // reference accepts one here too (`MultiServer.py:2443`), and
         // `send_location` already does, so refusing it only here would be an
         // inconsistency a caller has to memorize.
@@ -523,7 +523,7 @@ impl Room {
         if force {
             // Straight past the economy: no points are spent and `hints_used`
             // does not move, because an administrator granting a hint is not the
-            // slot buying one. That is the whole of what `force` changes —
+            // slot buying one. That is the whole of what `force` changes:
             // this is the reference's console `/hint`
             // (`MultiServer.py:2451-2465`), which collects and announces every
             // matching hint with no cost and no one-per-call limit. The
@@ -534,8 +534,8 @@ impl Room {
             // **Both flags default**, exactly as `notify_hints(team, hints)`
             // does there. They used to be `true, true`, which are the
             // *LocationScouts* flags: `only_new` silently dropped every hint
-            // the slot already held — so re-running an admin hint announced
-            // nothing while still reporting a count — and
+            // the slot already held, so re-running an admin hint announced
+            // nothing while still reporting a count, and
             // `persist_even_if_found` banked hints for locations already
             // checked, which the reference stores only for scouts and says so
             // in a comment at `MultiServer.py:822-823`.
@@ -547,7 +547,7 @@ impl Room {
                 vec![slot],
             )
         } else {
-            // The slot's own economy, exactly as `!hint` would apply it —
+            // The slot's own economy, exactly as `!hint` would apply it:
             // an administrator asking without `force` is asking on the
             // player's behalf, not overriding them.
             let points = self.slot_points(key);
@@ -572,7 +572,7 @@ impl Room {
     /// what a player typed through `fuzzy::intended` because a person guessing
     /// at a name is the normal case there. This is a typed JSON API whose
     /// caller is a program: a near-miss should be an error it can see, not a
-    /// silent decision to act on a different location — and `send_location`
+    /// silent decision to act on a different location, and `send_location`
     /// hands out items, which is not something to do on a guess.
     fn resolve_location(&self, key: SlotKey, input: &str) -> Option<i64> {
         if let Ok(id) = input.parse::<i64>() {
@@ -586,7 +586,7 @@ impl Room {
     ///
     /// Routed through `register_location_checks` rather than writing the set
     /// directly, so the items that location holds are sent, the check is
-    /// announced, `activity_at` moves and the hint statuses update — all the
+    /// announced, `activity_at` moves and the hint statuses update: all the
     /// consequences a real check has. Writing to `location_checks` would look
     /// identical in the tracker and quietly deliver nothing.
     fn admin_send_location(
@@ -629,12 +629,12 @@ impl Room {
     /// **Not a third permission level.** `release_mode` is the room's policy;
     /// this is a per-slot exemption checked *before* it, so `allowed: true`
     /// lets that slot `!release` whatever the mode says. Clearing it does not
-    /// forbid releasing — it restores the mode, which may well still permit it.
+    /// forbid releasing: it restores the mode, which may well still permit it.
     /// The reference is the same shape and spells the clear case out as "has to
     /// follow the server restrictions" (`MultiServer.py:2361-2371`); the
     /// response here says so too, because "forbid" reads like a denial.
     ///
-    /// There is deliberately no collect equivalent: the reference has none —
+    /// There is deliberately no collect equivalent: the reference has none, and
     /// `!collect` consults `collect_mode` and nothing else.
     fn admin_allow_release(
         &mut self,
@@ -673,7 +673,7 @@ impl Room {
     /// **Goal cannot be undone, including from here.** `MultiServer.py:2208`
     /// guards every status change with `if current != CLIENT_GOAL`, so not even
     /// the client that declared it may take it back, and pahoa keeps that
-    /// invariant rather than carving out an operator exception — anything
+    /// invariant rather than carving out an operator exception: anything
     /// downstream is entitled to treat goal as monotonic. Where the reference
     /// silently ignores the attempt, this refuses it and says why: an operator
     /// who asked for a change is owed the news that it did not happen.
@@ -727,7 +727,7 @@ impl Room {
     /// **Does not disconnect anyone**, and the response says so, because the
     /// obvious reading of "locked" is that the room ejected them. Locking bars
     /// the next login; `kick` ends the current session. An administrator
-    /// dealing with a griefer wants both, in that order — kicking first leaves
+    /// dealing with a griefer wants both, in that order: kicking first leaves
     /// a window in which they simply reconnect.
     ///
     /// Independent of every password mode: it applies to a room with no
@@ -748,7 +748,7 @@ impl Room {
                 // The one thing an administrator is most likely to assume
                 // wrongly, said at the moment they would assume it.
                 line.push_str(&format!(
-                    " {open} connection{} still open; locking does not disconnect anyone — use kick for that.",
+                    " {open} connection{} still open; locking does not disconnect anyone. Use kick for that.",
                     if open == 1 { " is" } else { "s are" }
                 ));
             }
@@ -763,7 +763,7 @@ impl Room {
     /// Set or clear a slot's alias, which `!alias` only lets a player do for
     /// themselves.
     ///
-    /// Truncated the same way the chat command does — the reference takes the
+    /// Truncated the same way the chat command does: the reference takes the
     /// first 16 *characters* and then strips, so a padded name ends up shorter
     /// than 16 rather than being padded out to it.
     fn admin_alias(&mut self, slot: u32, alias: &str, out: &mut dyn EffectSink) -> AdminOutcome {
@@ -787,7 +787,7 @@ impl Room {
         };
 
         out.mark_dirty();
-        // Aliases ride in `NetworkPlayer`, so every client needs the new list —
+        // Aliases ride in `NetworkPlayer`, so every client needs the new list:
         // the same broadcast `!alias` makes, for the same reason.
         out.broadcast(
             Recipients::All,
@@ -801,7 +801,7 @@ impl Room {
 
     /// Change one of the room's rules.
     ///
-    /// Deliberately the *same* code path as `!admin` `/option` — see
+    /// Deliberately the *same* code path as `!admin` `/option`. See
     /// [`Room::apply_option`]. The two surfaces differ only in who is trusted
     /// to reach them and where the answer goes.
     fn admin_option(&mut self, name: &str, value: &str, out: &mut dyn EffectSink) -> AdminOutcome {

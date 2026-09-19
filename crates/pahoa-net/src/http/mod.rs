@@ -47,7 +47,7 @@ struct Inner {
     shutdown: Arc<tokio::sync::Notify>,
     /// Whether the tracker answers without the bearer token.
     ///
-    /// True when no admin token is configured at all — a standalone pahoa — or
+    /// True when no admin token is configured at all (a standalone pahoa) or
     /// when an operator asked for it explicitly.
     open_tracker: bool,
     /// Rendered tracker documents, held for their TTL.
@@ -78,7 +78,7 @@ impl Router {
     /// Answer one request.
     ///
     /// Takes the whole exchange rather than a path, because a route may want the
-    /// method, a header or the body — and returns a [`Response`] rather than
+    /// method, a header or the body, and returns a [`Response`] rather than
     /// writing, so the routing is testable without a socket.
     ///
     /// `source` is the connection's peer address, which only the admin gate
@@ -166,8 +166,8 @@ impl Router {
 
     /// Serve a tracker document, from the cache when one is warm.
     ///
-    /// Cross-origin by design — an orchestrator serves the tracker's assets and
-    /// its JavaScript fetches from the room — so both carry
+    /// Cross-origin by design (an orchestrator serves the tracker's assets and
+    /// its JavaScript fetches from the room) so both carry
     /// `Access-Control-Allow-Origin: *`, exactly as the reference does. These
     /// are plain `GET`s with no custom headers, which makes them simple
     /// requests: no preflight, and no `OPTIONS` route to write.
@@ -182,7 +182,7 @@ impl Router {
         }
 
         // Missed. The snapshot is `Arc` clones taken on the actor; rendering it
-        // — megabytes, on a large room — happens here, on this task.
+        // (megabytes, on a large room) happens here, on this task.
         let (tx, rx) = oneshot::channel();
         if self
             .0
@@ -427,7 +427,7 @@ impl Router {
         tracing::info!("shutdown requested through the admin API");
         // **`notify_one`, not `notify_waiters`.** The listener starts accepting
         // inside `Server::start`, a few statements before anything awaits this,
-        // so a request landing in that window would find no waiter — and
+        // so a request landing in that window would find no waiter, and
         // `notify_waiters` drops a notification nobody is holding. The room
         // would have answered 202 and kept serving.
         //
@@ -451,13 +451,13 @@ impl Router {
     }
 
     /// What a room page shows. Public, and therefore carries no secrets and no
-    /// per-slot progress — only what the seed already tells anyone holding it.
+    /// per-slot progress: only what the seed already tells anyone holding it.
     async fn room(&self) -> Response {
         let seed = &self.0.seed;
         let live = self.live().await;
 
         // The roster question: who may connect, which includes spectators, and
-        // which is a `(team, slot)` question — one team today, so this is one
+        // which is a `(team, slot)` question: one team today, so this is one
         // row per slot, but a room page written against it does not have to
         // learn a new shape if that changes.
         let slots: Vec<serde_json::Value> = seed
@@ -490,7 +490,7 @@ impl Router {
 
     /// Ask the actor for the handful of live numbers this surface reports.
     ///
-    /// `None` when the room has stopped — the listener can outlive the actor
+    /// `None` when the room has stopped: the listener can outlive the actor
     /// during shutdown, and reporting zero would be a lie that reads as an idle
     /// room rather than a stopping one.
     async fn live(&self) -> Option<Live> {
@@ -598,7 +598,7 @@ fn slot_password_path(path: &str) -> Option<u32> {
 /// This port is public and gets scanned, so a label taken from the request line
 /// would let anyone mint series until a scrape fell over. Everything
 /// unrecognized collapses to `other`, and the two routes carrying a slot number
-/// collapse to their template — which is also the more useful grouping, since
+/// collapse to their template, which is also the more useful grouping, since
 /// nobody wants two thousand series for one resource.
 ///
 /// Kept next to the matchers it mirrors so a new route is hard to add here
@@ -678,7 +678,7 @@ mod tests {
         // A leap day, and the day after it.
         assert_eq!(at(1_709_164_800), "2024-02-29T00:00:00Z");
         assert_eq!(at(1_709_251_200), "2024-03-01T00:00:00Z");
-        // 2000 is a leap year, 1900 was not — the century rule both ways.
+        // 2000 is a leap year, 1900 was not: the century rule both ways.
         assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
         // The handoff's own example value.
         assert_eq!(at(1_786_968_000), "2026-08-17T12:00:00Z");

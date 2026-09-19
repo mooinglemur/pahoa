@@ -318,7 +318,7 @@ mod team_completion {
     /// Driven through the admin command rather than a joined client's
     /// `StatusUpdate`: both reach the same `set_status`, but a join has to
     /// satisfy the slot's `min_client`, and this fixture has slots requiring
-    /// 0.7.0 — above what the test client claims. Those joins are refused, so a
+    /// 0.7.0, above what the test client claims. Those joins are refused, so a
     /// client-driven version of this test could never goal every slot and would
     /// look like a missing feature rather than a harness limit.
     fn goal(room: &mut Room, slot: u32) -> Vec<String> {
@@ -392,7 +392,7 @@ mod team_completion {
     }
 
     /// Spectators and item-link groups are seeded to goal at load, so they must
-    /// not hold the message back — upstream counts them too, and they satisfy
+    /// not hold the message back: upstream counts them too, and they satisfy
     /// the condition for free.
     #[test]
     fn non_player_slots_do_not_hold_it_back() {
@@ -424,7 +424,7 @@ mod team_completion {
     }
 
     /// It carries no `type`, because `broadcast_text_all` is called with no
-    /// additional arguments — unlike the individual goal message, which is
+    /// additional arguments, unlike the individual goal message, which is
     /// typed. Upstream's shape, matched deliberately.
     #[test]
     fn it_is_an_untyped_print() {
@@ -502,7 +502,7 @@ fn spectators_and_groups_start_already_goaled() {
     }
 }
 
-/// `Room::last_check_at` — the room-wide "is anyone still playing" timer.
+/// `Room::last_check_at`: the room-wide "is anyone still playing" timer.
 ///
 /// Distinct from "has any client sent a packet", which chat, `Sync`, `Get` and
 /// `StatusUpdate` all reset. An idle reaper wants this one; the reference
@@ -545,7 +545,7 @@ mod last_check_at {
     ///
     /// A client re-sends its whole location list on every reconnect. If that
     /// counted, a room full of reconnecting-but-idle clients would look active
-    /// forever and never reap — which is the failure the room-wide timer exists
+    /// forever and never reap, which is the failure the room-wide timer exists
     /// to avoid, reintroduced one layer down.
     #[test]
     fn resending_known_checks_does_not_advance_it() {

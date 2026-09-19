@@ -2,14 +2,14 @@
 //!
 //! # Why this is cached rather than built per request
 //!
-//! Every other reply the room produces is bounded by something a client did —
+//! Every other reply the room produces is bounded by something a client did:
 //! a slot's location count, a 140-packet chunk, one datastorage value. This one
 //! is bounded by the *seed*: it carries every item and location name for every
 //! game in the multiworld, which is **1.1 MiB on a 35-game seed** and grows
 //! with the game count rather than the slot count.
 //!
 //! Building it per request meant cloning every name table and serializing the
-//! result on the actor — measured at **5.5 ms** for 35 games. The actor owns
+//! result on the actor, measured at **5.5 ms** for 35 games. The actor owns
 //! `Room` and awaits only its mailbox, so that is 5.5 ms in which no other
 //! client's packet is handled. Two things make that untenable rather than
 //! merely wasteful:
@@ -17,11 +17,11 @@
 //! - `GetDataPackage` is one of the two packets accepted **before
 //!   authentication** (`MultiServer.py:1963`), so anyone who can open a socket
 //!   can ask, repeatedly. At 5.5 ms a single connection saturates the actor at
-//!   about 180 requests a second — a remote stall of the whole room from one
+//!   about 180 requests a second: a remote stall of the whole room from one
 //!   socket, needing no credentials and no unusual traffic.
 //! - Every real client asks once on connecting whenever its cached checksums
-//!   miss, so a 6000-client reconnect storm — the scenario the design exists to
-//!   survive — would spend half a minute of pure actor time on it.
+//!   miss, so a 6000-client reconnect storm (the scenario the design exists to
+//!   survive) would spend half a minute of pure actor time on it.
 //!
 //! Rendered once and shared, the common reply costs a refcount bump, and the
 //! bytes are identical because they come from the same serializer.
@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub struct DataPackageCache {
-    /// Every game — what a client gets when it omits `games`, and what it asks
+    /// Every game: what a client gets when it omits `games`, and what it asks
     /// for by name often enough to be worth answering without assembly.
     full: Arc<RawValue>,
     /// One rendered game object each, so a subset can be assembled by
@@ -68,7 +68,7 @@ impl DataPackageCache {
     /// The reply for a set of game names.
     ///
     /// Names the room does not have are dropped rather than reported, which is
-    /// the reference's behavior too — it filters its package by membership
+    /// the reference's behavior too: it filters its package by membership
     /// (`MultiServer.py:1944-1946`), so an unknown game is simply absent.
     pub fn select(&self, wanted: &[&str]) -> Arc<RawValue> {
         let chosen: BTreeSet<&str> = wanted
@@ -77,8 +77,8 @@ impl DataPackageCache {
             .filter(|g| self.by_game.contains_key(*g))
             .collect();
 
-        // Deduplicated first, so a request naming everything — or naming a game
-        // twice — still recognizes itself as the whole package and shares it.
+        // Deduplicated first, so a request naming everything, or naming a game
+        // twice, still recognizes itself as the whole package and shares it.
         if chosen.len() == self.by_game.len() {
             return Arc::clone(&self.full);
         }

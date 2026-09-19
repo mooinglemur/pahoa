@@ -123,7 +123,7 @@ impl PyRandom {
     }
 
     /// `Random._randbelow_with_getrandbits(n)`: rejection sampling on
-    /// `n.bit_length()` bits. The loop matters — a modulo shortcut would consume
+    /// `n.bit_length()` bits. The loop matters: a modulo shortcut would consume
     /// a different number of draws and desynchronize everything after it.
     pub fn randbelow(&mut self, n: u64) -> u64 {
         if n == 0 {
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn randbelow_one_rejects_until_it_draws_zero() {
         // n=1 has bit_length 1, so CPython draws a single bit and *retries*
-        // while r >= 1 — meaning it loops until it happens to draw 0. The draw
+        // while r >= 1, meaning it loops until it happens to draw 0. The draw
         // count is therefore variable, which matters: a modulo shortcut would
         // consume a different number of draws and desynchronize the stream.
         for seed in ["x", "y", "z", "seed-1", "seed-2"] {

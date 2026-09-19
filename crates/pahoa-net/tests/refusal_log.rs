@@ -7,8 +7,8 @@
 //!
 //! - the `InvalidPacket` the room sent, which went to the client and nowhere
 //!   else; and
-//! - the sentence behind [`CloseReason::ProtocolError`] — the room's own
-//!   account of which argument of which command it could not survive — which
+//! - the sentence behind [`CloseReason::ProtocolError`], the room's own
+//!   account of which argument of which command it could not survive, which
 //!   the dispatcher flattened into the static `"protocol error"` before anyone
 //!   could read it.
 //!
@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// Hand-rolled rather than `tracing-subscriber` with a capturing writer: this
 /// is forty lines against a dev-dependency and a parse of formatted output, and
-/// asserting on *fields* is the point — `slot` being absent is the claim in two
+/// asserting on *fields* is the point: `slot` being absent is the claim in two
 /// of these tests, and a substring search over rendered text cannot tell an
 /// absent field from one that happened not to print.
 #[derive(Clone, Default)]
@@ -199,15 +199,15 @@ const FATAL: &str = "dropping a connection over a packet the reference would rai
 
 #[tokio::test]
 async fn an_invalid_packet_is_logged_against_the_slot_that_earned_it() {
-    // `"text" not in args or type(args["text"]) is not str` (`MultiServer.py:2176`)
-    // — answered, socket kept.
+    // `"text" not in args or type(args["text"]) is not str` (`MultiServer.py:2176`):
+    // answered, socket kept.
     let log = run(true, &[r#"[{"cmd":"Say","text":7}]"#.to_string()]).await;
 
     let line = log.only(ANSWERED);
     assert!(line.contains("team=0"), "{line}");
     assert!(line.contains("slot=1"), "{line}");
-    // The inbound command, which the packet's own `original_cmd` need not match
-    // — `Get` is answered as `Retrieve`.
+    // The inbound command, which the packet's own `original_cmd` need not
+    // match: `Get` is answered as `Retrieve`.
     assert!(line.contains(r#"cmd="Say""#), "{line}");
     assert!(line.contains(r#"text="Say""#), "{line}");
 }
@@ -215,7 +215,7 @@ async fn an_invalid_packet_is_logged_against_the_slot_that_earned_it() {
 #[tokio::test]
 async fn the_reply_text_is_kept_beside_the_command_that_caused_it() {
     // The reference answers a malformed `Get` with the text `Retrieve`
-    // (`MultiServer.py:2246`) — the name of nothing any client sends, and a
+    // (`MultiServer.py:2246`), the name of nothing any client sends, and a
     // dead end for anyone who greps for it. The line carries both, so the
     // wording a player quotes from their client still leads to the command.
     let log = run(true, &[r#"[{"cmd":"Get","keys":"a"}]"#.to_string()]).await;
@@ -244,7 +244,7 @@ async fn dropping_a_socket_records_why_the_room_gave_up() {
 #[tokio::test]
 async fn a_refusal_before_authentication_has_no_slot_to_name() {
     // `game` absent is the reference's one `Connect` precondition
-    // (`MultiServer.py:1904-1907`), answered rather than closed on — and it
+    // (`MultiServer.py:1904-1907`), answered rather than closed on, and it
     // happens before there is a slot. Half of all refusals look like this, so
     // the line has to stay readable without one.
     let log = run(false, &[connect(r#""password":null"#)]).await;

@@ -1,7 +1,7 @@
 //! The location table: which item sits at which location, for every slot.
 //!
-//! This is by far the largest structure in a multidata — 17,630 entries in a
-//! 75-slot seed, and the plan sizes for ~400k at 2000 slots — and it is read on
+//! This is by far the largest structure in a multidata (17,630 entries in a
+//! 75-slot seed, and the plan sizes for ~400k at 2000 slots) and it is read on
 //! every location check. The layout copies what Archipelago converged on in
 //! Cython (`_speedups.pyx`): one flat array sorted by `(sender, location)` plus
 //! a per-sender index, giving cache-friendly scans and O(log n) lookups with no
@@ -103,7 +103,7 @@ impl LocationStore {
     /// fixture generator can build a store without going through pickle.
     ///
     /// Declares one slot per **distinct sender**, because entries are all there
-    /// is to go on here — a caller cannot express a slot that exists and owns
+    /// is to go on here: a caller cannot express a slot that exists and owns
     /// nothing. [`Self::from_py`] can and does; see `slots`.
     pub fn from_entries(mut entries: Vec<LocationEntry>, max_slot: u32) -> Self {
         entries.sort_unstable_by_key(|e| (e.sender, e.location));
@@ -181,7 +181,7 @@ impl LocationStore {
         // Slot ids must be contiguous from 1: a gap means the multidata and the
         // slot table disagree, and every downstream index would be off. This is
         // `len(self) != max(self)` (`NetUtils.py:456`), and it counts *declared*
-        // slots rather than slots with locations — **a spectator declares a slot
+        // slots rather than slots with locations: **a spectator declares a slot
         // and owns nothing**, so requiring entries for every id would refuse
         // every seed that has one.
         if self.slots != self.max_slot() {
@@ -276,7 +276,7 @@ mod tests {
     /// seed shape and not a gap.
     ///
     /// Built through `from_py` because that is the only path that can tell
-    /// "declared and empty" from "absent" — which is exactly the distinction
+    /// "declared and empty" from "absent", which is exactly the distinction
     /// that was lost. This ran red against every seed in the corpus that has a
     /// spectator in it, and the room refused to start.
     #[test]

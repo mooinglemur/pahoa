@@ -6,12 +6,12 @@
 //! no effect.
 //!
 //! It arises from a close that depends on the queue it is closing, and the
-//! mechanism is pinned deterministically in `shard.rs`'s own tests — including
+//! mechanism is pinned deterministically in `shard.rs`'s own tests, including
 //! the subtle half, where the queue has room but its writer is wedged.
 //!
 //! What lives here is the end-to-end half: an *administrator's kick* against a
 //! client that is not reading, driven through the real admin API over real
-//! sockets. That is the case an operator reported — the API answered
+//! sockets. That is the case an operator reported: the API answered
 //! "Disconnected 1 connection" while the client stayed connected.
 //!
 //! The equivalent end-to-end test for *lagging* is deliberately absent. It has
@@ -21,8 +21,8 @@
 //! deterministic version in `shard.rs` covers the same invariant.
 //!
 //! **So is the end-to-end budget-leak test**, and for a sharper reason than
-//! flakiness: written the obvious way — drive a room busy, drop every client,
-//! assert `queued_bytes() == 0` — it passes whether or not the leak is
+//! flakiness: written the obvious way (drive a room busy, drop every client,
+//! assert `queued_bytes() == 0`) it passes whether or not the leak is
 //! present. Clients that read normally have their reservations released by
 //! their own writers on the ordinary path, so the assertion comes out true for
 //! a reason that has nothing to do with what it claims to check. Confirmed by
@@ -118,7 +118,7 @@ async fn kick(addr: std::net::SocketAddr, slot: u32) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// A raw WebSocket client, so that "never reads" is expressible — no library
+/// A raw WebSocket client, so that "never reads" is expressible: no library
 /// will let you hold a connection open while ignoring it.
 async fn connect(addr: std::net::SocketAddr, name: &str) -> TcpStream {
     let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -210,7 +210,7 @@ async fn send(stream: &mut TcpStream, text: &str) {
 /// The whole point: a socket the server has stopped tracking must not stay open.
 ///
 /// "Closed" is read from the peer's side, because that is the only place the bug
-/// is visible — the server's own bookkeeping said the connection was dropped
+/// is visible: the server's own bookkeeping said the connection was dropped
 /// even while it was not.
 async fn is_closed_by_peer(stream: &mut TcpStream) -> bool {
     let mut buf = [0u8; 65536];
@@ -232,7 +232,7 @@ async fn is_closed_by_peer(stream: &mut TcpStream) -> bool {
 /// The same guarantee for an administrator's kick.
 ///
 /// A kick aimed at a struggling client is the most likely kind, and therefore
-/// the one most likely to have silently done nothing — the admin API reported
+/// the one most likely to have silently done nothing: the admin API reported
 /// "Disconnected 1 connection" while the client stayed connected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kicked_client_is_disconnected_even_when_it_is_not_reading() {
@@ -289,7 +289,7 @@ async fn opcode(stream: &mut TcpStream, within: Duration) -> Option<u8> {
 ///
 /// Archipelago's own clients connect with `ping_interval=None`, so an idle
 /// connection carries no traffic in either direction unless the server makes
-/// some — and a middlebox that reaps idle flows will take it, telling neither
+/// some, and a middlebox that reaps idle flows will take it, telling neither
 /// end. Observed in the wild between two clients on one machine: the one that
 /// pinged survived, the one that did not was dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

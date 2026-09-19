@@ -10,7 +10,7 @@
 //!   already is one.
 //!
 //! Each has its own section below. The common thread is that none of these are
-//! judgement calls about what a client "probably meant" — every one of them is
+//! judgement calls about what a client "probably meant": every one of them is
 //! something CPython does silently, so refusing it makes pahoa stricter than
 //! the server it replaces and costs a player their connection for a packet
 //! nobody upstream would look at twice.
@@ -26,8 +26,8 @@
 //! would. Nothing in the reference ever asks what type it was.
 //!
 //! Rust does ask, and refused: `LocationChecks: invalid type: floating point
-//! 113.0, expected i64`. That dropped the connection — matching what the
-//! reference does for a genuinely malformed packet — for a packet the reference
+//! 113.0, expected i64`. That dropped the connection, matching what the
+//! reference does for a genuinely malformed packet, for a packet the reference
 //! considers perfectly ordinary. The player saw their client disconnect on
 //! every location they checked, and nothing about it was their fault.
 //!
@@ -39,8 +39,8 @@
 //! **Truncating would be worse than refusing.** A fractional location id is not
 //! a location this seed has, and silently rounding one into a real id would
 //! check somebody's location because a client had a rounding bug. The reference
-//! reaches the same outcome by a different route — a `113.5` key simply matches
-//! nothing — so refusing the packet and refusing to guess agree with it in
+//! reaches the same outcome by a different route (a `113.5` key simply matches
+//! nothing) so refusing the packet and refusing to guess agree with it in
 //! every case that matters.
 //!
 //! This is deliberately confined to *inbound* numbers. What pahoa emits stays
@@ -55,16 +55,16 @@
 //! falsy in Python, so the packet does exactly what a `false` would have.
 //!
 //! Rust asked, refused, and dropped the socket: `Set: invalid type: integer 0,
-//! expected a boolean`. For a client that stores anything in data storage —
-//! most of them, for hints and progress — that is a disconnect on ordinary
+//! expected a boolean`. For a client that stores anything in data storage
+//! (most of them, for hints and progress) that is a disconnect on ordinary
 //! traffic, seen live.
 //!
 //! **Here, unlike the integers, being lenient costs nothing.** There is no
 //! guess to get wrong: Python's answer is total and defined for every JSON
 //! value, so reproducing `bool(x)` is not a tolerance but the actual rule the
-//! reference implements. And a wrong reading of either field is cosmetic —
-//! whether a `SetReply` is echoed back, whether `slot_data` rides along on
-//! `Connected` — where a wrong location id would have checked somebody's
+//! reference implements. And a wrong reading of either field is cosmetic
+//! (whether a `SetReply` is echoed back, whether `slot_data` rides along on
+//! `Connected`) where a wrong location id would have checked somebody's
 //! location. So these two accept every JSON type and apply Python's own
 //! truthiness: `0`, `0.0`, `""`, `[]`, `{}` and `null` are false, everything
 //! else is true.
@@ -76,14 +76,14 @@
 //! `isinstance(True, int)` is true, and `{1: x}[True]` finds the entry. A
 //! client sending `"create_as_hint": false` has sent the integer 0 as far as
 //! the reference is concerned, and it is the ordinary "scout, do not hint"
-//! request — which pahoa was closing sockets over.
+//! request, which pahoa was closing sockets over.
 //!
 //! So every reader here takes a boolean as 0 or 1.
 //!
 //! **[`as_int`] deliberately does not**, and the difference is upstream's, not
 //! ours. `LocationScouts` checks its ids with `type(location) is not int`
 //! (`MultiServer.py:2054`) rather than `isinstance`, and `type(True)` is
-//! `bool` — so a boolean id is refused there, by the reference, with its own
+//! `bool`, so a boolean id is refused there, by the reference, with its own
 //! `InvalidPacket`. Two Python idioms that look interchangeable and are not;
 //! pahoa mirrors both, which is why the raw-list reader and the field readers
 //! disagree about booleans on purpose.
@@ -106,7 +106,7 @@ impl Visitor<'_> for IntVisitor {
     }
 
     /// **`bool` is a subclass of `int` in Python**, so `int(False)` is 0 and
-    /// `True & 0b001` is 1 — no conversion, no warning, nothing upstream would
+    /// `True & 0b001` is 1: no conversion, no warning, nothing upstream would
     /// even call lenient.
     ///
     /// Seen live: `"create_as_hint": false`, which the reference reads through
@@ -220,7 +220,7 @@ pub fn opt_u32<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u32>, D::Error>
 }
 
 /// The same tolerance as a type rather than a `deserialize_with`, for fields
-/// wrapped in [`crate::Arg`] — which needs a `T` that deserializes itself.
+/// wrapped in [`crate::Arg`], which needs a `T` that deserializes itself.
 macro_rules! lenient_int {
     ($name:ident, $ty:ty, $doc:literal) => {
         #[doc = $doc]
@@ -244,7 +244,7 @@ lenient_int!(U8, u8, "`u8`, accepting the float spelling.");
 ///
 /// **Booleans are not integers here**, unlike everywhere else in this module.
 /// `LocationScouts` tests its ids with `type(location) is not int`
-/// (`MultiServer.py:2054`), and `type(True)` is `bool` — so the reference
+/// (`MultiServer.py:2054`), and `type(True)` is `bool`, so the reference
 /// refuses a boolean id with its own `InvalidPacket`, where `isinstance` two
 /// lines away would have accepted it. The module docs have the pair.
 pub fn as_int(v: &serde_json::Value) -> Option<i64> {

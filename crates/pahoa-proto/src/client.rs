@@ -44,7 +44,7 @@ pub struct Connect {
     /// game, which is `InvalidGame`, not a disconnect.
     #[serde(default)]
     pub game: Arg<Option<String>>,
-    /// Required — `args['name']` is indexed unguarded, so an absent one raises.
+    /// Required: `args['name']` is indexed unguarded, so an absent one raises.
     /// A *present* name of the wrong type merely matches no slot, giving
     /// `InvalidSlot`.
     pub name: Arg<String>,
@@ -59,7 +59,7 @@ pub struct Connect {
     /// Defaults to true; anything falsy omits `slot_data` from `Connected`.
     ///
     /// The reference asks `if args.get("slot_data", True):`
-    /// (`MultiServer.py:1973`) — a truth test, so an explicit `null` here means
+    /// (`MultiServer.py:1973`): a truth test, so an explicit `null` here means
     /// *no* slot data while omitting the key means yes. `default` fires only on
     /// absence, which keeps the two apart.
     #[serde(default = "default_true")]
@@ -87,7 +87,7 @@ pub struct LocationChecks {
     /// Raw, because the reference does not check these at all: it hands the
     /// list to `register_location_checks`, which intersects it with the slot's
     /// location set (`MultiServer.py:2042-2045`). A junk entry matches nothing
-    /// and is silently ignored — it is not worth a disconnect, and a client
+    /// and is silently ignored: it is not worth a disconnect, and a client
     /// with one bad id in a batch still gets the rest of its checks.
     ///
     /// A non-list still fails here, because iterating one raises in Python too.
@@ -122,14 +122,14 @@ pub struct CreateHints {
     pub status: Arg<Option<lenient::I64>>,
 }
 
-/// All three are required — the reference indexes them, so an absent one
-/// raises — but a *present* one of the wrong type is checked with
+/// All three are required (the reference indexes them, so an absent one
+/// raises) but a *present* one of the wrong type is checked with
 /// `isinstance` and answered `InvalidPacket{text: "UpdateHint"}`
 /// (`MultiServer.py:2126-2131`). `Arg` without `#[serde(default)]` is exactly
 /// that pair of rules.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct UpdateHint {
-    /// The **finding** player, not the receiver — hints are looked up by where
+    /// The **finding** player, not the receiver: hints are looked up by where
     /// the item sits (`MultiServer.py:2097`).
     pub player: Arg<lenient::U32>,
     pub location: Arg<lenient::I64>,
@@ -162,7 +162,7 @@ pub struct GetDataPackage {
     pub exclusions: Option<Vec<String>>,
 }
 
-/// Each filter is validated as a whole — not a list, or any element of the
+/// Each filter is validated as a whole: not a list, or any element of the
 /// wrong type, produces the same `InvalidPacket` with its own text
 /// (`MultiServer.py:2185-2211`). One `Arg` per filter says exactly that, since
 /// the reference draws no line between the two failures.
@@ -207,8 +207,8 @@ pub struct Set {
 
 /// One entry of `Set.operations`, for a caller that wants it typed.
 ///
-/// `Set` itself keeps them raw — a malformed entry has to reach the handler so
-/// it can close the socket the way `operation["operation"]` raising does — but
+/// `Set` itself keeps them raw (a malformed entry has to reach the handler so
+/// it can close the socket the way `operation["operation"]` raising does) but
 /// the shape is part of the protocol and worth naming.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DataStorageOperation {

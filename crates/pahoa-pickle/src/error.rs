@@ -76,7 +76,7 @@ pub enum Error {
     /// **The only bound that survives a well-compressed payload.** A caller can
     /// cap the bytes it hands the reader; it cannot cap what the reader builds
     /// from them, because cost here is a function of opcode *count* rather than
-    /// input size — a one-byte integer is two bytes of pickle and becomes a
+    /// input size: a one-byte integer is two bytes of pickle and becomes a
     /// tree node an order of magnitude larger. See `MAX_OBJECTS`.
     #[error(
         "pickle builds more than {limit} objects (reached at offset {offset}); \

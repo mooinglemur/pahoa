@@ -1,8 +1,8 @@
 //! Chat and the `!` command processor.
 //!
 //! The shape being verified is that every `Say` is chat *first* and a command
-//! second — the reference broadcasts the raw line before deciding whether it
-//! parses — with `!admin` as the one exception, because a password must never
+//! second (the reference broadcasts the raw line before deciding whether it
+//! parses) with `!admin` as the one exception, because a password must never
 //! reach the room.
 
 mod common;

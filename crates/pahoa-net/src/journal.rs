@@ -1,8 +1,8 @@
 //! The room's durable history, as JSON lines beside its save.
 //!
 //! One line per location checked, appended for as long as the room exists and
-//! across every restart of it. This is the organizer's record — "when did each
-//! check happen" — and it is deliberately a *file in the room's own directory*
+//! across every restart of it. This is the organizer's record ("when did each
+//! check happen") and it is deliberately a *file in the room's own directory*
 //! rather than something recovered from the log stream.
 //!
 //! ## Why not the log stream
@@ -27,7 +27,7 @@
 //! ## Why a thread
 //!
 //! `release_player` feeds *every* location a slot owns through the check path in
-//! one burst — 341,851 of them on a 2000-slot room, against a measured 283 ms
+//! one burst: 341,851 of them on a 2000-slot room, against a measured 283 ms
 //! for the release itself. Formatting and writing that inline would land on the
 //! task that owns all room state, and a slow disk would stall the room rather
 //! than merely the journal. So the actor pushes `Copy` records into a bounded
@@ -65,7 +65,7 @@ const EVENT_HEADROOM: usize = 8192;
 ///
 /// # Why this is not a constant any more
 ///
-/// It was `1 << 19`, sized — correctly — to swallow the largest burst a room
+/// It was `1 << 19`, sized, correctly, to swallow the largest burst a room
 /// can produce in one call, since `release_player` feeds every location a slot
 /// owns through the check path at once and that is 341,851 records on a
 /// 2000-slot seed. What it missed is that **the same number was then reserved
@@ -74,7 +74,7 @@ const EVENT_HEADROOM: usize = 8192;
 /// resident from the moment the room starts.
 ///
 /// Measured: a **1-slot, 97-location** room reserved 524,288 slots of 56 bytes
-/// — 28 MiB, resident, for a seed whose every location together is 97 records.
+/// of 28 MiB, resident, for a seed whose every location together is 97 records.
 /// That was roughly half the process's RSS, and it was the single largest term
 /// in a small room's footprint.
 ///
@@ -82,12 +82,12 @@ const EVENT_HEADROOM: usize = 8192;
 /// `register_location_checks` filters locations already checked, so no location
 /// can produce a second `check` record however many times a client sends it,
 /// and a whole-room release is therefore the worst case that exists. Sizing to
-/// it keeps the original guarantee exactly — the drop path stays reserved for a
-/// disk that has genuinely stopped — while a small room stops paying for a
+/// it keeps the original guarantee exactly (the drop path stays reserved for a
+/// disk that has genuinely stopped) while a small room stops paying for a
 /// burst its seed cannot express.
 pub fn capacity_for(locations: usize) -> usize {
-    // The floor falls out of the addition — an empty seed still gets
-    // `EVENT_HEADROOM` — so there is nothing to clamp against below.
+    // The floor falls out of the addition (an empty seed still gets
+    // `EVENT_HEADROOM`) so there is nothing to clamp against below.
     locations.saturating_add(EVENT_HEADROOM).min(MAX_CAPACITY)
 }
 
@@ -104,14 +104,14 @@ const FLUSH_EVERY: usize = 1024;
 /// room passes [`FLUSH_EVERY`] constantly and is always fresh; a quiet room
 /// reaches the disk only on the save tick, which is a `--save-interval` chosen
 /// for how much play a crash may lose and has nothing to do with how stale a
-/// reader may be. So the room where somebody is watching a feed go by — one
-/// check every few seconds — was the room whose file was worst, up to half a
+/// reader may be. So the room where somebody is watching a feed go by (one
+/// check every few seconds) was the room whose file was worst, up to half a
 /// minute behind and then arriving in a burst.
 ///
 /// This shortens the durability window rather than widening it: it is
 /// `BufWriter::flush` to the OS, not an `fsync`, so it moves a quiet room's tail
 /// out of this process's memory and into the page cache, where a kill no longer
-/// takes it. Nothing about the per-check cost changes — a release still batches
+/// takes it. Nothing about the per-check cost changes: a release still batches
 /// at [`FLUSH_EVERY`] and still never blocks the actor.
 const IDLE_FLUSH: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -204,7 +204,7 @@ impl Journal {
 ///
 /// Separate from [`Journal`] because the handle is cloned into the effect sink
 /// and the thread must be joined exactly once, at shutdown, after the last
-/// clone is gone — otherwise the final records are written into a file nobody
+/// clone is gone. Otherwise the final records are written into a file nobody
 /// waited for.
 pub struct JournalWriter {
     handle: Option<std::thread::JoinHandle<()>>,
@@ -238,7 +238,7 @@ fn run(
     let mut since_flush = 0usize;
     // Reported once, at the end, rather than per record. A journal that lost
     // lines must say so *in the journal*, since that is the artifact somebody
-    // reads later — a warning in a log stream this room may not even be
+    // reads later: a warning in a log stream this room may not even be
     // shipping is not good enough.
     let mut reported_drops = 0u64;
 
@@ -307,8 +307,8 @@ fn run(
             );
             reported_drops = lost;
             // Counted like any other line. It was not, which mattered little
-            // when only `FLUSH_EVERY` read this — one uncounted line in a
-            // thousand — but `since_flush` is now also the test for "is there a
+            // when only `FLUSH_EVERY` read this (one uncounted line in a
+            // thousand) but `since_flush` is now also the test for "is there a
             // tail to flush", and a gap written as the room fell quiet would
             // have sat in the buffer with nothing left to dislodge it.
             since_flush += 1;

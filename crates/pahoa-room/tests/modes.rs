@@ -1,8 +1,8 @@
 //! `!release`, `!collect`, `!countdown` and `!remaining`, and the permission
 //! modes that gate them.
 //!
-//! The reference tests those modes two different ways — a substring check for
-//! release and collect, equality for remaining and countdown — so `auto-enabled`
+//! The reference tests those modes two different ways (a substring check for
+//! release and collect, equality for remaining and countdown) so `auto-enabled`
 //! behaves differently depending on which command you ask. That asymmetry is
 //! what most of this file is about.
 
@@ -286,7 +286,7 @@ fn remaining_lists_item_names_without_saying_where_they_are() {
     assert_eq!(out.len(), 1);
     let listed = out[0].strip_prefix("Remaining items: ").expect(&out[0]);
     // Counted by separator rather than by name, since item names may contain a
-    // comma themselves — this is a floor, not an exact count.
+    // comma themselves; this is a floor, not an exact count.
     assert!(listed.split(", ").count() >= total, "{listed}");
     // Nothing about locations or recipients leaks.
     assert!(!listed.contains("AP-"), "{listed}");
@@ -306,7 +306,7 @@ fn remaining_treats_auto_enabled_as_goal_gated() {
     }
     // Here the reference compares the mode string for *equality*, so
     // "auto-enabled" matches neither "enabled" nor "disabled" and falls through
-    // to the goal branch — the opposite of how !release reads the same value.
+    // to the goal branch: the opposite of how !release reads the same value.
     let (mut room, conn, _) = room_with(RoomOptions {
         remaining_mode: Permission::AutoEnabled,
         ..Default::default()
@@ -509,7 +509,7 @@ fn auto_countdown_turns_itself_off_in_a_large_room() {
     );
 
     // auto-enabled is a different string, so it is not the mode that
-    // auto-disables — another place the reference's equality check shows.
+    // auto-disables: another place the reference's equality check shows.
     let (mut room, conn, _) = room_with(RoomOptions {
         countdown_mode: Permission::AutoEnabled,
         ..Default::default()

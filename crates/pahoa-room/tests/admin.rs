@@ -89,7 +89,7 @@ fn release_targets_the_named_slot() {
     );
 }
 
-/// An administrator is not bound by the mode that gates players — being able to
+/// An administrator is not bound by the mode that gates players: being able to
 /// release for someone who cannot is the point of the API.
 #[test]
 fn release_ignores_a_mode_that_forbids_players() {
@@ -169,7 +169,7 @@ fn say_reaches_the_room() {
 /// Both halves are trust properties rather than formatting: without the prefix
 /// an announcement is bare unattributed text that **impersonates a player**, and
 /// with the wrong `type` a client that channels server messages will not treat
-/// it as one — `CommandResult` means "the reply to your own command" upstream.
+/// it as one: `CommandResult` means "the reply to your own command" upstream.
 /// The admin API has more than one caller, so neither can be left to them.
 #[test]
 fn say_is_attributed_to_the_server_and_typed_as_server_chat() {
@@ -282,7 +282,7 @@ fn send_item_queues_a_real_item_for_the_named_slot() {
 }
 
 /// A name matching nothing is refused rather than silently doing nothing, which
-/// is the difference from the chat command — there is a caller to answer here.
+/// is the difference from the chat command: there is a caller to answer here.
 #[test]
 fn send_item_refuses_a_name_that_matches_nothing() {
     if skip_without(FIXTURE) {
@@ -427,7 +427,7 @@ fn a_forced_hint_costs_the_slot_nothing() {
 /// **A forced hint announces every match, every time it is run.**
 ///
 /// This is the reference's console `/hint` (`MultiServer.py:2451-2465`), which
-/// collects and announces all of them with `notify_hints(team, hints)` — no
+/// collects and announces all of them with `notify_hints(team, hints)`: no
 /// cost and no one-per-call limit. The limiting an operator might expect is the
 /// *client* `!hint`, lives in `get_hints`, and applies only when the hint cost
 /// is non-zero.
@@ -443,7 +443,7 @@ fn a_forced_hint_announces_every_match_and_repeats_on_a_rerun() {
     let (mut room, slot, name, game) = fresh_room().unwrap();
 
     // **A connected client, or there is nothing to observe.** `notify_hints`
-    // skips a slot with no clients, exactly as the reference does — so without
+    // skips a slot with no clients, exactly as the reference does, so without
     // this the room broadcasts nothing whatever the flags say, and the test
     // passes against every version of the bug.
     join(&mut room, 1, &name, &game, 0b001);
@@ -451,7 +451,7 @@ fn a_forced_hint_announces_every_match_and_repeats_on_a_rerun() {
     // **An item this slot actually receives**, addressed by id so no data
     // package or name lookup can turn this into a skip. Picking a name off the
     // game's item list is what an earlier version did, and it chose one the
-    // slot never receives — the hint found nothing, the test skipped, and it
+    // slot never receives: the hint found nothing, the test skipped, and it
     // passed against the very bug it was written for.
     let item = room
         .multidata()
@@ -621,7 +621,7 @@ fn hint_and_hint_location_are_not_the_same_command() {
     );
     assert!(
         !as_item.ok,
-        "a location name resolved as an item — the flag is not being honored"
+        "a location name resolved as an item; the flag is not being honored"
     );
     assert!(
         as_item.output[0].contains("item"),
@@ -726,7 +726,7 @@ fn allow_release_exempts_one_slot_from_a_forbidding_mode() {
     );
 }
 
-/// Clearing the exemption restores the *mode* — it does not forbid releasing,
+/// Clearing the exemption restores the *mode*: it does not forbid releasing,
 /// which is why this is one command with a boolean rather than the reference's
 /// `forbid_release`, a name that reads like a denial.
 #[test]
@@ -796,7 +796,7 @@ fn alias_sets_and_clears_another_players_name() {
 
 /// The same 16-character truncation `!alias` applies, so the two surfaces
 /// cannot produce names of different lengths.
-/// Aliases ride in `NetworkPlayer`, so setting one has to reach *everyone* —
+/// Aliases ride in `NetworkPlayer`, so setting one has to reach *everyone*:
 /// the same broadcast `!alias` makes. Without it the operator's change is
 /// invisible until each client happens to reconnect.
 #[test]
@@ -867,7 +867,7 @@ fn option_changes_a_rule_over_the_admin_api() {
     assert_eq!(room.options.hint_cost, 42);
 }
 
-/// The refusals are the `/option` ones, not a second set written for HTTP —
+/// The refusals are the `/option` ones, not a second set written for HTTP:
 /// a password cannot be set here for exactly the reason it cannot be set there.
 #[test]
 fn option_refuses_the_passwords_with_the_same_explanation() {
@@ -915,7 +915,7 @@ fn option_refuses_an_unknown_name_and_lists_what_it_knows() {
     );
 }
 
-/// Ids work as well as names, on both hint verbs — the reference accepts them
+/// Ids work as well as names, on both hint verbs: the reference accepts them
 /// (`MultiServer.py:2443`) and `send_location` already does, so refusing them
 /// on one surface would be an inconsistency a caller has to memorize.
 #[test]
@@ -968,7 +968,7 @@ fn send_multiple_queues_every_copy() {
 }
 
 /// One copy reads exactly as `send_item` does, because the reference's `/send`
-/// *is* `/send_multiple 1` — the two must not drift into different wording.
+/// *is* `/send_multiple 1`, and the two must not drift into different wording.
 #[test]
 fn one_copy_reads_the_same_either_way() {
     if skip_without(FIXTURE) {
@@ -1030,7 +1030,7 @@ fn send_multiple_is_capped() {
     assert!(!too_many.ok);
     assert!(too_many.output[0].contains("100"), "{:?}", too_many.output);
 
-    // The limit itself is allowed — it is a cap, not a threshold.
+    // The limit itself is allowed: it is a cap, not a threshold.
     let at_the_limit = run(
         &mut room,
         AdminCommand::SendMultiple {
@@ -1141,7 +1141,7 @@ fn an_admin_grant_is_announced_as_plain_text() {
 /// **A lock bars the next login and leaves the current session alone.**
 ///
 /// The two halves are separate commands on purpose, and an administrator
-/// dealing with a griefer wants both in that order — kicking first leaves a
+/// dealing with a griefer wants both in that order: kicking first leaves a
 /// window in which they simply reconnect.
 #[test]
 fn locking_a_slot_refuses_the_next_connection() {
@@ -1416,7 +1416,7 @@ fn set_status_goal_announces_and_fires_the_auto_rules() {
 /// `MultiServer.py:2208` guards every status change with
 /// `if current != CLIENT_GOAL`, so not even the client that declared it may
 /// take it back. pahoa keeps the invariant rather than carving out an operator
-/// exception — but says so rather than ignoring the request, which is what the
+/// exception, but says so rather than ignoring the request, which is what the
 /// reference does.
 #[test]
 fn a_goal_cannot_be_revoked_by_an_administrator() {
@@ -1484,7 +1484,7 @@ fn setting_a_connection_state_warns_that_it_will_not_stick() {
     );
 }
 
-/// The receive half — what a slot **sends** — dropped before the room acts.
+/// The receive half, what a slot **sends**, dropped before the room acts.
 mod filters {
     use super::*;
     use pahoa_room::filter::Filter;
@@ -1507,7 +1507,7 @@ mod filters {
 
     /// **Muting a slot: `say` from_slot.**
     ///
-    /// The mirror of a `to_slot` `print_json`/`Chat` rule — this stops what the
+    /// The mirror of a `to_slot` `print_json`/`Chat` rule: this stops what the
     /// slot says reaching anyone, where that one stops other people's chat
     /// reaching the slot.
     #[test]
@@ -1546,7 +1546,7 @@ mod filters {
     }
 
     /// **A mute also takes the slot's `!` commands**, because a `Say` *is* the
-    /// command — the room broadcasts the raw line before looking at whether it
+    /// command: the room broadcasts the raw line before looking at whether it
     /// starts with `!`, so the two are not separable at this point. Pinned
     /// because it is surprising, not because it is desirable.
     #[test]
@@ -1741,7 +1741,7 @@ mod filters {
     ///
     /// The distinction between "has no filter" and "has an empty one" is the only
     /// way to say this. While the two were collapsed, full exemption was reachable
-    /// only through an inert rule like `{"kind":"bounce","p":0}` — a workaround for
+    /// only through an inert rule like `{"kind":"bounce","p":0}`: a workaround for
     /// a gap rather than a design.
     #[test]
     fn an_empty_slot_filter_opts_out_of_the_rooms() {
@@ -1792,7 +1792,7 @@ mod filters {
         );
     }
 
-    /// And the exemption survives a restart — dropping empty filters at save time
+    /// And the exemption survives a restart: dropping empty filters at save time
     /// would silently turn one back into inheritance.
     #[test]
     fn an_empty_slot_filter_survives_a_restart() {

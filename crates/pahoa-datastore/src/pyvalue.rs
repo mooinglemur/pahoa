@@ -22,7 +22,7 @@ use std::cmp::Ordering;
 /// `Int` is arbitrary precision because Python's is, and because a client
 /// depended on it: a world packing its location checks into a 71-bit bitfield
 /// had every `or` that set a bit refused, back when this held an `i64`. What
-/// is *not* unbounded is how wide a value the operations will build — see
+/// is *not* unbounded is how wide a value the operations will build. See
 /// [`crate::ops::MAX_INT_BITS`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum PyNum {
@@ -61,7 +61,7 @@ impl PyNum {
 
 /// Compare an exact integer with a float, the way Python does.
 ///
-/// Python does **not** convert the int to a double first — that would make
+/// Python does **not** convert the int to a double first: that would make
 /// `2**71 + 1 == 2.3611832414348226e+21` true, because the conversion rounds
 /// onto exactly that double. It compares against the float's integer part and
 /// lets the fraction break the tie, which is what this reproduces.
@@ -81,7 +81,7 @@ fn cmp_int_f64(a: &BigInt, f: f64) -> Option<Ordering> {
     let whole = BigInt::from_f64(truncated)?;
     Some(match a.cmp(&whole) {
         Ordering::Equal => {
-            // Equal integer parts, so the fraction decides — and it carries the
+            // Equal integer parts, so the fraction decides, and it carries the
             // float's own sign, which is what makes `-2 > -2.5`.
             let fraction = f - truncated;
             if fraction > 0.0 {
@@ -117,7 +117,7 @@ pub fn as_floats(x: &PyNum, y: &PyNum) -> Option<(f64, f64)> {
 /// enough to answer without allocating.
 ///
 /// `py_eq` runs once per element of a list for `update` and `remove`, so the
-/// overwhelmingly common comparison — two ordinary integers — should not build
+/// overwhelmingly common comparison, two ordinary integers, should not build
 /// two heap-allocated bignums to reach its answer.
 fn small_ints(a: &Value, b: &Value) -> Option<(i64, i64)> {
     match (a, b) {
@@ -128,15 +128,15 @@ fn small_ints(a: &Value, b: &Value) -> Option<(i64, i64)> {
 
 /// Render a finite `f64` the way CPython's `repr` does.
 ///
-/// The *digits* already agree — serde_json and CPython both emit the shortest
-/// string that round-trips — but the layout differs in two places, and with
+/// The *digits* already agree (serde_json and CPython both emit the shortest
+/// string that round-trips) but the layout differs in two places, and with
 /// `arbitrary_precision` those differences survive onto the wire instead of
 /// being flattened back into an `f64` by the next thing to touch them:
 ///
 /// - CPython goes exponential below `1e-4`, where serde_json keeps writing
 ///   zeros: `1e-05` against `0.00001`.
 /// - CPython pads an exponent to two digits: `1e-06` against `1e-6`. Only
-///   single-digit exponents differ — `1e+100` and `5e-324` already agree, as
+///   single-digit exponents differ: `1e+100` and `5e-324` already agree, as
 ///   does every positive exponent, since serde_json writes the `+` too.
 ///
 /// Returns `None` for a non-finite float, which has no JSON spelling at all.
@@ -205,7 +205,7 @@ pub fn floor_mod_f64(a: f64, b: f64) -> Option<f64> {
     }
     let m = a % b;
     // A zero remainder takes the sign of the **divisor**, not whatever `fmod`
-    // happened to return — CPython does this explicitly because platforms
+    // happened to return. CPython does this explicitly because platforms
     // disagree about signed zero here (`Objects/floatobject.c`, `float_rem`).
     // So `0 % -2.5` is `-0.0`, and that is a different four bytes on the wire
     // from `0.0` now that numbers keep the text they were written with.
@@ -275,7 +275,7 @@ pub fn py_contains(haystack: &[Value], needle: &Value) -> bool {
 /// Whether a value could be a Python set member.
 ///
 /// `update` on a list builds `set(container)` first, which raises `TypeError`
-/// for unhashable elements — lists and dicts (`MultiServer.py:85-92`).
+/// for unhashable elements: lists and dicts (`MultiServer.py:85-92`).
 pub fn is_hashable(v: &Value) -> bool {
     !matches!(v, Value::Array(_) | Value::Object(_))
 }
@@ -411,7 +411,7 @@ mod tests {
     fn an_exact_integer_does_not_compare_equal_to_the_double_it_rounds_to() {
         // Python compares int against float exactly rather than converting, so
         // `2**71 + 1` is *not* the double it would round onto. Converting first
-        // — which is what this module used to do — makes them equal, and then
+        // (which is what this module used to do) makes them equal, and then
         // `remove` drops the wrong element.
         let exact: BigInt = "2361183241434822606849".parse().unwrap();
         let rounded = 2361183241434822606849f64;

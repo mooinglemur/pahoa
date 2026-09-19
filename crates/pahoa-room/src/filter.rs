@@ -3,19 +3,19 @@
 //! Two problems, one mechanism. A client that crashes on a particular message
 //! needs that message not to reach it; a room drowning in DeathLinks needs
 //! fewer of them to go out. Both are "drop some of this traffic for this slot",
-//! and the only difference is *how much* — which is why every rule carries a
+//! and the only difference is *how much*, which is why every rule carries a
 //! probability rather than DeathLink getting a special case.
 //!
 //! **`p` is the share dropped, not the share kept**: `p: 0.25` drops one
 //! message in four. See [`Rule::probability`], and mind the direction whenever
-//! writing about it — this is the one number here that reads plausibly
+//! writing about it: this is the one number here that reads plausibly
 //! backwards.
 //!
 //! # What may be filtered, and what may not
 //!
 //! **Only advisory traffic.** `send_new_items` advances a slot's `send_index`
 //! as it sends, so a dropped `ReceivedItems` leaves the server believing a
-//! client holds items it never received, and the client cannot tell — the same
+//! client holds items it never received, and the client cannot tell: the same
 //! reasoning that makes the outbound budget close a connection rather than skip
 //! a frame (see `pahoa_net::budget`). `Connected`, `ReceivedItems`,
 //! `LocationInfo` and `RoomUpdate` are therefore not addressable here at all,
@@ -28,7 +28,7 @@
 //!
 //! # Why the stored form is JSON
 //!
-//! The rule vocabulary is expected to grow — the tag list alone is open-ended,
+//! The rule vocabulary is expected to grow: the tag list alone is open-ended,
 //! `TrapLink` being the second entry and not the last. Storing rules as JSON,
 //! the way the datastore's own values already are, means the save format
 //! changed once to gain filters and need not change again to gain a matcher.
@@ -44,7 +44,7 @@
 //! Ordered rules were the first design and they made `PATCH` unanswerable. With
 //! first-match-wins, patching an exemption onto a blanket rule silently does
 //! nothing if it lands after it, and prepending is just as arbitrary in the
-//! other direction — so every possible placement is a guess about intent, and
+//! other direction, so every possible placement is a guess about intent, and
 //! the wrong guess is a filter that looks configured and is dead. Keying on the
 //! matcher removes the question: a rule either replaces one with the same
 //! matcher or is a new entry, and the result is the same set either way.
@@ -53,7 +53,7 @@
 //! re-applying the same rule must not grow the filter every pass.
 //!
 //! The trade is that rules can no longer be hand-ordered. Nothing today's
-//! matchers can express needs it — a qualified rule always wants to beat an
+//! matchers can express needs it: a qualified rule always wants to beat an
 //! unqualified one, which is exactly what specificity gives. A future matcher
 //! with a real predicate would have no obvious specificity and would need an
 //! explicit tiebreak; that is a field to add, not a format to replace.
@@ -68,7 +68,7 @@ use std::sync::{LazyLock, RwLock};
 ///
 /// **The only tally there is.** The two room-wide totals below are sums of this
 /// table rather than counters of their own, so "which kind is being dropped"
-/// and "how much is being dropped" cannot disagree — a drop path that forgot to
+/// and "how much is being dropped" cannot disagree: a drop path that forgot to
 /// attribute itself would be missing from both rather than showing up as a
 /// discrepancy nobody notices. Walking it costs a scrape, once a tick.
 ///
@@ -115,7 +115,7 @@ pub fn dropped_from_slot() -> u64 {
 /// Counted **once per recipient connection**, which is a different denominator
 /// from [`dropped_from_slot`] above and deliberately so: the test runs inside
 /// the shard's per-recipient loop, so one chat line filtered for forty slots is
-/// forty — and eighty if each of them also has a tracker attached. That is the
+/// forty, and eighty if each of them also has a tracker attached. That is the
 /// number worth watching, because it is what the filter actually spared those
 /// clients, and it is the same convention `pahoa_frames_out_total` uses, which
 /// is what makes "what share of this slot's traffic is being filtered" a
@@ -207,7 +207,7 @@ pub enum Kind {
     /// subscription produces is the one that reaches a client unasked, and the
     /// one whose values can overflow a strongly-typed client's integer.
     SetReply,
-    /// `Retrieved`, outbound — the answer to the slot's own `Get`.
+    /// `Retrieved`, outbound: the answer to the slot's own `Get`.
     Retrieved,
     /// A `StatusUpdate`, inbound.
     StatusUpdate,
@@ -219,8 +219,8 @@ pub enum Kind {
     /// *other people's* chat reaching it. One is a gag, the other is earplugs.
     ///
     /// **It also disables that slot's `!` commands**, which is not obvious and
-    /// is not a bug. Every `Say` is chat first and a command second — the room
-    /// broadcasts the raw line before looking at whether it starts with `!` —
+    /// is not a bug. Every `Say` is chat first and a command second (the room
+    /// broadcasts the raw line before looking at whether it starts with `!`)
     /// so there is no point downstream where the two are still separable
     /// without reimplementing the command parser inside the filter. A muted
     /// slot cannot `!hint` or `!release`. If those need to survive a mute, this
@@ -268,7 +268,7 @@ impl Kind {
 
     /// Whether this kind can travel this way at all.
     ///
-    /// A rule that names an impossible pairing — an outbound `Set`, say — would
+    /// A rule that names an impossible pairing (an outbound `Set`, say) would
     /// simply never fire, which looks identical to a filter that is not working.
     /// Refusing it at the boundary turns a silent no-op into an error message.
     pub fn travels(self, direction: Direction) -> bool {
@@ -322,13 +322,13 @@ pub struct Rule {
     /// Spelled `p` on the wire, and the direction it runs is the thing to be
     /// unambiguous about: `p: 0.25` **drops one message in four and delivers
     /// three**. It is not the share that survives. The first draft of the
-    /// README got this backwards — "thin to a quarter", which reads as keeping
-    /// a quarter — and a filter dropping three times what was intended still
+    /// README got this backwards ("thin to a quarter", which reads as keeping
+    /// a quarter) and a filter dropping three times what was intended still
     /// looks like it is working, so nothing would have caught it.
     ///
     /// **A plain filter is `1.0`**, which is what an absent field means, so the
     /// common case needs no probability at all. Anything below 1 turns the same
-    /// rule into a thinning valve — which is all "scale DeathLinks down" ever
+    /// rule into a thinning valve, which is all "scale DeathLinks down" ever
     /// was, and why it is a property of every rule rather than a feature of one.
     /// `0.0` is the other end: a rule that never fires, which is how a more
     /// specific matcher exempts itself from a blanket one.
@@ -460,8 +460,8 @@ impl Rule {
         )
     }
     /// Whether this rule's matcher covers a message. Does **not** consult the
-    /// probability — see [`Filter::fires`].
-    /// `labels` is what the message offers to narrow on — **all** of a bounce's
+    /// probability. See [`Filter::fires`].
+    /// `labels` is what the message offers to narrow on: **all** of a bounce's
     /// tags, not just the first. A `Bounce` routinely carries `["AP",
     /// "DeathLink"]`, so matching only the leading tag would miss the rule an
     /// operator actually wrote, silently and in the direction that looks like
@@ -527,10 +527,11 @@ impl Filter {
     ///
     /// **The most specific matching rule decides**, so a blanket rule and an
     /// exemption for one tag can coexist in either written order. `roll`
-    /// supplies the randomness so the caller owns the generator — deliberately, because the room's own PRNG is
-    /// the *hint* PRNG: it is saved, and it is pinned byte for byte against a
-    /// real `MultiServer.Context` by `hint_vectors.jsonl`. Drawing sampling
-    /// numbers from it would move hint selection and break that comparison.
+    /// supplies the randomness so the caller owns the generator, deliberately,
+    /// because the room's own PRNG is the *hint* PRNG: it is saved, and it is
+    /// pinned byte for byte against a real `MultiServer.Context` by
+    /// `hint_vectors.jsonl`. Drawing sampling numbers from it would move hint
+    /// selection and break that comparison.
     pub fn drops(
         &self,
         key: crate::SlotKey,
@@ -552,7 +553,7 @@ impl Filter {
         };
         if dropped {
             // Counted here rather than at the two call sites, because this is
-            // the one place both directions agree on what "dropped" means — and
+            // the one place both directions agree on what "dropped" means, and
             // a filter that is quietly discarding more than an operator
             // expected is the failure worth being able to see. It is also why
             // `key` is a parameter: attributing at the decision keeps the
@@ -603,7 +604,7 @@ impl Filter {
 
 /// What a filter rule can name an outbound frame, if anything.
 ///
-/// `None` means the frame is not addressable and will be delivered — which is
+/// `None` means the frame is not addressable and will be delivered, which is
 /// the safe direction, and covers everything carrying progression as well as
 /// anything a rule has no vocabulary for.
 ///
@@ -612,8 +613,8 @@ impl Filter {
 /// of a shared buffer without re-encoding it per recipient, which is the cost
 /// the shards exist to avoid. A batch therefore only becomes filterable when
 /// every packet in it says the same thing; a mixed frame is delivered intact.
-/// In practice the batches that matter are homogeneous — a run of hint
-/// notifications, a run of chat — so this is not the limitation it sounds like.
+/// In practice the batches that matter are homogeneous (a run of hint
+/// notifications, a run of chat) so this is not the limitation it sounds like.
 pub fn outbound_tag(msgs: &[ServerPacket]) -> Option<(Kind, Vec<String>)> {
     let mut tag: Option<(Kind, Vec<String>)> = None;
     for msg in msgs {
@@ -723,7 +724,7 @@ mod tests {
     /// **Every drop lands in the table, whatever it was.**
     ///
     /// The room-wide totals are sums of this table, so a drop that failed to
-    /// attribute itself would not show up as a discrepancy between the two —
+    /// attribute itself would not show up as a discrepancy between the two:
     /// it would be missing from both, which is the silent version. What can be
     /// checked is that no reachable (direction, kind) pairing escapes
     /// attribution, and that each lands under its own labels rather than being
@@ -780,8 +781,8 @@ mod tests {
 
     /// **`p` is the share dropped, not the share kept.**
     ///
-    /// Pinned as behavior because it was documented backwards — "thin to a
-    /// quarter", which reads as keeping a quarter — and nothing at runtime
+    /// Pinned as behavior because it was documented backwards ("thin to a
+    /// quarter", which reads as keeping a quarter) and nothing at runtime
     /// would have caught it: a filter dropping three times what an operator
     /// intended still looks like it is working. Prose can drift back; this
     /// cannot.
@@ -899,7 +900,7 @@ mod tests {
 
     /// **Every tag, not the leading one.** A `Bounce` routinely carries
     /// `["AP", "DeathLink"]`, so a rule naming `DeathLink` has to see past the
-    /// first entry — matching only the head would miss the rule an operator
+    /// first entry: matching only the head would miss the rule an operator
     /// actually wrote, silently, and in the direction that reads as "the filter
     /// does not work".
     #[test]
@@ -965,7 +966,7 @@ mod tests {
     }
 
     /// `PATCH` semantics: the same matcher replaces, a new one appends, and
-    /// applying the same rule twice leaves one entry — which is what lets a
+    /// applying the same rule twice leaves one entry, which is what lets a
     /// reconcile loop re-assert its intent without growing the filter.
     #[test]
     fn merging_upserts_on_the_matcher_and_is_idempotent() {
@@ -1077,7 +1078,7 @@ mod tests {
                 "p = {p} should be refused"
             );
         }
-        // JSON has no NaN — `json!(f64::NAN)` is `null` — so the range check
+        // JSON has no NaN (`json!(f64::NAN)` is `null`) so the range check
         // cannot see one from this direction. It is written to reject NaN
         // anyway, because `contains` says false for it and a rule that fires on
         // a comparison against NaN would be neither on nor off.

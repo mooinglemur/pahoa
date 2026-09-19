@@ -2,7 +2,7 @@
 //!
 //! **Its own test binary on purpose.** `pahoa_packets_out_total` is room-wide
 //! with no slot label, so it is the one metric a second room in the same
-//! process would pollute — and every integration test in `http.rs` is a second
+//! process would pollute, and every integration test in `http.rs` is a second
 //! room. Separate file, separate process, clean counters.
 //!
 //! Synthetic multidata rather than a fixture, so these run in CI.
@@ -198,7 +198,7 @@ const TROY: &str = r#"team="0",slot="1",player="Troy",game="A Link to the Past""
 /// have to be one or the other and would be read as the wrong one.
 ///
 /// **One test rather than several, because the counters are process-wide.**
-/// Two things force it. The phases read rows each other writes — the pre-auth
+/// Two things force it. The phases read rows each other writes: the pre-auth
 /// check asserts no slot has been sent anything, which is only true before
 /// anybody joins. And a second room in this process is not inert even if it
 /// never carries a client: `Server::shutdown` broadcasts a closing notice, so a
@@ -211,7 +211,7 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
     let addr = server.local_addr;
 
     // Every connection that opens is sent `RoomInfo` before it holds a slot, so
-    // attributing that to a slot is impossible — and dropping it would lose a
+    // attributing that to a slot is impossible, and dropping it would lose a
     // `DataPackage` answered pre-auth, which can run to megabytes.
     let preauth_before = {
         let _unauth = Ws::open(addr).await;
@@ -231,15 +231,15 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
         series(&body, "pahoa_frames_out_preauth_total")
     };
 
-    // Two connections on the same slot — co-op, which is ordinary.
+    // Two connections on the same slot: co-op, which is ordinary.
     let mut a = Ws::join(addr).await;
     let mut b = Ws::join(addr).await;
 
     // **A join adds exactly one pre-auth frame, its `RoomInfo`.** The `Connected`
     // reply must land on the slot, and it only does because the transport is
     // told the membership before the reply is dispatched. With those two the
-    // other way round it is two frames per join, and `Connected` — which on a
-    // large seed carries every slot's info — is filed as anonymous traffic
+    // other way round it is two frames per join, and `Connected` (which on a
+    // large seed carries every slot's info) is filed as anonymous traffic
     // while the slot's own row understates by its biggest packet.
     let joined = metrics(addr).await;
     assert_eq!(
@@ -250,7 +250,7 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
 
     // **Settle before the baseline.** `join` returns when the client receives
     // `Connected`, but the join *broadcast* is dispatched by the actor after
-    // that reply is queued — so a scrape taken right here catches it or misses
+    // that reply is queued, so a scrape taken right here catches it or misses
     // it depending on which task ran first, and the delta below comes out 1 or
     // 2. A `Sync` reply is queued behind the join handling, so seeing one means
     // the actor is finished with it.
@@ -352,7 +352,7 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
     // **This client does not negotiate permessage-deflate**, so wire bytes and
     // payload are within framing overhead of each other and the bound can be
     // the payload size. Against a client that does, 4096 identical bytes
-    // compress to tens — which is the counter being right, not wrong, and this
+    // compress to tens, which is the counter being right, not wrong, and this
     // assertion is what would say so.
     assert!(
         grew > 4096,
@@ -363,7 +363,7 @@ async fn production_counts_once_and_delivery_counts_per_connection() {
         preauth_in_before,
         "an authenticated slot's traffic must not land in the pre-auth bucket:\n{after_in}"
     );
-    // The `Connect` frames themselves did, though — three connections opened in
+    // The `Connect` frames themselves did, though: three connections opened in
     // this test and each sent one before it held a slot.
     assert!(
         preauth_in_before > 0,

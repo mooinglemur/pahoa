@@ -2,7 +2,7 @@
 //!
 //! Written at M4, when pahoa declined the extension and the open question was
 //! whether real clients tolerate that. They do. M8 turned it on, so this now
-//! covers both directions — the negotiation pahoa performs by default, and the
+//! covers both directions: the negotiation pahoa performs by default, and the
 //! declining path, which stays a supported configuration rather than becoming a
 //! dead branch.
 //!
@@ -139,7 +139,7 @@ async fn client_max_window_bits_is_not_named_unless_the_client_offered_it() {
     let server = start(data).await;
 
     // RFC 7692 §7.1.2.2. Naming the parameter unprompted is a protocol error,
-    // and Python's `websockets` fails the connection over it — so this is a
+    // and Python's `websockets` fails the connection over it, so this is a
     // real interoperability trap, not pedantry.
     let response = raw_handshake(server.local_addr, Some("permessage-deflate")).await;
     assert!(response.starts_with("HTTP/1.1 101"), "{response}");
@@ -159,8 +159,8 @@ async fn deflate_can_still_be_declined_by_configuration() {
         eprintln!("SKIP: fixture not present");
         return;
     };
-    // The M4 finding — that real clients carry on when the extension is
-    // declined — is what made shipping uncompressed viable, and it stays a
+    // The M4 finding, that real clients carry on when the extension is
+    // declined, is what made shipping uncompressed viable, and it stays a
     // supported configuration for debugging a wire capture.
     let config = NetConfig {
         deflate: pahoa_net::ws::handshake::DeflateConfig {

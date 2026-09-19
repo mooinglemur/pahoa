@@ -33,7 +33,7 @@ pub fn load(name: &str) -> Option<Arc<MultiData>> {
 }
 
 /// Build a room over a fixture, resolving names from the embedded package only
-/// (no snapshot — these tests do not exercise hint blacklists).
+/// (no snapshot: these tests do not exercise hint blacklists).
 pub fn room_for(data: Arc<MultiData>, options: RoomOptions) -> Room {
     let (names, _) = data.resolve_datapackage();
     Room::new(data, Arc::new(names), options, 1_700_000_000.0)
@@ -65,7 +65,7 @@ pub fn richest_player(data: &MultiData) -> (u32, String, String) {
 /// fixture assumption that goes stale silently: the hint simply matches nothing,
 /// no hints are granted, and a test about *ordering* fails with "want an order
 /// to compare" rather than "that item is not in this seed". The most-owed item
-/// is chosen for the same reason `tools/gen-hint-vectors.py` chooses it — so the
+/// is chosen for the same reason `tools/gen-hint-vectors.py` chooses it, so the
 /// one-per-call rule has something to pick between.
 pub fn most_owed_item(room: &Room, slot: u32) -> Option<String> {
     let data = room.multidata();

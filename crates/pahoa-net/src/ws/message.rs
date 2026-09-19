@@ -1,14 +1,14 @@
 //! Frames to messages: fragmentation, compression, and the control-frame rules.
 //!
-//! Pure — frames in, events out, no I/O — so every rule below is testable
+//! Pure (frames in, events out, no I/O) so every rule below is testable
 //! without a socket, and so the reader task can own the decision while the
 //! writer task owns the socket.
 //!
 //! The ordering here is the part that is easy to get wrong. RFC 7692 compresses
 //! a **message**, not a frame, so a fragmented compressed message must be
 //! reassembled *first*, then inflated, and only then validated as UTF-8. Doing
-//! the UTF-8 check per fragment — which is what a library layered under deflate
-//! naturally does — rejects every compressed text message, because compressed
+//! the UTF-8 check per fragment (which is what a library layered under deflate
+//! naturally does) rejects every compressed text message, because compressed
 //! bytes are not UTF-8.
 
 use super::deflate::{DeflateError, Inflater};
@@ -41,7 +41,7 @@ pub enum ProtocolError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     Text(String),
-    /// Archipelago is a text protocol, so the room never sees these — but the
+    /// Archipelago is a text protocol, so the room never sees these, but the
     /// layer still has to reassemble and account for them correctly.
     Binary(Bytes),
     /// Answer with a pong carrying the same payload.
@@ -128,7 +128,7 @@ impl Session {
         self.finish(partial).map(Some)
     }
 
-    /// Reassembled — now inflate, then validate.
+    /// Reassembled: now inflate, then validate.
     fn finish(&mut self, partial: Partial) -> Result<Event, ProtocolError> {
         let payload = if partial.compressed {
             let inflater = self
@@ -188,7 +188,7 @@ impl Session {
 
 /// Which close codes a peer may actually send (RFC 6455 §7.4.1).
 ///
-/// 1004 is undefined, and 1005/1006/1015 are reserved for *local* reporting —
+/// 1004 is undefined, and 1005/1006/1015 are reserved for *local* reporting:
 /// a peer that puts them on the wire is misbehaving.
 fn close_code_allowed(code: u16) -> bool {
     matches!(code, 1000..=1003 | 1007..=1011 | 3000..=4999)

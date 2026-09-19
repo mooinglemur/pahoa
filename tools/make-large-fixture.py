@@ -2,14 +2,14 @@
 """Synthesize a large `.archipelago` for scale testing.
 
 pahoa targets ~2000 slots and 6000+ concurrent connections, but no seed that
-size exists to test against — generating a real one would mean running
+size exists to test against: generating a real one would mean running
 Archipelago generation over 2000 yamls. This builds a structurally valid
 multidata at that scale instead.
 
 It is explicitly **synthetic**: the item and location ids are drawn from a real
 seed's data package so names resolve, but the placement is mechanical rather
-than the output of a fill algorithm. That makes it right for what it is for —
-parse cost, LocationStore behavior, memory footprint, broadcast fan-out — and
+than the output of a fill algorithm. That makes it right for what it is for
+(parse cost, LocationStore behavior, memory footprint, broadcast fan-out) and
 wrong for anything about game logic or reachability.
 
 Usage:
@@ -108,7 +108,7 @@ Hint = collections.namedtuple(
 # Make them pickle under NetUtils, matching a real multidata. Setting
 # __module__ alone is not enough: pickle imports the named module to verify the
 # class round-trips, so a stand-in has to exist in sys.modules. Nothing here
-# imports Archipelago — this is a shim that exists only to emit the right
+# imports Archipelago: this is a shim that exists only to emit the right
 # STACK_GLOBAL names.
 import sys  # noqa: E402
 import types  # noqa: E402
@@ -188,7 +188,7 @@ def main():
         slot += 1
 
     # Locations: every slot's world holds items, most destined elsewhere. The
-    # cross-slot fan-out is the point — it is what makes a release cascade
+    # cross-slot fan-out is the point: it is what makes a release cascade
     # expensive, and what the LocationStore has to survive.
     locations = {}
     for s in sorted(slot_info):

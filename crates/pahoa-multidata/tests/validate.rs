@@ -1,7 +1,7 @@
 //! The load-time checks, against real seeds.
 //!
 //! `MultiData::validate` gates whether a room starts at all, so a check that is
-//! subtly too strict does not fail a unit test — it fails somebody's
+//! subtly too strict does not fail a unit test: it fails somebody's
 //! multiworld. Every seed in the fixture corpus has to pass it.
 //!
 //! Fixtures are gitignored symlinks; see `crates/pahoa-pickle/tests/fixtures.rs`

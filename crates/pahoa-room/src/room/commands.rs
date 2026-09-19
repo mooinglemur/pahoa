@@ -28,7 +28,7 @@ use crate::fuzzy;
 /// `ItemCheat` carrying the `NetworkItem` and the receiving slot
 /// (`MultiServer.py:1679-1681`), while `/send` and `/send_multiple` call
 /// `broadcast_text_all` with no additional arguments at all
-/// (`MultiServer.py:2389-2392`) — a bare `PrintJSON` with a `text` part and
+/// (`MultiServer.py:2389-2392`): a bare `PrintJSON` with a `text` part and
 /// nothing else: no `type`, no `receiving`, no `item`.
 ///
 /// That looks like an oversight upstream and may well be one, but a client
@@ -51,7 +51,7 @@ pub(super) enum CheatAnnounce {
 /// all. Bounded output is worth a truncation notice at this scale.
 const MAX_LIST_LINES: usize = 500;
 
-/// Name, argument spec, and help text — the listing `!help` prints.
+/// Name, argument spec, and help text: the listing `!help` prints.
 ///
 /// The reference generates this by reflecting over each handler's signature
 /// (`MultiServer.py:1359-1381`); reproducing the format by hand keeps the
@@ -251,7 +251,7 @@ impl Room {
 
     /// `notify_client`: one line, to the caller only, skipped for `NoText`.
     ///
-    /// Logged, and [`Room::notify_multiple`] deliberately is not — which is the
+    /// Logged, and [`Room::notify_multiple`] deliberately is not, which is the
     /// reference's split too (`MultiServer.py:460` against `:463-468`, where
     /// `notify_client_multiple` has no logging line). It reads as an oversight
     /// and is not one: `!missing` on a fresh slot answers with hundreds of
@@ -288,14 +288,14 @@ impl Room {
     /// Its replies carry `AdminCommandResult` rather than `CommandResult`,
     /// because the two processors have different `output` methods in the
     /// reference (`MultiServer.py:1432` against `:2227-2230`). Clients render
-    /// them differently, so the distinction is visible rather than cosmetic —
+    /// them differently, so the distinction is visible rather than cosmetic,
     /// and `!admin`'s *own* replies, the login and usage lines, stay
     /// `CommandResult`: they come from the client-side processor.
     ///
     /// **Not logged, and this is the one place pahoa is quieter than the
     /// reference on purpose.** `ServerCommandProcessor.output` goes through
     /// `notify_client`, so the reference logs every `/` reply. One of those
-    /// replies is `/options`, which prints the real `server_password` — safe to
+    /// replies is `/options`, which prints the real `server_password`: safe to
     /// show the administrator who just typed it, and not safe to write into a
     /// log that gets shipped and indexed. The administrative *action* is
     /// already on the record either way: `cmd_admin` masks and broadcasts the
@@ -337,7 +337,7 @@ impl Room {
         // That matters for `!admin`: its caller masks the password *before*
         // calling here and passes the masked form, so what reaches the log and
         // the history is what reached the room. Anything that recorded the
-        // pre-masked line would undo the masking — into a file that outlives
+        // pre-masked line would undo the masking, into a file that outlives
         // the room, in the journal's case, which is the worst place for a
         // password to reappear.
         tracing::info!(slot = key.1, team = key.0, %text, "chat");
@@ -369,8 +369,8 @@ impl Room {
     ///   typed it.
     ///
     /// The prefix is applied *here* rather than left to callers on purpose. The
-    /// admin API is public and has more than one caller — a token holder with
-    /// `curl` is one — so a caller that forgot it would produce a message that
+    /// admin API is public and has more than one caller (a token holder with
+    /// `curl` is one) so a caller that forgot it would produce a message that
     /// **impersonates a player**. That is a trust property of the room rather
     /// than a formatting preference, so it belongs on the side that cannot be
     /// bypassed.
@@ -420,7 +420,7 @@ impl Room {
     /// The reference masks the server password with 4-16 random asterisks so
     /// its *length* does not leak either (`MultiServer.py:1410-1417`). The
     /// count comes from the room's PRNG rather than a fresh one, which means
-    /// it is reproducible for a seed — the point is only that it is not the
+    /// it is reproducible for a seed: the point is only that it is not the
     /// real length.
     fn cmd_options(&mut self, conn: ConnId, out: &mut dyn EffectSink) {
         let masked = {
@@ -456,7 +456,7 @@ impl Room {
     /// `get_players_string` (`MultiServer.py:1855-1873`).
     ///
     /// Broadcast to the room when the seed is small enough for that to be
-    /// polite, private otherwise — the reference's own concession to scale.
+    /// polite, private otherwise: the reference's own concession to scale.
     fn cmd_players(&self, conn: ConnId, out: &mut dyn EffectSink) {
         let text = self.players_string();
         if self.data.slot_info.len() < 10 {
@@ -631,7 +631,7 @@ impl Room {
     //
     // These four are gated by a `Permission`, and the reference tests those
     // modes two different ways. `!release` and `!collect` use a **substring**
-    // check — `"enabled" in release_mode` — which is also true for
+    // check (`"enabled" in release_mode`) which is also true for
     // `auto-enabled`; `!remaining` and `!countdown` use **equality**, so
     // `auto-enabled` matches neither `enabled` nor `disabled` and falls through
     // to the goal-gated branch. The bits in `Permission` capture the substring
@@ -754,7 +754,7 @@ impl Room {
                 "Sorry, !remaining has been disabled on this server.".to_string(),
                 out,
             ),
-            // goal, auto, and — because the reference compares strings —
+            // goal, auto, and, because the reference compares strings,
             // auto-enabled too.
             _ => {
                 if self.status(key) == ClientStatus::Goal {
@@ -771,12 +771,12 @@ impl Room {
         }
     }
 
-    /// What is still sitting in this slot's world, by item name only — no
+    /// What is still sitting in this slot's world, by item name only: no
     /// location and no recipient, so it spoils the inventory and nothing else.
     fn report_remaining(&self, conn: ConnId, key: SlotKey, out: &mut dyn EffectSink) {
         let checked = self.location_checks.get(&key);
         // Sorted by `(receiving player, item id)`, matching
-        // `_LocationStore.get_remaining` — the order is a mild spoiler in
+        // `_LocationStore.get_remaining`. The order is a mild spoiler in
         // itself, so it must not leak the location order.
         let mut rest: Vec<(u32, i64)> = self
             .data
@@ -868,7 +868,7 @@ impl Room {
     ///
     /// Shared with the admin API, which aims it at a slot rather than at the
     /// caller. Returns the item's resolved name, or the message explaining why
-    /// nothing happened — empty when the reference server would say nothing.
+    /// nothing happened, empty when the reference server would say nothing.
     pub(super) fn grant_item(
         &mut self,
         key: SlotKey,
@@ -882,8 +882,8 @@ impl Room {
 
     /// Cheat `count` copies of an item into a slot.
     ///
-    /// The reference has this exact shape — `_cmd_send` *is*
-    /// `_cmd_send_multiple(1, …)` (`MultiServer.py:2400-2402`) — so one
+    /// The reference has this exact shape (`_cmd_send` *is*
+    /// `_cmd_send_multiple(1, …)`, `MultiServer.py:2400-2402`) so one
     /// implementation with a count is the faithful arrangement rather than a
     /// generalization of it. Granting one and granting five differ only in how
     /// many copies are queued and in the wording of the single announcement.
@@ -919,7 +919,7 @@ impl Room {
         // The cheat sentinel: location -1, sender is the receiving slot itself
         // (`MultiServer.py:1672`). Queued on *both* streams directly rather
         // than through the group-expanding path, which is what the reference
-        // does — a cheated item is not an item link event.
+        // does: a cheated item is not an item link event.
         let item = NetworkItem {
             item: id,
             location: -1,
@@ -936,8 +936,8 @@ impl Room {
         // a complete account of where every item came from and quietly is not.
         //
         // One record per copy, because that is what the journal counts
-        // everywhere else — `journal_check` writes a line per location, not per
-        // packet — and five items arriving is five item movements however many
+        // everywhere else (`journal_check` writes a line per location, not per
+        // packet) and five items arriving is five item movements however many
         // commands caused them.
         for _ in 0..count {
             out.journal_event(crate::effect::JournalEvent::cheat(
@@ -996,7 +996,7 @@ impl Room {
     /// masked and broadcast *first*, so what a client typed reaches the room
     /// whether or not the command is accepted, exists, or was even allowed to
     /// run. Then the room-level refusal when no server password is configured.
-    /// Then login state, and only then dispatch into the `/` command set —
+    /// Then login state, and only then dispatch into the `/` command set,
     /// which is [`Room::server_command`].
     fn cmd_admin(&mut self, conn: ConnId, command: &str, out: &mut dyn EffectSink) {
         let Some(client) = self.clients.get(&conn) else {
@@ -1004,14 +1004,14 @@ impl Room {
         };
         let key = (client.team, client.slot);
 
-        // Mask before echoing, whether or not the password was correct — the
+        // Mask before echoing, whether or not the password was correct: the
         // room must not learn it from a failed attempt either.
         //
         // The `/option server_password` arm masks a command pahoa will never
         // implement, and it is **not** dead code: masking happens before the
         // refusal below, so what a client types is echoed to the room either
         // way. Deleting the arm because the command does not exist is exactly
-        // backwards — an unimplemented setter is still a string someone types a
+        // backwards: an unimplemented setter is still a string someone types a
         // real password into.
         let lower = command.to_lowercase();
         let masked = if lower.starts_with("login") {
@@ -1058,7 +1058,7 @@ impl Room {
             if crate::secret::ct_eq(supplied.as_bytes(), server_password.as_bytes()) {
                 // Replaces whoever held it, matching the reference's single
                 // `commandprocessor.client` slot. Worth telling the displaced
-                // administrator, which the reference does not do — silently
+                // administrator, which the reference does not do: silently
                 // losing the session is the sort of thing that reads as a bug.
                 if let Some(previous) = self.admin_conn.replace(conn)
                     && previous != conn
@@ -1150,7 +1150,7 @@ impl Room {
         // What was asked for, and whether it is hintable at all.
         let (candidates, subject) = if input.chars().all(|c| c.is_numeric()) {
             // An id, used directly. An id the game does not know still
-            // resolves — to the "Unknown item (ID:…)" placeholder — which the
+            // resolves, to the "Unknown item (ID:…)" placeholder, which the
             // blacklist will never contain, so it falls through to a lookup
             // that finds nothing.
             let Ok(id) = input.parse::<i64>() else {
@@ -1273,7 +1273,7 @@ impl Room {
         // Everything the slot *newly* learns: the paid ones and the free ones
         // alike. A hint for an item at an already-checked location costs
         // nothing and takes the `found` path, but the player still walks away
-        // knowing something they did not — recording only what was paid for
+        // knowing something they did not: recording only what was paid for
         // would leave the history disagreeing with the player about what they
         // were told. `known` is excluded because they had it already.
         //
@@ -1459,7 +1459,7 @@ pub(super) fn is_printable(s: &str) -> bool {
 /// POSIX mode: single quotes are literal, double quotes allow backslash
 /// escapes, and a bare backslash escapes the next character. An unterminated
 /// quote raises in Python and the caller falls back to plain whitespace
-/// splitting (`MultiServer.py:1340-1343`) — reproduced by returning that here.
+/// splitting (`MultiServer.py:1340-1343`), reproduced by returning that here.
 fn shell_split(raw: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();

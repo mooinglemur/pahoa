@@ -2,7 +2,7 @@
 //! tracker subscribed to `_read_hints_*` sees.
 //!
 //! The storage and ordering rules are unit-tested inside `pahoa-room::hints`;
-//! this covers the wiring — the fan-out to finder and receiver, the
+//! this covers the wiring: the fan-out to finder and receiver, the
 //! `RoomUpdate` that follows a banked hint, the `SetReply` push to
 //! subscribers, and the recheck that turns a hint "found" when its location is
 //! checked.
@@ -165,12 +165,12 @@ fn a_hint_reaches_both_the_finder_and_the_receiver() {
 ///
 /// The consequence surprises people: an unfound hint the asker finds is
 /// announced **before** a found hint somebody else finds. That is not a bug and
-/// not a pahoa invention — it falls out of upstream's two sorts.
+/// not a pahoa invention: it falls out of upstream's two sorts.
 ///
 /// What is *not* pinned here is the order within a group of otherwise-equal
 /// hints. Upstream cannot be matched there even in principle: `get_hints` puts
 /// its candidates through `set()`, and `Hint.__hash__` includes the entrance
-/// string, which CPython hashes differently in every process — so the reference
+/// string, which CPython hashes differently in every process, so the reference
 /// does not agree with itself across restarts. See `tools/README.md`.
 #[test]
 fn a_recipient_hears_what_it_finds_first_and_found_first_within_that() {
@@ -217,7 +217,7 @@ fn a_recipient_hears_what_it_finds_first_and_found_first_within_that() {
         seen,
         vec![1003, 1001, 2002, 2004],
         "expected A's own finds first (found 1003 before unfound 1001), then \
-         everyone else's (found 2002 before unfound 2004) — note the unfound \
+         everyone else's (found 2002 before unfound 2004); note the unfound \
          1001 sits ahead of the found 2002, which is the interleaving upstream's \
          two sorts produce"
     );

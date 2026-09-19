@@ -6,7 +6,7 @@ That comparison is M1's exit gate: it exercises slot typing, the location
 table, hints, versions and the data-package merge at once, against an
 independent implementation.
 
-Like `dump-pickle.py` this deliberately does not import Archipelago — it
+Like `dump-pickle.py` this deliberately does not import Archipelago: it
 reimplements the pieces of the merge policy it needs, so a bug copied from
 Archipelago's source would not be copied into both sides at once.
 

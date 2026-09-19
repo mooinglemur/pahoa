@@ -2,7 +2,7 @@
 //!
 //! **Nothing here is an error, which is the whole reason it is counted.** A
 //! repeated `LocationChecks` is filtered against the slot's existing set and a
-//! repeated hint against its hint list, so the room stays correct either way —
+//! repeated hint against its hint list, so the room stays correct either way,
 //! and a client looping on either is therefore invisible in the log, in the
 //! journal, and in any error count, because there is no error. It looks like a
 //! busy player.
@@ -21,7 +21,7 @@ const FIXTURE: &str = "AP_14318265276849580066.archipelago";
 
 /// A slot re-sending checks it has already made.
 ///
-/// Expected on reconnect — that is how the protocol resynchronizes — and a bug
+/// Expected on reconnect (that is how the protocol resynchronizes) and a bug
 /// when it happens in a loop. The room cannot tell those apart and does not
 /// try; it counts, and the rate against the slot's own traffic is what a reader
 /// judges.
@@ -142,7 +142,7 @@ fn a_hint_created_twice_is_counted_as_redundant() {
     );
 
     // Attributed to the slot that *asked*, which is the one whose client may be
-    // at fault — not to whoever the hinted item belongs to.
+    // at fault, not to whoever the hinted item belongs to.
     let mine: u64 = redundant::by_slot()
         .into_iter()
         .filter(|((key, kind), _)| *key == (0, slot) && *kind == Kind::Hint)

@@ -5,7 +5,7 @@
 //! a typo becomes a hint, a "did you mean…", or a refusal, so they are
 //! reproduced exactly rather than approximated.
 //!
-//! Archipelago scores with jellyfish's *unrestricted* Damerau-Levenshtein —
+//! Archipelago scores with jellyfish's *unrestricted* Damerau-Levenshtein:
 //! the variant that allows a transposed pair to be edited again afterwards.
 //! `strsim::damerau_levenshtein` is the same algorithm; `strsim::osa_distance`
 //! is the restricted one and gives different answers on inputs like
@@ -38,8 +38,8 @@ impl Match {
 
 /// `get_fuzzy_ratio`: similarity in `0.0..=1.01`, before truncation.
 ///
-/// An exact match returns 1.01 — above the 1.0 a case-insensitive match can
-/// reach — which is how the two are told apart downstream.
+/// An exact match returns 1.01, above the 1.0 a case-insensitive match can
+/// reach, which is how the two are told apart downstream.
 pub fn ratio(input: &str, candidate: &str) -> f64 {
     if input == candidate {
         return 1.01;
@@ -56,8 +56,8 @@ pub fn ratio(input: &str, candidate: &str) -> f64 {
 
 /// [`ratio`] scaled to the integer percentage the thresholds are expressed in.
 pub fn score(input: &str, candidate: &str) -> i64 {
-    // Python's int() truncates toward zero, so a negative ratio — very
-    // dissimilar strings — rounds up rather than down.
+    // Python's int() truncates toward zero, so a negative ratio (very
+    // dissimilar strings) rounds up rather than down.
     (ratio(input, candidate) * 100.0) as i64
 }
 
@@ -66,13 +66,13 @@ pub fn score(input: &str, candidate: &str) -> i64 {
 /// Ranking is by the **float** ratio and only then truncated to an integer
 /// (`Utils.py:684-693`): Python sorts the `(name, ratio)` pairs and maps
 /// `int(ratio * 100)` over the *result*. Sorting by the truncated value instead
-/// turns near-misses into ties and reorders them — "Sword" against
+/// turns near-misses into ties and reorders them: "Sword" against
 /// `["Blue Potion", "Red Potion"]` both score 9, but Red is genuinely the
 /// closer of the two and Archipelago ranks it first.
 ///
 /// Python's sort is stable, so a true tie keeps the candidate collection's
 /// order. Several call sites in Archipelago pass a `set`, whose iteration order
-/// is an implementation detail — this takes a slice and expects the caller to
+/// is an implementation detail; this takes a slice and expects the caller to
 /// have imposed a deterministic order.
 pub fn best<'a>(input: &str, candidates: &[&'a str], limit: usize) -> Vec<(&'a str, i64)> {
     let mut scored: Vec<(&str, f64)> = candidates.iter().map(|c| (*c, ratio(input, c))).collect();
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn ambiguity_between_similar_names_is_refused() {
         // Equidistant candidates score identically, so the gap is 0 and Python
-        // refuses rather than guessing — guessing wrong would spend a hint.
+        // refuses rather than guessing: guessing wrong would spend a hint.
         let m = intended("Swor", &["Sword", "Sworn"]).unwrap();
         assert!(matches!(m, Match::Rejected { .. }), "{m:?}");
     }

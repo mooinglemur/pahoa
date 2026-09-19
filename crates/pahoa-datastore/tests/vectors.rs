@@ -57,13 +57,13 @@ fn parse() -> Vec<Case> {
 /// The documented divergences, all of which turn a Python success into a pahoa
 /// error. Anything else is a real mismatch.
 ///
-/// Two are denial-of-service bounds — Python's unbounded integers and sequences
+/// Two are denial-of-service bounds: Python's unbounded integers and sequences
 /// make `pow(2, 10**9)` and `"x" * 10**9` remote memory exhaustion. One is
 /// non-finite floats, which have no JSON spelling. The last is printf-style
 /// string formatting via `mod`; see [`OpError`].
 ///
 /// `OpError::Overflow` is deliberately **not** here any more. It now means what
-/// Python's `OverflowError` means — an integer too large to become a float —
+/// Python's `OverflowError` means, an integer too large to become a float,
 /// and the reference raises in exactly the same place, so it is agreement
 /// rather than divergence.
 fn is_documented_divergence(e: &OpError) -> bool {
@@ -132,9 +132,9 @@ fn every_operation_matches_cpython() {
                 }
             }
 
-            // Both refused. The exception *names* need not match — the room
+            // Both refused. The exception *names* need not match (the room
             // turns every one of them into the same outcome, a dropped
-            // connection — but refusing where CPython refused does matter.
+            // connection) but refusing where CPython refused does matter.
             (Expected::Raised(_), Err(_)) => both_failed += 1,
 
             (Expected::Raised(why), Ok(have)) => {
@@ -177,7 +177,7 @@ fn every_operation_matches_cpython() {
     // being reasoned about, which is exactly what this file exists to prevent.
     //
     // All 83 are the one `mod`-on-a-string case. The count rose from 71 when
-    // the operand matrix gained integers wider than 64 bits — those added more
+    // the operand matrix gained integers wider than 64 bits: those added more
     // `mod(str, …)` pairs, and *nothing else*: every arithmetic case involving
     // them now agrees with CPython exactly, where the whole class used to be
     // refused for not fitting in an `i64`.
@@ -306,7 +306,7 @@ mod traps {
     #[test]
     fn the_denial_of_service_shapes_are_bounded() {
         // Python computes these happily and exhausts memory doing it. Each is
-        // refused from the *projected* size, before anything is allocated —
+        // refused from the *projected* size, before anything is allocated,
         // which is the only way to refuse them at all.
         assert!(matches!(
             apply("pow", json!(2), &json!(1_000_000_000)),
@@ -329,7 +329,7 @@ mod traps {
 
     /// Repeating an **empty** sequence, which passes every size check.
     ///
-    /// This hung — not slowly, indefinitely — on the one task that owns all
+    /// This hung, not slowly but indefinitely, on the one task that owns all
     /// room state, so any authenticated client could stop a room with a single
     /// `Set`. Zero times anything is zero, so the result-length guard saw
     /// nothing to refuse, and the loop that appended nothing a trillion times

@@ -69,12 +69,12 @@ pub struct Upgraded {
     /// what we would otherwise use and then inflate with that smaller window.
     /// Compressing with a larger one produces back-references it cannot
     /// resolve, which fails only once a payload is big enough to reach past the
-    /// client's window — so the bug hides completely at small message sizes.
+    /// client's window, so the bug hides completely at small message sizes.
     pub deflate: Option<u8>,
     /// Bytes already read past the end of the headers.
     ///
     /// A client is allowed to pipeline its first frames into the same segment
-    /// as the request, and Archipelago's does — dropping these loses the
+    /// as the request, and Archipelago's does: dropping these loses the
     /// `Connect`.
     pub leftover: BytesMut,
     pub path: String,
@@ -157,7 +157,7 @@ where
 
 /// Read exactly as much body as the request declared.
 ///
-/// Some of it is usually already in `buf` — a client that pipelines its body
+/// Some of it is usually already in `buf`: a client that pipelines its body
 /// into the same segment as the head is the normal case for a small POST.
 async fn read_body<S>(
     stream: &mut S,
@@ -229,7 +229,7 @@ pub async fn reject<S>(stream: &mut S, error: &AcceptError)
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    // A TLS peer cannot read an HTTP response — it is waiting for a ServerHello
+    // A TLS peer cannot read an HTTP response: it is waiting for a ServerHello
     // and would report a protocol error on anything else. A fatal alert is the
     // one thing it does understand, and it turns "connection reset" into a
     // clean handshake failure the client can fall back from immediately.
@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    /// An upgrade that is *broken*, rather than absent, is still an error —
+    /// An upgrade that is *broken*, rather than absent, is still an error:
     /// routing it as plain HTTP would answer a WebSocket client with JSON.
     #[tokio::test]
     async fn a_broken_upgrade_is_still_refused() {

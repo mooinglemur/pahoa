@@ -1,8 +1,8 @@
-//! `pahoa inspect` — summarize a multidata file.
+//! `pahoa inspect`: summarize a multidata file.
 //!
 //! Output is deliberately stable and machine-diffable: `tools/inspect-multidata.py`
 //! produces the identical text from CPython, and the two are compared over every
-//! fixture. That comparison is what makes the typed loader trustworthy — it
+//! fixture. That comparison is what makes the typed loader trustworthy: it
 //! exercises slot typing, the location table, hints, versions and the data
 //! package all at once, against an independent implementation.
 

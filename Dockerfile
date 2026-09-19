@@ -20,7 +20,7 @@ ENV RUSTFLAGS="-C target-feature=+crt-static"
 WORKDIR /src
 
 # The source revision for the startup banner. `.dockerignore` excludes `.git`
-# — deliberately, since it is large and changes every commit — so `build.rs`
+# deliberately, since it is large and changes every commit, so `build.rs`
 # cannot ask git here and takes this instead. Left unset it stamps `unknown`,
 # which builds fine and makes a room harder to trace back to a commit; CI passes
 # `--build-arg PAHOA_BUILD_REV=$CI_COMMIT_SHORT_SHA`.
@@ -28,8 +28,8 @@ ARG PAHOA_BUILD_REV
 ENV PAHOA_BUILD_REV=${PAHOA_BUILD_REV}
 
 # A clean build of the whole workspace takes seconds, so there is no separate
-# dependency-caching stage. The usual trick — stub out the sources, build deps,
-# then copy the real code — needs a hand-maintained list of crates that breaks
+# dependency-caching stage. The usual trick (stub out the sources, build deps,
+# then copy the real code) needs a hand-maintained list of crates that breaks
 # silently the next time one is added. Not worth it at this size.
 COPY . .
 RUN cargo build --release --target x86_64-unknown-linux-musl --locked
@@ -38,7 +38,7 @@ RUN cargo build --release --target x86_64-unknown-linux-musl --locked
 # something here fails.
 #
 # Both checks earn their place. The selftest matters as much as the linkage
-# check — "it linked" is not the same as "it computes the right answers", and a
+# check: "it linked" is not the same as "it computes the right answers", and a
 # scratch image has no test runner. The linkage check looks for an INTERP
 # segment rather than parsing ldd output: Rust emits a static-PIE for musl, and
 # musl's own ldd prints a loader line for those even though they are static, so

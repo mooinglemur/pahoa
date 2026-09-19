@@ -2,7 +2,7 @@
 """Play a real multiworld to completion against pahoa, with real client code.
 
 M9's other half. The load track proves pahoa stands up at scale; this proves it
-plays a *whole game* — every slot connects, checks every location it owns,
+plays a *whole game*: every slot connects, checks every location it owns,
 receives everything owed to it, and reaches its goal, after which the room
 reports the multiworld finished.
 
@@ -11,7 +11,7 @@ and `decode` (so the `"class"` discriminators and `Version` reconstruction are
 the genuine article), Archipelago's `websockets` (so the WebSocket layer and
 permessage-deflate are exercised exactly as a player's client would), and
 Archipelago's `RawJSONtoTextParser` for rendering. What it is not is a *game*
-client — nothing here simulates gameplay, because the server cannot tell the
+client: nothing here simulates gameplay, because the server cannot tell the
 difference and the multiworld's completion rules are what is under test.
 
     ~/src/Archipelago/.venv/bin/python tools/play-seed.py \\
@@ -140,7 +140,7 @@ async def play(args, players, locations, encode, decode):
             await send([{"cmd": "StatusUpdate", "status": 30}])
             goaled.add(slot)
 
-            # Drain briefly so the server's replies are actually consumed —
+            # Drain briefly so the server's replies are actually consumed:
             # a client that stops reading is one the server may rightly drop.
             deadline = asyncio.get_event_loop().time() + 20
             while asyncio.get_event_loop().time() < deadline:
@@ -157,7 +157,7 @@ async def play(args, players, locations, encode, decode):
     for index, (slot, name, game) in enumerate(players, 1):
         try:
             await play_slot(slot, name, game)
-        except Exception as e:  # noqa: BLE001 — any failure is a failed run
+        except Exception as e:  # noqa: BLE001, any failure is a failed run
             failures.append(f"slot {slot} ({name}): {type(e).__name__}: {e}")
         if index % 10 == 0 or index == len(players):
             print(f"  {index}/{len(players)} slots played")

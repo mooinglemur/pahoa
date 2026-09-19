@@ -3,7 +3,7 @@
 //! Archipelago's encoder walks the object graph and rewrites every NamedTuple
 //! into an object carrying an extra `"class"` key naming its Python type
 //! (`NetUtils.py:98-107`). So `NetworkItem` goes out as
-//! `{"item":…,"location":…,"player":…,"flags":…,"class":"NetworkItem"}` — and
+//! `{"item":…,"location":…,"player":…,"flags":…,"class":"NetworkItem"}`, and
 //! field order matters, because the tag is appended last by `_asdict()` plus a
 //! `data["class"] = …` assignment.
 //!
@@ -22,7 +22,7 @@ pub use pahoa_multidata::{ClientStatus, HintStatus, SlotType};
 /// `(major, minor, build)`.
 ///
 /// Custom clients must tag this `{"class":"Version"}` for the server to compare
-/// it. Decoding is deliberately lenient — see [`Version`]'s `Deserialize`.
+/// it. Decoding is deliberately lenient. See [`Version`]'s `Deserialize`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u32,
@@ -51,7 +51,7 @@ impl From<pahoa_multidata::Version> for Version {
 }
 
 /// The other way, for comparing this server's version against what a seed
-/// demands — the same three numbers, kept as two types because one is the wire
+/// demands: the same three numbers, kept as two types because one is the wire
 /// shape and the other is what a pickle held.
 impl From<Version> for pahoa_multidata::Version {
     fn from(v: Version) -> Self {
@@ -265,7 +265,7 @@ impl Serialize for Hint {
 /// One span of a `PrintJSON` message.
 ///
 /// Clients render `data` and may ignore everything else. Unknown `type` values
-/// must fall back to plain text — that rule is what lets new part types ship
+/// must fall back to plain text: that rule is what lets new part types ship
 /// without breaking old clients (`NetUtils.py:280-283`).
 ///
 /// **Field order is not arbitrary.** Archipelago builds these as dict literals
@@ -280,8 +280,8 @@ impl Serialize for Hint {
 /// ```
 ///
 /// Declaring the fields in that order makes all four byte-identical, since the
-/// absent ones are skipped. `color` is never set by the server — clients add it
-/// while rendering — so its position is unconstrained.
+/// absent ones are skipped. `color` is never set by the server (clients add it
+/// while rendering) so its position is unconstrained.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonMessagePart {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -382,7 +382,7 @@ impl From<u8> for Permission {
 
 impl Permission {
     /// Strict parse, for contexts where an unrecognized value means the input
-    /// is corrupt rather than merely unknown — a save file, not a packet.
+    /// is corrupt rather than merely unknown: a save file, not a packet.
     ///
     /// [`From<u8>`] is the lenient counterpart and is what the protocol uses.
     pub fn from_wire(v: i64) -> Option<Self> {
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn json_message_parts_key_order_matches_each_python_builder() {
         // `type` last for the parts that carry extra keys, second for the ones
-        // that do not — see the note on JsonMessagePart. Pinned against the real
+        // that do not. See the note on JsonMessagePart. Pinned against the real
         // functions by crates/pahoa-room/tests/message_vectors.jsonl.
         assert_eq!(
             json(&JsonMessagePart::player_id(3)),

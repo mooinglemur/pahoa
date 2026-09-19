@@ -158,7 +158,7 @@ fn connected_omits_slot_data_entirely_when_not_requested() {
 /// `slot_info` keys must come out in ascending slot order, not sorted as text.
 ///
 /// The reference sends a `Dict[int, NetworkSlot]` in the multidata's own
-/// insertion order, and clients have been written against that for years —
+/// insertion order, and clients have been written against that for years:
 /// Dracomino builds a positional array from the object and indexes it as
 /// `slots[id-1]`, so any other order silently pairs each slot with another
 /// slot's game. Ten is the smallest room where the two orderings differ.

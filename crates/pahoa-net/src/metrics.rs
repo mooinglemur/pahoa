@@ -5,19 +5,19 @@
 //! behavior at 6000 connections, and each one has a failure it is meant to
 //! catch.
 //!
-//! - **actor mailbox depth** — the bottleneck canary. The single task owning
+//! - **actor mailbox depth**: the bottleneck canary. The single task owning
 //!   room state is fine as long as its queue stays near empty; a depth that
 //!   climbs and does not drain means work is arriving faster than the room can
 //!   apply it, and everything else is downstream of that.
-//! - **outbound bytes queued, and the peak** — against the global budget. Python
+//! - **outbound bytes queued, and the peak**: against the global budget. Python
 //!   buffers without limit here, which is unbounded memory growth; the whole
 //!   point of the budget is that this number has a ceiling.
-//! - **lag disconnects** — how often a client was dropped for falling behind.
+//! - **lag disconnects**: how often a client was dropped for falling behind.
 //!   Should be zero in a healthy room, and is a deliberate divergence from the
 //!   reference, so it needs to be visible rather than inferred.
-//! - **compressions** — should track *broadcasts*, not broadcasts times
+//! - **compressions**: should track *broadcasts*, not broadcasts times
 //!   connections. Lives in [`crate::ws::deflate`] next to the compressor.
-//! - **save duration** — the last save's wall time, to confirm persistence stays
+//! - **save duration**: the last save's wall time, to confirm persistence stays
 //!   off the critical path.
 
 use std::collections::HashMap;
@@ -75,7 +75,7 @@ pub fn last_save() -> (std::time::Duration, u64) {
 /// When the last save completed, or `None` if none has.
 ///
 /// A wall clock rather than a duration because it is reported to an operator,
-/// who wants "at 12:04" and not "1841 seconds ago" — and because a room that
+/// who wants "at 12:04" and not "1841 seconds ago", and because a room that
 /// has never saved has to be distinguishable from one that saved at startup.
 pub fn last_save_at() -> Option<std::time::SystemTime> {
     match SAVE_AT.load(Ordering::Relaxed) {
@@ -102,7 +102,7 @@ pub fn record_client_message() {
 /// slot* is producing the Bounce storm.
 ///
 /// Sparse on purpose. A pair is created the first time it is observed, so a
-/// slot that has never sent a `SetNotify` has no series rather than a zero —
+/// slot that has never sent a `SetNotify` has no series rather than a zero:
 /// on a 2000-slot room that is the difference between ~28,000 series and
 /// something closer to a tenth of it, and a gap and a zero mean different
 /// things on a dashboard anyway.
@@ -110,12 +110,12 @@ static PACKETS: LazyLock<RwLock<HashMap<PacketKey, AtomicU64>>> = LazyLock::new(
 
 /// One row of the inbound packet table.
 ///
-/// `key` is `None` for a packet that arrived before the connection had a slot —
-/// `Connect` and `GetDataPackage`, the only two the room answers unauthenticated
-/// — which is reported separately rather than under an empty slot label. A room
-/// being hammered by failed `Connect`s is a real thing to want to see, and the
-/// alternative was a series every per-slot aggregation had to remember to
-/// exclude.
+/// `key` is `None` for a packet that arrived before the connection had a slot
+/// (`Connect` and `GetDataPackage`, the only two the room answers
+/// unauthenticated) which is reported separately rather than under an empty
+/// slot label. A room being hammered by failed `Connect`s is a real thing to
+/// want to see, and the alternative was a series every per-slot aggregation
+/// had to remember to exclude.
 ///
 /// A `(team, slot)` rather than a slot number, because that is what identifies
 /// a participant; see `pahoa_multidata::MultiData::teams` for why there is only
@@ -128,7 +128,7 @@ pub struct PacketKey {
 
 /// Count one packet from a client.
 ///
-/// Called on the actor, before the packet is handled — so a `Connect` is
+/// Called on the actor, before the packet is handled, so a `Connect` is
 /// attributed to nobody even though handling it is what gives the connection a
 /// slot, which is the honest reading: it arrived before there was one.
 pub fn record_packet(slot: Option<pahoa_room::SlotKey>, cmd: &'static str) {
@@ -157,7 +157,7 @@ pub fn packets() -> Vec<(PacketKey, u64)> {
 
 /// Wire bytes of the protocol messages a slot **sent**.
 ///
-/// Frame bytes off the socket — header, mask and compressed payload — so this
+/// Frame bytes off the socket (header, mask and compressed payload) so this
 /// is comparable with [`DELIVERED`]'s outbound bytes rather than with the
 /// inflated text the room parses. A `Set` from a tracker that arrives
 /// compressed counts what it cost to carry, not what it expanded to.
@@ -174,7 +174,7 @@ static BYTES_IN: LazyLock<RwLock<HashMap<Option<pahoa_room::SlotKey>, AtomicU64>
 /// Count one message read from a client.
 ///
 /// `slot` is resolved when the message arrives, before any of its packets are
-/// handled — so a frame carrying `Connect` is pre-auth even though handling it
+/// handled, so a frame carrying `Connect` is pre-auth even though handling it
 /// is what creates the slot, matching [`record_packet`].
 pub fn record_bytes_in(slot: Option<pahoa_room::SlotKey>, bytes: usize) {
     if let Some(count) = BYTES_IN.read().expect("not poisoned").get(&slot) {
@@ -202,15 +202,15 @@ pub fn bytes_in() -> Vec<(Option<pahoa_room::SlotKey>, u64)> {
 /// Packets the room **produced**, by command.
 ///
 /// Counted once per message when the room decides to emit it, whatever its
-/// audience — so one chat line broadcast to two thousand slots is one. That is
+/// audience, so one chat line broadcast to two thousand slots is one. That is
 /// the opposite convention to [`deliveries`] below, and deliberately: this
 /// answers "what is the room generating", which is a property of the room, and
 /// the two together say whether a load problem is production or fan-out.
 ///
 /// **No slot label, because there is no honest one.** A slot's connections do
-/// not receive the same stream — a `NoText` tracker is left out of chat, and a
-/// scoped connection takes items through a different route than a full-feed one
-/// — so "packets sent to slot 4" has no single value. Attributing per recipient
+/// not receive the same stream (a `NoText` tracker is left out of chat, and a
+/// scoped connection takes items through a different route than a full-feed
+/// one) so "packets sent to slot 4" has no single value. Attributing per recipient
 /// would also mean expanding every broadcast's audience on the actor, which is
 /// the O(connections) walk the shards exist to avoid: a mass release is ~3,500
 /// broadcasts.
@@ -250,7 +250,7 @@ pub fn packets_out() -> Vec<(String, u64)> {
 /// here even though it is the wrong one for [`PACKETS_OUT`]: these are bytes the
 /// room really queued, they are what fills the outbound budget and what a lag
 /// disconnect is downstream of, and dividing by connection count would not
-/// recover a per-slot stream anyway — the connections of one slot are not sent
+/// recover a per-slot stream anyway: the connections of one slot are not sent
 /// the same things.
 ///
 /// Counted where the frame is handed over, so a delivery refused for lag or a
@@ -322,8 +322,8 @@ fn unix_now() -> u64 {
 /// known yet; and the game arrives with `Connect`, known only to the room. They
 /// meet on the shard's `Member`, which is where this is counted.
 ///
-/// **Per connection, not per slot.** A slot's clients can differ — a game
-/// client may compress while a tracker on the same slot does not — so the
+/// **Per connection, not per slot.** A slot's clients can differ (a game
+/// client may compress while a tracker on the same slot does not) so the
 /// connection is the honest unit, and `sum by (game, deflate)` is the panel.
 ///
 /// A counter rather than a gauge: cumulative survives churn and answers the
@@ -460,7 +460,7 @@ static AUTH_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
 /// **Should be zero, and it is not the same thing as a lag disconnect.** A
 /// lagged client is dropped deliberately, told about it, and can reconnect into
 /// correct state. This is the other kind: the shard's own inbox was full, so a
-/// frame — possibly a broadcast bound for every connection that shard owns —
+/// frame, possibly a broadcast bound for every connection that shard owns,
 /// was discarded with nobody closed and nobody told. `budget.rs` explains at
 /// length why that must not happen: a discarded `ReceivedItems` leaves the room
 /// believing a slot holds items it never received, and the client cannot tell.
@@ -469,8 +469,8 @@ static AUTH_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
 /// is the only option that keeps the room correct: a `Send` closes its one
 /// connection, a broadcast closes every connection on that shard, because the
 /// audience is expanded inside the shard and the actor does not know who it was
-/// for. Closing is safe where dropping is not — the protocol resumes on
-/// `Connect` — so this trades a reconnect for a game that would otherwise
+/// for. Closing is safe where dropping is not (the protocol resumes on
+/// `Connect`) so this trades a reconnect for a game that would otherwise
 /// silently disagree with the room.
 ///
 /// So this counter is no longer "something bad may have happened invisibly"; it
@@ -494,7 +494,7 @@ pub fn shard_overflow() -> u64 {
 /// sweep, but a sweep only has work to do once per population: it closed
 /// everybody who was there, so the next one is a no-op until somebody new
 /// arrives. The ratio is therefore how far past the first failure the room went
-/// before it stopped being asked — a dev-cluster run recorded 195,971 overflows
+/// before it stopped being asked: a dev-cluster run recorded 195,971 overflows
 /// against a room that held ~5,000 connections, and every one of those used to
 /// walk the whole membership in preference to draining the queue that
 /// overflowed.
@@ -543,8 +543,8 @@ pub fn auth_rate_limited() -> u64 {
 
 /// Resident set size, in bytes.
 ///
-/// Read from `/proc` rather than tracked, because the question it answers —
-/// "does memory scale with connection count the way the design says" — is about
+/// Read from `/proc` rather than tracked, because the question it answers,
+/// "does memory scale with connection count the way the design says", is about
 /// the whole process, allocator included, not about what pahoa thinks it holds.
 pub fn resident_bytes() -> Option<u64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
@@ -556,7 +556,7 @@ pub fn resident_bytes() -> Option<u64> {
 /// `sysconf(_SC_CLK_TCK)` without libc: 100 Hz everywhere pahoa targets.
 ///
 /// The same assumption [`resident_bytes`] already makes about page size, and it
-/// is wrong in the same way if pahoa is ever built for something exotic — the
+/// is wrong in the same way if pahoa is ever built for something exotic: the
 /// numbers would be off by a constant factor rather than absent, which is worth
 /// knowing before trusting one.
 const CLOCK_TICKS: f64 = 100.0;
@@ -575,8 +575,8 @@ fn proc_stat_fields(stat: &str) -> Option<Vec<&str>> {
 ///
 /// Fields 14 and 15 of `/proc/self/stat`. Process-wide on purpose: it says what
 /// the room costs a node, which is the capacity question. It deliberately does
-/// **not** say which task is hot, and the task that matters — the single actor
-/// owning room state — is watched by `mailbox_depth` and `mailbox_peak`
+/// **not** say which task is hot, and the task that matters (the single actor
+/// owning room state) is watched by `mailbox_depth` and `mailbox_peak`
 /// instead. A room can be CPU-bound in its shards, which is fine, or backed up
 /// on its actor, which is not, and only the mailbox tells those apart.
 pub fn cpu_seconds() -> Option<f64> {
@@ -634,7 +634,7 @@ mod tests {
     /// **The command name is parenthesized and may contain spaces and its own
     /// parentheses**, which is the standard way to misparse `/proc/*/stat`.
     /// Splitting on whitespace and counting fields reads `Dice`, not the state,
-    /// and every field after it lands one or more places off — so CPU would be
+    /// and every field after it lands one or more places off, so CPU would be
     /// some unrelated counter rather than absent.
     #[test]
     fn stat_fields_survive_a_command_name_with_spaces_and_parens() {

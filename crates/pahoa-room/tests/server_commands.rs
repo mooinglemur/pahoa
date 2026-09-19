@@ -3,7 +3,7 @@
 //! Two things are being verified, and they are quite different in kind.
 //!
 //! The first is the **session**: who may run a command, and what happens at the
-//! edges — a wrong password, a displaced administrator, a connection that goes
+//! edges: a wrong password, a displaced administrator, a connection that goes
 //! away. The reference holds a single client object for this, so "logged in" is
 //! room state rather than connection state, and every interesting case is about
 //! that one slot changing hands.
@@ -12,8 +12,8 @@
 //! something else**. Every option it can set was delivered in `RoomInfo` at
 //! connect, so a setter that only mutates the room leaves every connected
 //! player holding a stale value with nothing to tell them otherwise. That
-//! failure is completely silent — the room is correct, the save is correct, and
-//! only the players are wrong — which is why the push shape is tested per
+//! failure is completely silent (the room is correct, the save is correct, and
+//! only the players are wrong) which is why the push shape is tested per
 //! option rather than once.
 
 mod common;
@@ -78,7 +78,7 @@ fn admin_said(sink: &Recorder, conn: ConnId, room: &Room) -> Vec<String> {
         .collect()
 }
 
-/// What `!admin` itself replied — login and usage lines, which are ordinary
+/// What `!admin` itself replied: login and usage lines, which are ordinary
 /// `CommandResult` because they come from the client-side processor.
 fn shell_said(sink: &Recorder, conn: ConnId, room: &Room) -> Vec<String> {
     printed(sink, conn, room, PrintJsonType::CommandResult)
@@ -281,7 +281,7 @@ fn setting_an_option_takes_effect_and_marks_the_room_dirty() {
         "Set option hint_cost to 42"
     );
     // Without this the change is live but not durable, and reverts at the next
-    // restart — the exact defect that rules out a password setter.
+    // restart: the exact defect that rules out a password setter.
     assert!(sink.dirty, "the set did not mark the room dirty");
 }
 
@@ -344,7 +344,7 @@ fn a_permission_change_pushes_one_room_wide_update() {
         .as_ref()
         .expect("permissions were not pushed, so clients keep the old mode");
     assert_eq!(permissions["release"], Permission::Enabled);
-    // The whole map, as `get_permissions` sends it — a client replaces rather
+    // The whole map, as `get_permissions` sends it: a client replaces rather
     // than merges, so a partial map would blank the other two.
     assert_eq!(permissions.len(), 3);
     assert!(

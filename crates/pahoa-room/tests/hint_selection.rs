@@ -1,8 +1,8 @@
 //! M6's exit gate: `!hint` selection against Archipelago's own `get_hints`.
 //!
 //! Vectors come from `tools/gen-hint-vectors.py`, which drives a real
-//! `MultiServer.Context` — only `_load_game_data` is overridden, exactly as
-//! `WebHostContext` does it — so `collect_hints`, `get_sphere`,
+//! `MultiServer.Context` (only `_load_game_data` is overridden, exactly as
+//! `WebHostContext` does it) so `collect_hints`, `get_sphere`,
 //! `get_hint_cost` and the payment block are the genuine implementations
 //! rather than a second reading of them.
 //!
@@ -14,7 +14,7 @@
 //! reference does not agree with itself between restarts. So this compares
 //! everything that *is* stable:
 //!
-//! - which hints are announced at all, as a set — the strongest available
+//! - which hints are announced at all, as a set: the strongest available
 //!   check on `collect_hints`, since the free-hint cases announce every
 //!   candidate
 //! - how many are paid for, and the sphere/locality key each paid hint carries
@@ -169,8 +169,8 @@ fn selection_and_pricing_match_archipelago() {
             .map(key_of)
             .collect();
 
-        // When the budget takes *everything* — free hints, or a pool small
-        // enough to exhaust — the two sides must agree exactly, and that is the
+        // When the budget takes *everything* (free hints, or a pool small
+        // enough to exhaust) the two sides must agree exactly, and that is the
         // real check on `collect_hints`: the first vector compares 84 specific
         // placements. When the budget takes a subset, which member of the
         // winning group it takes comes off the shuffle, so only the size can
@@ -213,7 +213,7 @@ fn selection_and_pricing_match_archipelago() {
         );
         // Announced and stored differ on purpose: a found hint is announced
         // but not banked, and neither is one the seed had already placed in
-        // the *finding* player's list — `notify_hints` guards on that list, not
+        // the *finding* player's list: `notify_hints` guards on that list, not
         // on the hinting slot's. The first vector exercises both, banking 82 of
         // the 84 it charges for.
         let stored: BTreeSet<HintKey> = room
@@ -333,7 +333,7 @@ fn selection_and_pricing_match_archipelago() {
         // `set` (`MultiServer.py:248`), and set iteration order for strings
         // follows `PYTHONHASHSEED`, which CPython randomizes per process. The
         // same seed generated under four hash seeds names four different
-        // items — one of which is the one pahoa picks.
+        // items, one of which is the one pahoa picks.
         //
         // So the suggestion is elided and everything around it still compared:
         // the score, the wording, and that a rejection happened at all. The

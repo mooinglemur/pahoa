@@ -4,7 +4,7 @@
 `World.hint_blacklist` (`worlds/AutoWorld.py:312`) is "any names that should not
 be hintable". The reference server reads it out of its installed worlds at
 `MultiServer.py:343-344` and `!hint` refuses a match against it. **It is never
-serialized into multidata by anything** — it is Python class data — so a
+serialized into multidata by anything** (it is Python class data) so a
 standalone server has to carry its own copy.
 
 pahoa compiles that copy in, rather than loading a JSON snapshot at startup:
@@ -13,8 +13,8 @@ room, and a table in the binary can be none of those. This script is what keeps
 the table honest, so the values stay *derived* from Archipelago rather than
 hand-copied and slowly wrong.
 
-Everything else a room needs — item and location names, ids, name groups,
-checksums — is embedded in the seed itself, so nothing else needs exporting.
+Everything else a room needs (item and location names, ids, name groups,
+checksums) is embedded in the seed itself, so nothing else needs exporting.
 
 Usage:
     export-datapackage.py --archipelago ~/src/Archipelago            # show a diff
@@ -31,9 +31,9 @@ registry rather than reported. Since this script's output *deletes* entries, an
 incomplete registry would quietly stop `!hint` refusing a name. It therefore
 refuses to run at all when anything failed to load.
 
-If that cannot be arranged, the fallback is to read the source directly —
+If that cannot be arranged, the fallback is to read the source directly:
 `grep -rn hint_blacklist worlds/` finds every world that sets one, since it is
-always a class-level assignment — and follow the constants by hand. That is how
+always a class-level assignment. Then follow the constants by hand. That is how
 the table's current entries were established, and both were cross-checked
 against `MultiServer.py`'s use of them.
 """
@@ -68,7 +68,7 @@ def collect(archipelago):
         )
 
     # A world that failed to import is simply absent from the registry, so a
-    # checkout with unmet dependencies produces a *silently short* table — and
+    # checkout with unmet dependencies produces a *silently short* table, and
     # this script's output deletes entries, so short means "stop refusing to
     # hint Triforce". Refuse rather than guess.
     failed = getattr(worlds, "failed_world_loads", {})
@@ -143,7 +143,7 @@ def main():
     block, _ = render(found, ap_version)
     TABLE.write_text(text[:start] + block + text[stop:])
     print(f"\nwrote {TABLE}", file=sys.stderr)
-    print(f"NOW UPDATE {MIRROR} — it mirrors this table on purpose, so that the\n"
+    print(f"NOW UPDATE {MIRROR}: it mirrors this table on purpose, so that the\n"
           "inspect differential stays an independent check rather than agreeing\n"
           "with itself.", file=sys.stderr)
     return 0

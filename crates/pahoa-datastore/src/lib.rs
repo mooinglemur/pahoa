@@ -2,7 +2,7 @@
 //!
 //! Clients use data storage for DeathLink, trackers and per-world state, and
 //! the operations are Python expressions over arbitrary JSON. Reproducing them
-//! means reproducing a slice of CPython — see [`ops`] for the deliberate
+//! means reproducing a slice of CPython. See [`ops`] for the deliberate
 //! divergences and [`pyvalue`] for the type traps underneath.
 //!
 //! ```

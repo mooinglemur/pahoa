@@ -4,15 +4,15 @@
 //! message once, compress it once, and write the resulting bytes verbatim to
 //! thousands of connections. Every WebSocket library owns compression per
 //! connection, because every WebSocket library is built for point-to-point
-//! traffic — which turns one broadcast into 6000 compressions and is exactly
+//! traffic, which turns one broadcast into 6000 compressions and is exactly
 //! what `server_no_context_takeover` exists to avoid.
 //!
 //! The layers, bottom up:
 //!
-//! - [`frame`] — RFC 6455 framing: header parsing, masking, size caps
-//! - [`deflate`] — RFC 7692 permessage-deflate, with the sync-flush trailer trick
-//! - [`message`] — fragments to messages, with the inflate-then-validate ordering
-//! - [`handshake`] / [`accept`] — the upgrade and what gets negotiated
+//! - [`frame`]: RFC 6455 framing: header parsing, masking, size caps
+//! - [`deflate`]: RFC 7692 permessage-deflate, with the sync-flush trailer trick
+//! - [`message`]: fragments to messages, with the inflate-then-validate ordering
+//! - [`handshake`] / [`accept`]: the upgrade and what gets negotiated
 
 pub mod accept;
 pub mod client;
@@ -36,7 +36,7 @@ const MIN_COMPRESS_BYTES: usize = 128;
 /// shard rather than once per recipient.
 #[derive(Debug, Clone)]
 pub struct Outgoing {
-    /// The complete frame — header included — with RSV1 clear.
+    /// The complete frame, header included, with RSV1 clear.
     plain: Bytes,
     /// Where the payload starts inside `plain`.
     header_len: usize,
@@ -72,7 +72,7 @@ impl Outgoing {
 
     /// Build the RSV1 variant.
     ///
-    /// Falls back to the plain frame when compression would not pay — a short
+    /// Falls back to the plain frame when compression would not pay: a short
     /// message, or one that deflate happens to expand. RSV1 is per-message, so
     /// mixing the two on one connection is legal and costs the peer nothing.
     pub fn deflated(&self, deflater: &mut deflate::Deflater) -> Bytes {

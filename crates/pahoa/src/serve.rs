@@ -1,4 +1,4 @@
-//! `pahoa serve` — host a multiworld.
+//! `pahoa serve`: host a multiworld.
 
 use pahoa_multidata::MultiData;
 use pahoa_net::actor::SaveConfig;
@@ -37,8 +37,8 @@ pub struct ServeArgs<'a> {
     /// Which room-option flags were actually given, as their flag spellings.
     ///
     /// Only used to notice that a restored save is about to overrule one. A
-    /// flag that was not given cannot be overruled — its value *is* the
-    /// default — so warning without this would fire on every restart of every
+    /// flag that was not given cannot be overruled (its value *is* the
+    /// default) so warning without this would fire on every restart of every
     /// room whose options are not all default.
     pub explicit_options: Vec<&'static str>,
     /// Append a durable per-check history to the save directory.
@@ -77,7 +77,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 
     // The consistency checks the reference runs at load, run at load. A seed
     // that demands a newer server, points a connect name at a slot that does
-    // not exist, or names a team this server cannot serve is refused here —
+    // not exist, or names a team this server cannot serve is refused here,
     // before the port binds, so an orchestrator sees a room that never came up
     // rather than one that came up and then behaved oddly.
     data.validate(pahoa_room::SERVER_VERSION.into())
@@ -85,7 +85,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 
     let (names, report) = data.resolve_datapackage();
     if !report.unresolved.is_empty() {
-        // Not fatal — names degrade to "Unknown item (ID:n)" — but an operator
+        // Not fatal (names degrade to "Unknown item (ID:n)") but an operator
         // should be told rather than left to notice in chat.
         tracing::warn!(
             games = report.unresolved.len(),
@@ -100,7 +100,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         .unwrap_or(0.0);
 
     // Secrets first, so that a seed's embedded `server_options` can still
-    // override one that came from a flag — and, in `apply_embedded`, cannot
+    // override one that came from a flag, and, in `apply_embedded`, cannot
     // override one that came from the environment.
     let mut options = args.options;
     options.password = args.secrets.password.clone();
@@ -169,7 +169,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             // First, so the records below it are attributable to a build. The
             // matching `stopped` is written on the way out, and its *absence*
             // before the next `started` is how a reader tells a crash from a
-            // quiet night — see `JournalEvent::started`.
+            // quiet night. See `JournalEvent::started`.
             journal.event(pahoa_room::JournalEvent::started(
                 start_time,
                 env!("CARGO_PKG_VERSION"),
@@ -177,15 +177,15 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
             ));
             // The rules this room is starting under, before anything happens in
             // it. Written on every start rather than only the first, because a
-            // restart is exactly when they can have changed — and a reader
+            // restart is exactly when they can have changed, and a reader
             // scanning back from any point finds the options in force without
             // replaying every change from the beginning.
             journal.event(pahoa_room::JournalEvent::options(start_time, &room.options));
             // **Both of those go to the disk now rather than on the next tick.**
             // `started` is the marker a reader uses to notice that the previous
             // incarnation never stopped, so a room that dies in its first
-            // second — which is when a bad config, a wedged mount or an OOM
-            // kill takes one — has to have already left the evidence. One
+            // second (which is when a bad config, a wedged mount or an OOM
+            // kill takes one) has to have already left the evidence. One
             // syscall per room start, against a crash that would otherwise be
             // invisible.
             journal.flush();
@@ -195,8 +195,8 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     // Cloned before the handle moves into the actor's config, because the
     // closing record is written after the actor has stopped and there is
     // nothing left to ask by then. It must also be *dropped* before
-    // `writer.finish()` — a surviving clone holds the channel open and the join
-    // below would wait forever — which is why it lives inside the runtime block
+    // `writer.finish()` (a surviving clone holds the channel open and the join
+    // below would wait forever) which is why it lives inside the runtime block
     // rather than beside the writer.
     let closing = journal.clone();
     let saves = SaveConfig { journal, ..saves };
@@ -216,7 +216,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
     // Sized from the seed for the same reason, and the depth from the width:
     // what a shard must absorb is a burst from the connections it owns, so
     // halving the fan-out doubles what each shard needs to hold. Deriving the
-    // second from whichever width is actually in force — flag or default —
+    // second from whichever width is actually in force, flag or default,
     // means passing only `--shards` still resizes both.
     let shards = args
         .shards
@@ -232,8 +232,8 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         // What an overflowing shard would close, which is the number worth
         // looking at when `pahoa_shard_overflow_total` moves.
         blast_radius = data.slot_info.len().saturating_mul(3).div_ceil(shards),
-        // Not inside `outbound_budget_bytes` — that is charged when a frame is
-        // queued for a connection, downstream of these queues — so anything
+        // Not inside `outbound_budget_bytes` (that is charged when a frame is
+        // queued for a connection, downstream of these queues) so anything
         // sizing a container against the budget has to add this.
         queue_bytes = pahoa_net::shard_queue_bytes(shards, shard_queue_depth),
         "fanning out"
@@ -247,7 +247,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         if args.allow_plaintext {
             tracing::warn!(
                 "--allow-plaintext: this room also answers ws://, so anything sent \
-                 over it — passwords, the admin token — is in the clear"
+                 over it (passwords, the admin token) is in the clear"
             );
         }
     }
@@ -294,7 +294,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         //
         // Under `json` that reasoning inverts. A container merges stdout and
         // stderr into one pod log, so the plain line would be a single
-        // unparseable entry in a stream of objects — every room, forever — and
+        // unparseable entry in a stream of objects, every room, forever, and
         // the log is now structured, so the dedicated stream buys nothing that
         // the event stream does not already give. Emitting both was the earlier
         // answer and was worse: two records of one fact, which anything
@@ -333,7 +333,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 
         // **Registered before either way out can win, and that is load-bearing
         // rather than tidy.** Installing the SIGTERM handler is what replaces
-        // the default disposition — kill the process now — with "catch it", and
+        // the default disposition (kill the process now) with "catch it", and
         // the handler outlives this future, so a second SIGTERM arriving *after*
         // something else has already decided to stop is swallowed instead of
         // cutting the quiesce short.
@@ -347,7 +347,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
         // the admin branch is pending at startup and so the signal branch got
         // polled too. It was luck: `select!` polls in a randomized order and
         // returns on the first ready branch, so a branch that is ready on the
-        // first poll can leave the other one never polled at all — and the
+        // first poll can leave the other one never polled at all, and the
         // notification below can now be ready that early.
         let mut term = terminate_signal();
 
@@ -389,11 +389,11 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 /// Start collecting the `tracing` events the crates below this one emit.
 ///
 /// Without a subscriber every one of them is discarded, which is how a room
-/// whose saves are failing — `actor.rs` logs that at `error!` — could run
+/// whose saves are failing (`actor.rs` logs that at `error!`) could run
 /// completely silently.
 ///
 /// Logs go to **stderr**, which under `--log-format text` leaves stdout
-/// carrying only the startup line — what makes `pahoa serve … 2>/dev/null` a
+/// carrying only the startup line: what makes `pahoa serve … 2>/dev/null` a
 /// way to read the one line a machine is meant to parse. Under `json` there is
 /// no stdout line at all and the whole stream is on stderr, because a
 /// structured log needs no separate channel to be parseable.
@@ -405,7 +405,7 @@ pub fn run(args: ServeArgs<'_>) -> Result<(), String> {
 /// alone cannot tell two rooms apart, and `+` marks a binary built from a tree
 /// that did not match any commit.
 ///
-/// The structured fields are the reason `--log-format json` is worth having —
+/// The structured fields are the reason `--log-format json` is worth having:
 /// under it every one of these becomes a queryable key rather than something to
 /// pull back out of a message with a regex.
 fn banner(args: &ServeArgs<'_>) {
@@ -513,11 +513,11 @@ fn init_logging(level: LevelFilter, format: LogFormat) {
 /// SIGTERM is the one that matters in a container: Kubernetes sends it and
 /// SIGKILLs after the grace period, so a room waiting only on SIGINT never runs
 /// `server.shutdown()` and silently loses up to `--save-interval` of play on
-/// every teardown — a rollout, a node drain, a rescheduled pod.
+/// every teardown: a rollout, a node drain, a rescheduled pod.
 /// Install the SIGTERM handler, or explain why the room will only answer SIGINT.
 ///
 /// Separate from waiting on it so that the registration happens at a point the
-/// caller controls — see the comment at the call site. Must be called inside the
+/// caller controls. See the comment at the call site. Must be called inside the
 /// runtime.
 ///
 /// Failing to install it is not worth refusing to serve over: the room still
@@ -553,8 +553,8 @@ async fn first_stop_signal(term: &mut Option<tokio::signal::unix::Signal>) -> &'
 
 /// Say when a restored save has overruled a flag that was actually given.
 ///
-/// The save winning is correct and deliberate — it is what lets `!admin
-/// /option` mean anything past the next restart — but it is the mirror of the
+/// The save winning is correct and deliberate (it is what lets `!admin
+/// /option` mean anything past the next restart) but it is the mirror of the
 /// bug that made passwords non-persistent, and silently ignoring a flag someone
 /// typed is how that bug went unnoticed for as long as it did. An operator who
 /// edits `--hint-cost` in a manifest, redeploys, and sees nothing change is owed
@@ -642,7 +642,7 @@ fn overruled_options(
 /// The direction looks backwards and is the reference's: `Context.__init__`
 /// takes the command-line values and `Context.load` applies the embedded ones
 /// over the top (`MultiServer.py:558-560`), so the seed wins. That is what the
-/// flag is *for* — honoring what the generator was configured with rather than
+/// flag is *for*: honoring what the generator was configured with rather than
 /// what whoever restarts the room happens to type.
 ///
 /// Unrecognized keys are ignored in silence, because every real seed carries a
@@ -735,7 +735,7 @@ fn apply_embedded(
                 options.item_cheat = v;
                 format!("item_cheat={v}")
             }),
-            // Reported under the field it sets, not the key it arrived as —
+            // Reported under the field it sets, not the key it arrived as:
             // `disable_item_cheat=false` reads like the opposite of what it did.
             "disable_item_cheat" => truthy(raw).map(|v| {
                 options.item_cheat = !v;
@@ -759,7 +759,7 @@ fn apply_embedded(
     }
 }
 
-/// A string option, where `None` and `False` both mean "unset" — the
+/// A string option, where `None` and `False` both mean "unset": the
 /// reference's coercion step skips exactly those (`MultiServer.py:784`), which
 /// is how a seed spells "no password" rather than a password of `"None"`.
 fn text(v: &PyObj) -> Option<Option<String>> {
@@ -783,7 +783,7 @@ fn count(v: &PyObj) -> Option<u32> {
 /// A mode, rejecting words the room would otherwise ignore in silence.
 ///
 /// [`Permission::from_text`] is a substring test, so anything unrecognized
-/// lands on `disabled` — a seed with a typo would quietly turn releases off.
+/// lands on `disabled`: a seed with a typo would quietly turn releases off.
 /// Trusting it only when the word round-trips turns that into a warning.
 fn permission(v: &PyObj) -> Option<Permission> {
     let text = v.as_str()?;
@@ -804,7 +804,7 @@ fn truthy(v: &PyObj) -> Option<bool> {
 /// Read and decode the save, complaining if the filesystem goes quiet.
 ///
 /// A CephFS MDS failover **blocks** rather than erroring, and a blocked read is
-/// uninterruptible — no timeout in userspace can cut it short. What a watchdog
+/// uninterruptible: no timeout in userspace can cut it short. What a watchdog
 /// can do is say so: without it, Kubernetes sees only a pod that never becomes
 /// ready and gives an operator nothing to go on.
 fn load_save(store: &SaveStore, dir: &Path) -> Result<Option<Snapshot>, String> {
@@ -875,8 +875,8 @@ mod tests {
     /// The exact key set every fixture in `crates/pahoa-pickle/tests/fixtures`
     /// carries, values from `AP_56807069331869547085`.
     ///
-    /// Two of them differ from pahoa's defaults — `hint_cost` is 20 against a
-    /// default of 10, and `collect_mode` is `disabled` against `auto` — so this
+    /// Two of them differ from pahoa's defaults (`hint_cost` is 20 against a
+    /// default of 10, and `collect_mode` is `disabled` against `auto`) so this
     /// is also the check that the overlay does anything at all.
     #[test]
     fn a_real_seeds_options_are_applied() {
@@ -940,7 +940,7 @@ mod tests {
     ///
     /// A password baked into a seed at generation time is readable by anyone
     /// holding the seed, and letting it win would make the configured password
-    /// silently not the one in force — the same class of bug as persisting a
+    /// silently not the one in force: the same class of bug as persisting a
     /// password into `room.save`, where rotation appears to work and reverts.
     #[test]
     fn the_environment_overrides_even_the_seed() {
@@ -967,7 +967,7 @@ mod tests {
             o.server_password.as_deref(),
             Some("admin-from-the-environment")
         );
-        // Non-secret options are unaffected — the seed still wins those.
+        // Non-secret options are unaffected: the seed still wins those.
         assert_eq!(o.hint_cost, 20);
     }
 
@@ -1038,7 +1038,7 @@ mod tests {
         assert!(!o.item_cheat);
     }
 
-    /// How a seed spells "no password" — not a password of `"None"`.
+    /// How a seed spells "no password", not a password of `"None"`.
     #[test]
     fn none_and_false_clear_a_password_rather_than_setting_one() {
         for empty in [PyObj::None, PyObj::Bool(false)] {

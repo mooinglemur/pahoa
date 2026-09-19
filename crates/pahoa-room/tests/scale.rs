@@ -6,7 +6,7 @@
 //!    unit test, which is only possible because this crate has no runtime.
 //! 2. It does *not* sweep every connected client. Archipelago's
 //!    `send_new_items` iterates all clients on every batch
-//!    (`MultiServer.py:1070-1084`) — O(clients) per check, which at 6000
+//!    (`MultiServer.py:1070-1084`): O(clients) per check, which at 6000
 //!    connections is the difference between a room that works and one that
 //!    does not.
 
@@ -191,7 +191,7 @@ fn collecting_scans_the_location_table_once_per_call() {
     let mut room = room_for(data.clone(), RoomOptions::default());
 
     // `!collect` has to find every location *anywhere* holding this slot's
-    // items, which is a linear pass over the flat table — the same shape as
+    // items, which is a linear pass over the flat table: the same shape as
     // the reference's `get_for_player`, and the reason this is measured rather
     // than assumed. If it ever needs to be O(items for the slot) instead, the
     // fix is a receiver index alongside the sender one.

@@ -11,7 +11,7 @@
 //! A world's client that re-sends its whole check list on every tick rather
 //! than on every reconnect, or that re-scouts the same locations in a loop,
 //! costs the room parse and lookup work proportional to its bug and shows up
-//! nowhere — not in the log, not in the journal, and not in an error count,
+//! nowhere: not in the log, not in the journal, and not in an error count,
 //! because there is no error. It looks like a busy player.
 //!
 //! Counted per slot, and the metrics layer renders a `game` label beside the
@@ -23,8 +23,8 @@
 //! # Read it as a ratio, never as a threshold
 //!
 //! **Some redundancy is correct and expected.** A client re-sends its checked
-//! locations on reconnect — that is how the protocol resynchronizes, and
-//! `register_location_checks` is written to expect it — so every reconnect
+//! locations on reconnect (that is how the protocol resynchronizes, and
+//! `register_location_checks` is written to expect it) so every reconnect
 //! legitimately contributes, and a room with churn accumulates these without
 //! anything being wrong.
 //!
@@ -73,7 +73,7 @@ pub fn record(key: SlotKey, kind: Kind, count: usize) {
         return;
     }
     let count = count as u64;
-    // The read path first, which is the common one once a slot has been seen —
+    // The read path first, which is the common one once a slot has been seen:
     // this runs inside `register_location_checks`, on the actor, and a release
     // pushes every location a slot owns through that function.
     if let Some(slot) = REDUNDANT.read().expect("not poisoned").get(&(key, kind)) {
@@ -92,7 +92,7 @@ pub fn record(key: SlotKey, kind: Kind, count: usize) {
 ///
 /// Observed only: a slot that has never sent a redundant request is absent
 /// rather than zero, because a gap and a zero say different things on a
-/// dashboard — and on a 2000-slot room the difference is 4000 series.
+/// dashboard, and on a 2000-slot room the difference is 4000 series.
 pub fn by_slot() -> Vec<((SlotKey, Kind), u64)> {
     REDUNDANT
         .read()

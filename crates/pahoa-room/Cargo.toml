@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Archipelago room state machine — transport-agnostic game logic"
+description = "Archipelago room state machine: transport-agnostic game logic"
 
 # Deliberately no tokio, no sockets, no I/O. Keeping this crate synchronous is
-# what lets the entire game logic — including a 400k-location release — run in a
+# what lets the entire game logic, including a 400k-location release, run in a
 # plain unit test in milliseconds, with no runtime and no flakiness, and it
 # leaves the concurrency model free to change without touching game rules.
 [dependencies]
@@ -26,6 +26,6 @@ thiserror.workspace = true
 # (`notify_client`, `broadcast_text_all`). A no-op without a subscriber, so the
 # synchronous tests keep running with no runtime and no setup.
 tracing = "0.1"
-# The save codec only — pure CPU on a background thread, no I/O, so this does
+# The save codec only: pure CPU on a background thread, no I/O, so this does
 # not compromise the crate's transport-independence.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

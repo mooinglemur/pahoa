@@ -5,7 +5,7 @@
 //! written after the actor has stopped, by a handle cloned before the actor
 //! took ownership, and it has to reach the disk before the writer thread is
 //! joined. Every one of those is an ordering between a signal handler, a
-//! runtime shutdown, a channel closing and a thread join — and a unit test of
+//! runtime shutdown, a channel closing and a thread join, and a unit test of
 //! `JournalEvent::stopped` would assert the shape of a value while proving
 //! nothing about whether it is ever written.
 //!
@@ -75,7 +75,7 @@ fn serving_room_with_admin(dir: &Path, token: Option<&str>) -> (Child, String) {
 
     // **Drained to EOF on its own thread, not read until the announcement and
     // then dropped.** Dropping the reader closes the pipe, and every line the
-    // room logs from then on — including the whole shutdown sequence — fails to
+    // room logs from then on, including the whole shutdown sequence, fails to
     // write. That cost an afternoon: the room appeared to die between the
     // signal and its closing record, and the same run by hand was perfect.
     let stderr = child.stderr.take().expect("piped");
@@ -216,7 +216,7 @@ fn a_terminated_room_records_that_it_started_and_why_it_stopped() {
 /// **A kill writes nothing, and the reader is meant to notice.**
 ///
 /// This is the case the pair exists for. Nothing can write a closing record for
-/// a process that is already gone, so the absence is the signal — and a second
+/// a process that is already gone, so the absence is the signal, and a second
 /// run appending to the same file leaves `started, started` adjacent, which is
 /// exactly how a reader spots the incarnation that died.
 ///
@@ -264,7 +264,7 @@ fn a_killed_room_leaves_no_closing_record_so_a_crash_is_visible() {
 /// This is the ordinary Kubernetes sequence, not an exotic race: an orchestrator
 /// asks the room to stop through the API and the kubelet then terminates the pod
 /// anyway, so the two arrive within milliseconds of each other and the signal
-/// lands in the middle of the quiesce — after the actor has been told to stop,
+/// lands in the middle of the quiesce: after the actor has been told to stop,
 /// while the final save is on a blocking thread, or during the linger that lets
 /// close frames reach the wire.
 ///
@@ -287,7 +287,7 @@ fn a_sigterm_during_an_admin_shutdown_does_not_abort_the_quiesce() {
     let (mut child, addr) = serving_room_with_admin(&dir, Some(TOKEN));
 
     // Wait for the 202 first, so the admin branch has definitively won the
-    // select. Signalling before that would be a different test — one where
+    // select. Signalling before that would be a different test: one where
     // SIGTERM wins and the graceful path never involves the API at all.
     let status = request_shutdown(&addr, TOKEN);
     assert!(
@@ -325,7 +325,7 @@ fn a_sigterm_during_an_admin_shutdown_does_not_abort_the_quiesce() {
     );
     assert_eq!(
         stopped[0]["reason"], "admin request",
-        "the first cause should win — the signals arrived after the room had \
+        "the first cause should win; the signals arrived after the room had \
          already decided why it was stopping"
     );
 }
@@ -335,8 +335,8 @@ fn a_sigterm_during_an_admin_shutdown_does_not_abort_the_quiesce() {
 /// already going away.
 ///
 /// It must not produce a second closing record, a second save, or a hang. The
-/// request itself may be refused or never answered — the listener is aborted
-/// first, deliberately — and that is fine; what matters is the room's own exit.
+/// request itself may be refused or never answered (the listener is aborted
+/// first, deliberately) and that is fine; what matters is the room's own exit.
 #[test]
 fn an_admin_shutdown_racing_a_sigterm_the_other_way_is_also_clean() {
     if fixture().is_none() {

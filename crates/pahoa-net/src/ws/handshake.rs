@@ -87,7 +87,7 @@ impl Accepted {
 pub struct DeflateConfig {
     pub enabled: bool,
     /// Window we ask to use for our own stream. Smaller costs ratio and saves
-    /// nothing here — the compressor is stateless — but the client has to hold a
+    /// nothing here (the compressor is stateless) but the client has to hold a
     /// matching window, and there are 6000 of those.
     pub server_max_window_bits: u8,
     /// Window we ask the client to use. Only sendable if the client offered the
@@ -97,7 +97,7 @@ pub struct DeflateConfig {
     ///
     /// Off by default, matching the reference server. It would bound our
     /// inbound state further, but at window bits 11 that state is ~10 KB per
-    /// connection — 60 MB at 6000 — which is not worth costing every client
+    /// connection, 60 MB at 6000, which is not worth costing every client
     /// their compression ratio.
     pub client_no_context_takeover: bool,
 }
@@ -159,7 +159,7 @@ pub fn headers_complete(buf: &[u8]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
-    /// Request target, as sent. Not decoded and not normalized — the router
+    /// Request target, as sent. Not decoded and not normalized: the router
     /// matches on it exactly.
     pub path: String,
     headers: Vec<(String, String)>,
@@ -183,8 +183,8 @@ impl HttpRequest {
 
     /// Whether the body arrives chunked rather than with a length.
     ///
-    /// pahoa does not decode chunked bodies: every client of this surface —
-    /// curl, the kubelet, an orchestrator — sends a length for a request this
+    /// pahoa does not decode chunked bodies: every client of this surface
+    /// (curl, the kubelet, an orchestrator) sends a length for a request this
     /// small, and a decoder for the alternative is code with no caller.
     pub fn is_chunked(&self) -> bool {
         self.header("Transfer-Encoding").is_some_and(|v| {

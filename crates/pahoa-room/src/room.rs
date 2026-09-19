@@ -30,7 +30,7 @@ use std::sync::Arc;
 ///
 /// **A release tag, not the tip of upstream's default branch.** This was 0.6.8
 /// for a while, which is what the checkout the behavior was read from calls
-/// itself — but 0.6.8 is unreleased, so a client comparing against it would be
+/// itself, but 0.6.8 is unreleased, so a client comparing against it would be
 /// told the room is newer than any Archipelago that exists. The last tagged
 /// release is what a client can actually reason about.
 ///
@@ -50,7 +50,7 @@ pub const SERVER_VERSION: Version = Version::new(
 ///
 /// **A table rather than a branch per convention**, because the set grows and
 /// the last time it grew nothing noticed: only `DeathLink` was recorded, so a
-/// history could not answer "why did I get a trap I never earned" — which is
+/// history could not answer "why did I get a trap I never earned", which is
 /// exactly the sort of question the file exists for. A fourth convention is a
 /// row here.
 ///
@@ -61,7 +61,7 @@ pub const SERVER_VERSION: Version = Version::new(
 /// **`RingLink` is deliberately not here**, though upstream counts it among the
 /// conventions. It shares a running *currency balance*, so it fires on every
 /// coin picked up or spent rather than on an event anybody would later ask
-/// about — a continuous delta wearing a link's clothes. Journaling it buries a
+/// about: a continuous delta wearing a link's clothes. Journaling it buries a
 /// room's real history under thousands of lines that answer no question, which
 /// is the volume rule this table already turns on; it was added on the
 /// symmetry with `DeathLink` and `TrapLink` and the symmetry was wrong.
@@ -69,7 +69,7 @@ pub const SERVER_VERSION: Version = Version::new(
 /// bounces are forwarded exactly as before.
 ///
 /// A bounce naming two of them takes the first match, which is deterministic
-/// and good enough for a combination no client sends — the payloads differ.
+/// and good enough for a combination no client sends: the payloads differ.
 const LINKS: &[(&str, &str, &str)] = &[
     ("DeathLink", "deathlink", "cause"),
     ("TrapLink", "traplink", "trap_name"),
@@ -82,12 +82,12 @@ const LINKS: &[(&str, &str, &str)] = &[
 /// bandwidth behavior and frame counts comparable.
 const PRINT_JSON_CHUNK: usize = 140;
 
-/// `(team, slot)`. Teams beyond 0 never occur today — the reference server only
-/// ever creates team 0 — but the key shape is everywhere in the protocol and
+/// `(team, slot)`. Teams beyond 0 never occur today (the reference server only
+/// ever creates team 0), but the key shape is everywhere in the protocol and
 /// retrofitting it later would touch every structure, so it is kept from the start.
 pub type SlotKey = (u32, u32);
 
-/// `(team, slot, remote_items)` — the key of one of a slot's two item queues.
+/// `(team, slot, remote_items)`: the key of one of a slot's two item queues.
 ///
 /// Two, not one, because a client that handles its own world's items locally
 /// gets a different stream from one that wants everything back from the server
@@ -169,7 +169,7 @@ pub struct Room {
     /// negation in the rule language: give that slot a filter of its own. See
     /// [`Room::filter_for`].
     filters: HashMap<String, crate::filter::Filter>,
-    /// Randomness for sampling rules, kept away from [`Room::rng`] — that one
+    /// Randomness for sampling rules, kept away from [`Room::rng`]: that one
     /// is the hint PRNG, is saved, and is pinned byte for byte against a real
     /// `MultiServer.Context`. Drawing from it here would move hint selection.
     sampler: crate::filter::Sampler,
@@ -177,7 +177,7 @@ pub struct Room {
     ///
     /// Orthogonal to every password mode rather than a fourth one: locking is
     /// about *this slot* and takes effect whether the room has no password, a
-    /// room-wide one, or per-slot ones. It bars new logins only — connections
+    /// room-wide one, or per-slot ones. It bars new logins only: connections
     /// already open are untouched, because ejecting someone and refusing their
     /// next attempt are different decisions and an administrator should be able
     /// to make them separately. `kick` is the other half.
@@ -221,8 +221,8 @@ pub struct Room {
     pub start_time: f64,
     /// The last time the transport reported through [`Room::tick`].
     ///
-    /// The room has no clock of its own — that is what lets a 400k-location
-    /// release run in a synchronous test — so anything time-dependent reads
+    /// The room has no clock of its own (that is what lets a 400k-location
+    /// release run in a synchronous test), so anything time-dependent reads
     /// this instead. It only has to be roughly current, and the transport
     /// refreshes it on every batch it processes.
     clock: f64,
@@ -238,8 +238,8 @@ impl Room {
         let teams = data.teams();
 
         let mut client_game_state = HashMap::new();
-        // Slots that are not exactly `player` — spectators and item-link groups
-        // — count as finished the moment the room loads, so they never block a
+        // Slots that are not exactly `player` (spectators and item-link groups)
+        // count as finished the moment the room loads, so they never block a
         // team-completion check (`MultiServer.py:551-555`). Per team, exactly as
         // the reference's `for team in self.clients` does; its loop happens to
         // have one iteration because its team set is hardcoded.
@@ -251,12 +251,12 @@ impl Room {
             }
         }
 
-        // Hints baked into the seed — placed by the generator, not bought.
+        // Hints baked into the seed: placed by the generator, not bought.
         //
         // **Given to every team**, where the reference writes only `self.hints[0,
         // slot]` (`MultiServer.py:548`). That line is unreachable at team 1 for
-        // the same reason everything else here is, and the alternative reading —
-        // that a second team starts without the hints the generator placed —
+        // the same reason everything else here is, and the alternative reading
+        // (that a second team starts without the hints the generator placed)
         // would make the seed play differently for them. Each team plays the
         // same multiworld, so each team starts from the same hints.
         let mut hints = HintStore::default();
@@ -346,7 +346,7 @@ impl Room {
     }
 
     /// `reason` is how the connection ended, in the words of whichever task
-    /// decided it — recorded so a history can tell "this player quit" from
+    /// decided it, recorded so a history can tell "this player quit" from
     /// "this player's connection died", which are otherwise the same line.
     pub fn on_disconnect(&mut self, conn: ConnId, reason: &str, out: &mut dyn EffectSink) {
         // Before the `auth` guard below, and unconditionally: an administrator
@@ -416,7 +416,7 @@ impl Room {
         );
 
         // After the `by_slot` prune above, so `slot_empty` answers "is this
-        // slot dark now" rather than "was it dark before this one left" — which
+        // slot dark now" rather than "was it dark before this one left", which
         // would be false for every departure and true for none.
         out.journal_event(crate::effect::JournalEvent::disconnected(
             self.clock,
@@ -435,15 +435,15 @@ impl Room {
 
         // Before authentication only Connect and GetDataPackage are processed.
         // Everything else falls through Python's `elif client.auth:` chain and
-        // is silently ignored — not refused (`MultiServer.py:1963`).
+        // is silently ignored, not refused (`MultiServer.py:1963`).
         if !authed && !packet.allowed_before_auth() {
             return;
         }
 
         // **Filtered before dispatch, so a dropped message never happened.**
         // An out-of-spec packet that should not be relayed is one the room must
-        // not act on either, and anything downstream — the journal, the
-        // datastore, the bounce fan-out — sits behind this point. Only kinds a
+        // not act on either, and anything downstream (the journal, the
+        // datastore, the bounce fan-out) sits behind this point. Only kinds a
         // rule can name are consulted, so a room with no filters pays one
         // lookup that misses.
         if authed
@@ -503,7 +503,7 @@ impl Room {
     fn handle_connect(&mut self, conn: ConnId, args: cmd::Connect, out: &mut dyn EffectSink) {
         // The reference's one precondition, ahead of everything else
         // (`MultiServer.py:1904-1907`): `password` present and a string or
-        // null, `game` present. Both are answered, not closed on — and note
+        // null, `game` present. Both are answered, not closed on, and note
         // `game` is only checked for *presence*, so a non-string one carries on
         // to be compared below.
         if args.password.is_bad() || matches!(args.game, Arg::Missing) {
@@ -534,8 +534,8 @@ impl Room {
                 // A lock is not a password mode, so it is checked here rather
                 // than beside them: it applies with no password configured, and
                 // it applies to somebody holding the correct one. Paired with
-                // `InvalidSlot` because the protocol has no reason of its own —
-                // see `ConnectionRefusedReason::SlotLocked` for why that pairing
+                // `InvalidSlot` because the protocol has no reason of its own.
+                // See `ConnectionRefusedReason::SlotLocked` for why that pairing
                 // and not the bare reason.
                 if self.locked_slots.contains(&(team, slot)) {
                     errors.push(ConnectionRefusedReason::InvalidSlot);
@@ -548,7 +548,7 @@ impl Room {
                 // two modes is in force is not something a caller can probe.
                 // Fails **closed**: with the mode in force, a slot missing from
                 // the map is refused rather than admitted. The map says who
-                // holds a key, not who needs one — so an incomplete map locks
+                // holds a key, not who needs one, so an incomplete map locks
                 // a slot out instead of leaving it the one open door, and
                 // clearing a password is a way to bar a slot mid-async.
                 if let Some(slot_passwords) = &self.options.slot_passwords {
@@ -700,8 +700,8 @@ impl Room {
         // **`Connected` goes out before the join announcement, and the
         // reference's source order says the opposite.**
         //
-        // `MultiServer.py:1936-1939` calls `on_client_joined` — which broadcasts
-        // the join and notifies the tutorial line — and only then
+        // `MultiServer.py:1936-1939` calls `on_client_joined` (which broadcasts
+        // the join and notifies the tutorial line) and only then
         // `await ctx.send_msgs(client, reply)`. Copying that order verbatim is
         // wrong, because it is not the order the reference *delivers* in. Both
         // of those notifications go out through `async_start`, which is
@@ -710,8 +710,8 @@ impl Room {
         // inline and reaches `socket.send` first, so `Connected` is on the wire
         // before either task starts.
         //
-        // pahoa's sink has no such asymmetry — everything it is handed is
-        // dispatched in the order it was handed over — so reproducing the
+        // pahoa's sink has no such asymmetry (everything it is handed is
+        // dispatched in the order it was handed over), so reproducing the
         // source order reproduced the *opposite* wire order, and a client that
         // requires `Connected` to answer `Connect` sees a `PrintJSON` instead
         // and drops the connection. Most clients tolerate it; depending on the
@@ -726,7 +726,7 @@ impl Room {
         // things. The transport filters broadcasts on its own copy of `auth`,
         // so a late update leaves the joining client out of its own join
         // message; and until it knows the slot, everything it delivers is
-        // attributed to no slot at all — which would put `Connected`, the
+        // attributed to no slot at all, which would put `Connected`, the
         // largest packet a slot ever receives, in the pre-auth bucket rather
         // than the slot's. On a 2000-slot seed that packet carries every slot's
         // info, so the misattribution is most of the traffic, not a rounding
@@ -755,7 +755,7 @@ impl Room {
         let client = &self.clients[&conn];
         let key = (client.team, client.slot);
         // Here rather than beside the `auth` flip, because this is the one
-        // place that runs exactly once per authenticated connection — the flip
+        // place that runs exactly once per authenticated connection: the flip
         // above it also fires for a reconnecting `ConnectUpdate`.
         out.journal_event(crate::effect::JournalEvent::connected(
             self.clock,
@@ -816,7 +816,7 @@ impl Room {
         out: &mut dyn EffectSink,
     ) {
         let mut resend = false;
-        // Captured before `apply_tags` overwrites them, and only compared —
+        // Captured before `apply_tags` overwrites them, and only compared:
         // a tracker sends `ConnectUpdate` routinely and most of those change
         // nothing at all.
         let mut retagged: Option<(SlotKey, Vec<String>, Vec<String>)> = None;
@@ -892,8 +892,8 @@ impl Room {
     /// Say that a slot's tags changed (`MultiServer.py:2026-2033`).
     ///
     /// **This is the only evidence a player has that a `ConnectUpdate` landed.**
-    /// The server sends no reply to one, so with the announcement missing — as
-    /// it was — a client toggling `DeathLink` saw exactly as much as a client
+    /// The server sends no reply to one, so with the announcement missing (as
+    /// it was) a client toggling `DeathLink` saw exactly as much as a client
     /// whose packet had been dropped on the floor. That is what the report
     /// behind this described: "any tag updates are getting dropped / ignored".
     ///
@@ -902,7 +902,7 @@ impl Room {
     /// decide who a text broadcast reaches; the actor already re-pushes that
     /// copy after every batch of inbound packets, so it does not go stale. What
     /// it does not do is push it *before* the announcement this method queues,
-    /// which is a race a client that has just dropped `NoText` would lose — it
+    /// which is a race a client that has just dropped `NoText` would lose: it
     /// would miss its own change. The join path states the same rule at length
     /// for the same reason.
     fn announce_tags_changed(
@@ -915,7 +915,7 @@ impl Room {
     ) {
         let client = &self.clients[&conn];
         out.membership_changed(conn, true, client.no_text, Some(key));
-        // `MultiServer.py:2031-2033`, verbatim — including rendering the two
+        // `MultiServer.py:2031-2033`, verbatim, including rendering the two
         // tag lists the way Python's `repr` does, since this is a line players
         // read next to the join message that uses the same spelling.
         let text = format!(
@@ -1046,7 +1046,7 @@ impl Room {
         raw: Map<String, Value>,
         out: &mut dyn EffectSink,
     ) {
-        // Absent or not a list is answered — and answered as `"Retrieve"`,
+        // Absent or not a list is answered, and answered as `"Retrieve"`,
         // which is the reference's own spelling here and not the command's
         // name (`MultiServer.py:2246-2249`).
         let Some(keys) = args.keys.as_ok() else {
@@ -1110,7 +1110,7 @@ impl Room {
 
         // Before the operations are looked at, as upstream's guard is: a
         // `_read_` key with a malformed operation in it must still be answered
-        // rather than closed on. The text is pahoa's own — upstream says only
+        // rather than closed on. The text is pahoa's own: upstream says only
         // "Set", which tells the author of a tracker nothing.
         if key.starts_with(Self::READ_PREFIX) {
             out.send(
@@ -1142,7 +1142,7 @@ impl Room {
             ));
         }
 
-        // An absent key falls back to the packet's `default`, or 0 — not null
+        // An absent key falls back to the packet's `default`, or 0, not null
         // (`MultiServer.py:2183`).
         let original = self.stored_data.get(&key).map_or_else(
             || args.default.clone().unwrap_or(Value::from(0)),
@@ -1205,7 +1205,7 @@ impl Room {
         }
     }
 
-    /// Subscriptions are never explicitly removed — Python uses a `WeakSet` and
+    /// Subscriptions are never explicitly removed: Python uses a `WeakSet` and
     /// lets garbage collection do it. Holding connection ids and pruning on
     /// disconnect is the same behavior without the GC timing dependency.
     fn handle_set_notify(&mut self, conn: ConnId, args: cmd::SetNotify, out: &mut dyn EffectSink) {
@@ -1288,7 +1288,7 @@ impl Room {
         targets.sort_unstable();
 
         // The link conventions, not every bounce. A `Bounce` is a general relay
-        // — trackers and forks use it for their own traffic — and its volume is
+        // (trackers and forks use it for their own traffic) and its volume is
         // unbounded in a way checks are not, so journaling all of it would let
         // one chatty client dominate the room's history. A link is different in
         // kind: it fires on a discrete game event, so its rate is bounded by
@@ -1300,7 +1300,7 @@ impl Room {
         {
             let data = args.data.as_object();
             // Cloned rather than stringified, so `amount` stays a number and
-            // `cause` stays a string — the conventions do not agree on a type
+            // `cause` stays a string: the conventions do not agree on a type
             // and there is no reason to flatten them into one.
             let mut extra = serde_json::Map::new();
             if let Some(value) = data.and_then(|d| d.get(*payload)) {
@@ -1396,13 +1396,13 @@ impl Room {
     ///
     /// **Untyped, unlike the goal message.** `broadcast_text_all` is called with
     /// no additional arguments, so this reaches clients as a bare `PrintJSON`
-    /// with only `text` — no `type`, nothing to key on. That is upstream's shape
+    /// with only `text`: no `type`, nothing to key on. That is upstream's shape
     /// and a client rendering milestones by type will show this as plain chat;
     /// matching is the contract.
     ///
     /// The reference asks whether every *other* slot is already goal, because it
     /// runs before writing this one. pahoa writes first, so the question here is
-    /// whether every slot is — the same set, asked after the fact.
+    /// whether every slot is: the same set, asked after the fact.
     ///
     /// Every slot counts, not only players: `ctx.player_names` is built from all
     /// of `slot_info`, and spectators and groups are seeded to goal at load, so
@@ -1492,7 +1492,7 @@ impl Room {
         let key = (client.team, client.slot);
         // Junk entries are dropped rather than fatal. The reference intersects
         // the list with the slot's locations (`MultiServer.py:2042-2045`), so
-        // an id of the wrong type matches nothing and costs nobody anything —
+        // an id of the wrong type matches nothing and costs nobody anything,
         // and the *other* ids in the same batch still register, which is the
         // point: one bad element must not lose a player their checks.
         let locations: Vec<i64> = args.locations.iter().filter_map(lenient::as_int).collect();
@@ -1523,9 +1523,9 @@ impl Room {
         // Unknown ids are dropped silently: clients legitimately send ids for
         // locations this multidata does not contain.
         let mut fresh: Vec<i64> = Vec::new();
-        // Locations this slot had already checked. Not an error — a client
+        // Locations this slot had already checked. Not an error: a client
         // re-sends its list on reconnect and that is how the protocol
-        // resynchronizes — but a client doing it in a loop is invisible without
+        // resynchronizes. But a client doing it in a loop is invisible without
         // this, because the room handles it correctly and says nothing. See
         // `crate::redundant`.
         let mut repeats = 0usize;
@@ -1549,7 +1549,7 @@ impl Room {
         fresh.dedup();
 
         // "Last new item check", which is what the reference records here too
-        // (`MultiServer.py:1141`) — and deliberately only when something was
+        // (`MultiServer.py:1141`), and deliberately only when something was
         // actually new, so a client re-sending its whole list on reconnect does
         // not read as activity.
         self.activity_at.insert(key, self.clock);
@@ -1570,7 +1570,7 @@ impl Room {
         // to the buffers of the two slots it concerns as the feed is built, so
         // there is no second traversal and nothing is re-encoded. Only slots
         // that actually have a scoped connection get a buffer, which the room
-        // can tell from the index it already maintains — so with nobody on the
+        // can tell from the index it already maintains, so with nobody on the
         // scoped port this is one lookup per message and no allocation at all.
         // See `docs/scoped-feed.md`.
         let mut scoped: HashMap<SlotKey, Vec<ServerPacket>> = HashMap::new();
@@ -1636,7 +1636,7 @@ impl Room {
         self.send_new_items(&dirty_slots, out);
 
         // Only the *new* checks go out here; the full list is sent by a separate
-        // path. Same field name, two meanings — clients union rather than replace.
+        // path. Same field name, two meanings: clients union rather than replace.
         if self.by_slot.get(&key).is_some_and(|c| !c.is_empty()) {
             out.broadcast(
                 Recipients::Slot(key),
@@ -1661,8 +1661,8 @@ impl Room {
     /// report whose hint lists changed.
     ///
     /// The reference does this lazily too, on every read of `_read_hints_*`
-    /// (`MultiServer.py:758-760`). Doing it eagerly here instead is equivalent —
-    /// registering checks is the only thing that can make a hint found — and it
+    /// (`MultiServer.py:758-760`). Doing it eagerly here instead is equivalent
+    /// (registering checks is the only thing that can make a hint found) and it
     /// keeps a tracker polling that key off an O(all hints) path.
     fn recheck_hints(&mut self, finder: SlotKey) -> Vec<SlotKey> {
         let Self {
@@ -1684,7 +1684,7 @@ impl Room {
     /// The full `checked_locations` list, as against the incremental one
     /// `register_location_checks` sends.
     ///
-    /// Same field name, two meanings — clients union rather than replace, which
+    /// Same field name, two meanings: clients union rather than replace, which
     /// is what makes both correct (`MultiServer.py:1130-1132`).
     fn update_checked_locations(&self, key: SlotKey, out: &mut dyn EffectSink) {
         out.broadcast(
@@ -1749,7 +1749,7 @@ impl Room {
     /// `collect_player` (`MultiServer.py:1101-1118`): pull in everything the
     /// rest of the multiworld is still holding for this slot.
     ///
-    /// The reverse of a release — it checks *other* players' locations, the
+    /// The reverse of a release: it checks *other* players' locations, the
     /// ones that happen to contain this slot's items.
     pub fn collect_player(&mut self, key: SlotKey, trigger: Trigger, out: &mut dyn EffectSink) {
         self.collect_inner(key, false, trigger, out);
@@ -1836,7 +1836,7 @@ impl Room {
             if members.iter().all(|m| collected.contains(m)) {
                 // **Its own trigger, not the member's.** A group slot collects
                 // because its last member did, which is a different event from
-                // whatever caused that member to — and labelling it `player`
+                // whatever caused that member to, and labelling it `player`
                 // would attribute a group's sweep to one person.
                 self.collect_inner((team, group), true, Trigger::Group, out);
             }
@@ -1858,7 +1858,7 @@ impl Room {
 
     /// Bar a slot from connecting, or let it back in.
     ///
-    /// Existing connections are deliberately left alone — see
+    /// Existing connections are deliberately left alone. See
     /// [`Room::locked_slots`]. Locking a slot whose player is mid-session bars
     /// their *next* attempt and nothing else, which is what makes "lock, then
     /// kick" a sequence an administrator can reason about.
@@ -1889,8 +1889,8 @@ impl Room {
     /// **`Some(empty)` and `None` are different things**, and the difference is
     /// the only way to say "this slot is exempt from the room's filter". A slot
     /// with no filter *inherits* the room's; a slot with an explicitly empty one
-    /// inherits nothing and is filtered not at all. Collapsing the two — which
-    /// this did at first, treating empty as "delete" — left full exemption
+    /// inherits nothing and is filtered not at all. Collapsing the two (which
+    /// this did at first, treating empty as "delete") left full exemption
     /// expressible only as an inert rule like `{"kind":"bounce","p":0}`, which
     /// is a workaround wearing the clothes of a design.
     ///
@@ -1916,7 +1916,7 @@ impl Room {
         let affected: Vec<ConnId> = match slot {
             Some(target) => self.by_slot.get(&target).cloned().unwrap_or_default(),
             // The room default reaches a connection only if its slot has no
-            // filter of its own — a slot's filter replaces rather than adds.
+            // filter of its own: a slot's filter replaces rather than adds.
             None => self
                 .clients
                 .values()
@@ -1952,7 +1952,7 @@ impl Room {
         self.filters.get(&key)
     }
 
-    /// Whether anything actually filters this slot — its own rules, or the
+    /// Whether anything actually filters this slot: its own rules, or the
     /// room's when it has none of its own.
     pub fn filters_slot(&self, key: SlotKey) -> bool {
         self.filter_for(key).is_some_and(|f| !f.is_empty())
@@ -2000,7 +2000,7 @@ impl Room {
     /// Start or retarget the countdown.
     ///
     /// Restarting while one is running only changes the target, exactly as the
-    /// reference does — the original loop keeps ticking against the new number
+    /// reference does: the original loop keeps ticking against the new number
     /// rather than a second one starting alongside it.
     pub(crate) fn start_countdown(&mut self, seconds: i64, now: f64, out: &mut dyn EffectSink) {
         self.countdown_message(
@@ -2048,8 +2048,8 @@ impl Room {
 
     /// Advance anything time-driven. Idempotent and safe to call early.
     ///
-    /// Loops rather than doing one step, so a late tick — a stalled thread, a
-    /// suspended container — catches up instead of stretching the countdown.
+    /// Loops rather than doing one step, so a late tick (a stalled thread, a
+    /// suspended container) catches up instead of stretching the countdown.
     pub fn tick(&mut self, now: f64, out: &mut dyn EffectSink) {
         self.clock = now;
         while let Some(state) = self.countdown {
@@ -2174,7 +2174,7 @@ impl Room {
     ///
     /// Ids, not names: the server sends `item_id`/`location_id` parts and each
     /// client resolves them against its own cached data package. That is also
-    /// why this is cheap enough to run 400k times in a mass release — no name
+    /// why this is cheap enough to run 400k times in a mass release: no name
     /// lookups and no per-item string building on the hot path.
     pub fn item_send_message(receiver: u32, item: NetworkItem) -> ServerPacket {
         let sender = item.player;
@@ -2259,13 +2259,13 @@ impl Room {
     ///
     /// `only_new` drops hints the finding player already holds; without it an
     /// existing hint is re-announced but not re-stored. `persist_even_if_found`
-    /// is what separates a scout — which remembers everything — from `!hint`,
+    /// is what separates a scout (which remembers everything) from `!hint`,
     /// which does not bank a hint for a location that was already checked.
     /// `recipients`, when given, restricts *delivery* without restricting what
     /// gets stored.
     /// Returns how many hints were dropped as already existing, which is
     /// meaningless to the room and is the whole signal for
-    /// [`crate::redundant`] — the caller knows which slot *asked*, and this
+    /// [`crate::redundant`]: the caller knows which slot *asked*, and this
     /// does not.
     pub fn notify_hints(
         &mut self,
@@ -2302,7 +2302,7 @@ impl Room {
             for player in self.slot_set(hint.receiving_player) {
                 concerns.entry(player).or_default().push(index);
             }
-            // The finder hears about it too, unless it is also the receiver —
+            // The finder hears about it too, unless it is also the receiver,
             // or already got this hint above as a member of the receiving group.
             if hint.receiving_player != hint.finding_player {
                 let list = concerns.entry(hint.finding_player).or_default();
@@ -2342,7 +2342,7 @@ impl Room {
             if self.by_slot.get(&(team, slot)).is_none_or(Vec::is_empty) {
                 continue;
             }
-            // Hints this slot finds come first — stably, so the found-first
+            // Hints this slot finds come first, stably, so the found-first
             // order above survives inside each group.
             indexes.sort_by_key(|&i| hints[i].finding_player != slot);
             let msgs: Vec<ServerPacket> = indexes
@@ -2405,7 +2405,7 @@ impl Room {
                     Some(HintStatus::Unspecified),
                 ));
             }
-            // `player` is the *receiving* player here — inverted from every
+            // `player` is the *receiving* player here, inverted from every
             // other use of `NetworkItem` (`NetUtils.py:93-94`).
             locations.push(NetworkItem {
                 item: entry.item,
@@ -2427,7 +2427,7 @@ impl Room {
             &[ServerPacket::LocationInfo(LocationInfo { locations })],
         );
         // Only `create_as_hint == 2` asks for new hints only, so it is the only
-        // scout that can *detect* a repeat — 1 re-announces them and 0 banks
+        // scout that can *detect* a repeat: 1 re-announces them and 0 banks
         // nothing. Attributed to the scouting slot rather than to whoever the
         // hint belongs to: this counts who asked, not what was asked about.
         let repeats = self.notify_hints(team, hints, args.create_as_hint == 2, true, None, out);
@@ -2441,7 +2441,7 @@ impl Room {
     ///
     /// Hints without spending points, which is why the permission rules are the
     /// interesting part: a slot may hint freely inside its own world, and may
-    /// hint another slot's location only for an item destined to itself — and
+    /// hint another slot's location only for an item destined to itself, and
     /// then only with the "unspecified" status, so it cannot editorialize about
     /// someone else's item.
     fn handle_create_hints(
@@ -2568,7 +2568,7 @@ impl Room {
     /// `UpdateHint` (`MultiServer.py:2089-2129`).
     ///
     /// Only the receiving player may reprioritize a hint, and nobody may set
-    /// "found" by hand — that flag is derived from the location actually being
+    /// "found" by hand: that flag is derived from the location actually being
     /// checked.
     fn handle_update_hint(
         &mut self,
@@ -2684,7 +2684,7 @@ impl Room {
     }
 
     /// Push the slot's whole hint list to anything subscribed to its
-    /// `_read_hints_*` key — how trackers stay current.
+    /// `_read_hints_*` key: how trackers stay current.
     ///
     /// Built as a bare map rather than through [`ServerPacket::echo`]: the
     /// reference constructs a fresh dict here, so the reply carries only `cmd`,
@@ -2760,7 +2760,7 @@ impl Room {
             tags: self.options.tags.clone(),
             // "This room will ask you for a password", not "which mode it
             // uses". `RoomInfo` goes out before the slot name is known, so a
-            // per-slot password cannot be reported per slot — and reporting
+            // per-slot password cannot be reported per slot, and reporting
             // `false` would stop a client prompting for one it does need.
             password: self.password_required(),
             permissions: self.permissions(),
@@ -2816,8 +2816,8 @@ impl Room {
     /// `get_aliased_name` (`MultiServer.py:799-803`): how a slot is written in
     /// chat and in `NetworkPlayer.alias`.
     ///
-    /// An alias does not *replace* the seed name, it prefixes it — `"Bob
-    /// (SlotName)"` — so other players can still tell who is who.
+    /// An alias does not *replace* the seed name, it prefixes it as `"Bob
+    /// (SlotName)"`, so other players can still tell who is who.
     pub(crate) fn slot_alias(&self, key: SlotKey) -> String {
         let name = self.slot_name(key);
         match self.name_aliases.get(&key) {
@@ -2957,7 +2957,7 @@ impl Room {
     /// (`MultiServer.py:2671-2682`).
     ///
     /// `None` means **no slot has ever checked anything**, which is a real
-    /// answer rather than a missing one — a room whose organizer is still
+    /// answer rather than a missing one: a room whose organizer is still
     /// getting people connected has that shape, and it is not the same as a
     /// check at the epoch. Callers are expected to distinguish the two; pahoa
     /// deliberately does not collapse it into a zero.
@@ -2980,7 +2980,7 @@ impl Room {
 
     /// Snapshot everything the tracker API reports.
     ///
-    /// Cheap on purpose — `Arc` clones and small copies — because the caller
+    /// Cheap on purpose (`Arc` clones and small copies) because the caller
     /// renders megabytes from it and must not do that while holding the actor.
     /// See [`crate::tracker`].
     pub fn tracker_data(&self) -> crate::tracker::TrackerData {
@@ -3074,7 +3074,7 @@ impl Room {
 
     /// How many authenticated connections a slot has open.
     ///
-    /// A player commonly has several — a game client, a text client, a tracker —
+    /// A player commonly has several (a game client, a text client, a tracker)
     /// so this is a count rather than a flag, and zero is what "not connected"
     /// means.
     pub fn connections_for(&self, key: SlotKey) -> usize {
@@ -3108,8 +3108,8 @@ impl Room {
     /// The two differ by fan-out, which is the point: one key watched by two
     /// thousand trackers turns every `Set` on it into two thousand deliveries,
     /// and that shows up in the outbound byte counters with nothing to explain
-    /// it. Walks the *subscription* map, which holds one entry per watched key
-    /// — never the data map, which is the one that gets large.
+    /// it. Walks the *subscription* map, which holds one entry per watched key,
+    /// never the data map, which is the one that gets large.
     pub fn stored_data_subscriptions(&self) -> (usize, usize) {
         (
             self.stored_data_subscriptions.len(),
@@ -3193,7 +3193,7 @@ impl Room {
     ///
     /// Everything the save carries is replaced wholesale rather than merged.
     /// The reference `update`s these maps onto whatever the fresh room built,
-    /// which differs only for slots the save does not mention — and since every
+    /// which differs only for slots the save does not mention, and since every
     /// map is keyed by slot, both approaches leave those untouched.
     ///
     /// Live connections are deliberately not part of a save: a restored room
@@ -3316,7 +3316,7 @@ fn float_seconds(timers: Vec<(SlotKey, u64)>) -> HashMap<SlotKey, f64> {
 /// What a filter rule can name a packet the slot sent, if anything.
 ///
 /// `None` means "not addressable by a filter", which is every packet carrying
-/// progression — see [`crate::filter`] for why that set is closed and why it is
+/// progression. See [`crate::filter`] for why that set is closed and why it is
 /// expressed as an absence here rather than as a check at the rule boundary
 /// only. The label is the qualifier a rule may narrow on: a bounce's tags, and
 /// nothing else so far.
@@ -3329,7 +3329,7 @@ fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<Str
         ClientPacket::Set(..) => Some((Kind::Set, Vec::new())),
         ClientPacket::StatusUpdate(_) => Some((Kind::StatusUpdate, Vec::new())),
         // Mutes the slot. Note this catches `!` commands too, because a `Say`
-        // *is* the command — see `filter::Kind::Say`.
+        // *is* the command. See `filter::Kind::Say`.
         ClientPacket::Say(_) => Some((Kind::Say, Vec::new())),
         _ => None,
     }
@@ -3337,7 +3337,7 @@ fn from_slot_kind(packet: &ClientPacket) -> Option<(crate::filter::Kind, Vec<Str
 
 /// What one data-storage entry costs, key included.
 ///
-/// The key counts because it is client-supplied and unbounded too — a client
+/// The key counts because it is client-supplied and unbounded too: a client
 /// writing ten thousand long keys with `null` values is a store that grows
 /// without a single byte of it appearing in the values.
 fn entry_bytes(key: &str, value: &Value) -> usize {
@@ -3354,7 +3354,7 @@ impl Room {
     /// if it names one that exists.
     ///
     /// **Existence is the whole job.** The reference does not parse these keys
-    /// at all — it registers one closure per real `(0, slot)` at load
+    /// at all: it registers one closure per real `(0, slot)` at load
     /// (`MultiServer.py:530-533`), so `hints_9_999` is simply not a read key
     /// and a `Get` for it falls through to ordinary datastorage and answers
     /// null. Parsing without checking answered `[]` instead: a made-up team or

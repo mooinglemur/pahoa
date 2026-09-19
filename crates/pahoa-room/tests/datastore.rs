@@ -434,13 +434,13 @@ fn subscriptions_are_dropped_when_a_connection_goes() {
 // --- integers wider than 64 bits -----------------------------------------
 //
 // Python's ints are unbounded, and a world packing its location checks into one
-// number is not a thought experiment — a 71-bit bitfield reached a live room and
+// number is not a thought experiment: a 71-bit bitfield reached a live room and
 // came back mangled. Two separate failures, and the quieter one was worse: the
 // value was *stored* as `2.3611832414348226e+21` with no error raised anywhere,
 // so the client's own state was corrupted by reading it back.
 //
 // These drive whole frames through `decode`, because the digits were being lost
-// in the JSON parser — before the room, before the data store, before anything
+// in the JSON parser: before the room, before the data store, before anything
 // that could have complained.
 
 /// The 71-bit value from the report: `1 << 71` plus a low bit set.
@@ -542,8 +542,8 @@ fn setting_a_bit_in_a_wide_bitfield_no_longer_drops_the_socket() {
         return;
     }
     // The reported symptom, end to end. `or` on a value this wide used to reach
-    // `bitwise` with a float on both sides — the digits having been lost in the
-    // JSON parser — which is a Python `TypeError`, which closes the connection.
+    // `bitwise` with a float on both sides (the digits having been lost in the
+    // JSON parser) which is a Python `TypeError`, which closes the connection.
     // A client was disconnected for setting a bit in its own bitfield.
     let (mut room, conn) = setup().unwrap();
 
@@ -641,7 +641,7 @@ fn the_store_reports_what_it_would_cost_to_write_out() {
     // `k` plus `[1,2,3]`.
     assert_eq!(room.stored_data_bytes(), 1 + 7);
 
-    // Replacing a value adjusts rather than accumulates — the failure mode of
+    // Replacing a value adjusts rather than accumulates: the failure mode of
     // a running total is that it only ever goes up.
     feed(
         &mut room,
@@ -666,7 +666,7 @@ fn the_running_total_agrees_with_measuring_the_whole_store() {
     }
     // The property the incremental bookkeeping has to hold, checked against the
     // thing it exists to avoid doing: a full walk. Drift here is silent, and it
-    // compounds — every subsequent write is relative to a wrong number.
+    // compounds: every subsequent write is relative to a wrong number.
     let (mut room, conn) = setup().unwrap();
     for (key, value) in [
         ("a", r#"{"nested":{"deep":[1,2,3]}}"#),

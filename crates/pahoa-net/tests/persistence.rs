@@ -3,14 +3,14 @@
 //! Three claims, each of which has to hold end to end rather than in the room
 //! crate alone:
 //!
-//! 1. A room that is killed and restarted comes back with its state — the
+//! 1. A room that is killed and restarted comes back with its state: the
 //!    kill -9 case, played out through actual clients rather than by comparing
 //!    structs.
 //! 2. A save that hangs does **not** stall the room. This is the one that
 //!    matters on CephFS, where an MDS failover blocks rather than erroring, and
 //!    it is the reason a save runs on a blocking thread the actor never awaits.
 //! 3. Saves coalesce. A store slower than the save interval must not accumulate
-//!    queued snapshots, each pinning the state it captured — that is the
+//!    queued snapshots, each pinning the state it captured: that is the
 //!    out-of-memory path that only appears on a bad day.
 
 use futures_util::{SinkExt, StreamExt};
@@ -187,8 +187,8 @@ async fn a_restarted_room_remembers_what_a_client_did() {
             .send(json!([{"cmd": "Say", "text": "!alias Persistent"}]))
             .await;
         // Specifically the alias's own `RoomUpdate`, which carries `players`.
-        // The `LocationChecks` above produces one too — carrying
-        // `checked_locations` — and waiting on whichever arrives first let the
+        // The `LocationChecks` above produces one too, carrying
+        // `checked_locations`, and waiting on whichever arrives first let the
         // shutdown below race the alias, saving a room that had not applied it
         // yet. That failed about one run in six.
         client
@@ -258,7 +258,7 @@ async fn a_restarted_room_remembers_what_a_client_did() {
 }
 
 /// A sink that hangs until told to stop, standing in for a filesystem having a
-/// bad day — an MDS failover, a rebalance, a node that has stopped answering.
+/// bad day: an MDS failover, a rebalance, a node that has stopped answering.
 ///
 /// It blocks indefinitely rather than for a fixed duration, so the test proves
 /// the room is unaffected for however long it takes to check, and still tears

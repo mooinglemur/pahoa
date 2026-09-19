@@ -5,8 +5,8 @@
 //! twenty million sends on the one task that also owns all mutable state, and
 //! everything else would stall behind it.
 //!
-//! So the actor sends each broadcast to K shard tasks — a handful of messages,
-//! not thousands — and each shard expands the audience against the membership
+//! So the actor sends each broadcast to K shard tasks (a handful of messages,
+//! not thousands) and each shard expands the audience against the membership
 //! it owns and writes to its own connections, in parallel, off the critical path.
 //!
 //! Shard assignment is `conn_id % K`, so the actor knows which shard owns a
@@ -47,7 +47,7 @@ pub type CloseSignal = mpsc::Sender<&'static str>;
 /// Close `member`, preferring the ordered path and guaranteeing the outcome.
 ///
 /// The queue is tried first so that anything already queued for this connection
-/// still reaches it — an admin kick sends the player an explanation immediately
+/// still reaches it: an admin kick sends the player an explanation immediately
 /// before closing, and jumping the queue would drop it. The out-of-band signal
 /// is the fallback, and it only fires when the queue is full, which is when
 /// those queued frames were never going to be delivered anyway.
@@ -69,7 +69,7 @@ fn close_member(member: &Member, reason: &'static str) {
 /// `write_all` against a peer that has stopped reading. The queue then has room,
 /// the ordered close is happily accepted, and it waits behind frames that will
 /// never be written. Every path that queues the close therefore succeeds and
-/// nothing reaches the socket — which is exactly the state that looked, from
+/// nothing reaches the socket, which is exactly the state that looked, from
 /// the room's side, like a completed disconnect.
 ///
 /// A client that is not draining cannot read a courtesy close frame anyway, so
@@ -103,14 +103,14 @@ struct Member {
     ///
     /// Held per connection rather than looked up per slot because the shard has
     /// no slot table beyond `by_slot` and the check runs once per recipient per
-    /// broadcast — a pointer compare and at most a few rule tests, on the path
+    /// broadcast: a pointer compare and at most a few rule tests, on the path
     /// a mass release walks. Shared behind an `Arc` so pushing a filter to a
     /// slot's six connections copies nothing.
     filter: Option<Arc<pahoa_room::filter::Filter>>,
     /// This connection arrived on the scoped port and receives only what
     /// concerns its own slot.
     ///
-    /// Set once, on `Add`, and never by an `Update` — the policy comes from the
+    /// Set once, on `Add`, and never by an `Update`: the policy comes from the
     /// port, and nothing a client sends may lower it. See
     /// `docs/scoped-feed.md`.
     scoped: bool,
@@ -143,8 +143,8 @@ pub enum ShardMsg {
         slot: Option<SlotKey>,
     },
     /// Replace this connection's send filter. Separate from `Update` because a
-    /// filter changes for reasons that have nothing to do with membership — an
-    /// operator editing it mid-game — and because the room pushes it to every
+    /// filter changes for reasons that have nothing to do with membership (an
+    /// operator editing it mid-game) and because the room pushes it to every
     /// connection of a slot at once.
     SetFilter {
         conn: ConnId,
@@ -154,7 +154,7 @@ pub enum ShardMsg {
         conn: ConnId,
         msg: Outgoing,
         /// What a filter rule may name this frame, if anything. `None` is
-        /// unfilterable and always delivered — see
+        /// unfilterable and always delivered. See
         /// `pahoa_room::filter::outbound_tag`.
         tag: Option<OutTag>,
     },
@@ -188,7 +188,7 @@ const DESYNCED: &str = "server dropped a frame";
 
 /// What a filter rule can match an outbound frame against.
 ///
-/// Resolved once by the actor, from the packets, before they are encoded — the
+/// Resolved once by the actor, from the packets, before they are encoded: the
 /// shard sees only bytes by then. `Arc` because one broadcast hands the same
 /// tag to every shard.
 pub type OutTag = Arc<(pahoa_room::filter::Kind, Vec<String>)>;
@@ -199,7 +199,7 @@ impl ShardMsg {
     ///
     /// The distinction decides which of a shard's two inboxes it takes, and the
     /// two have opposite failure modes. Dropping a frame under load is the
-    /// design — that is what the bounded queue and the lag rule are for. **
+    /// design: that is what the bounded queue and the lag rule are for. **
     /// Dropping a membership change is silent corruption**: a lost `Remove`
     /// strands a member and the outbound budget it holds for the life of the
     /// process, a lost `Add` leaves a connection that never receives anything,
@@ -213,7 +213,7 @@ impl ShardMsg {
                 | Self::Update { .. }
                 | Self::SetFilter { .. }
                 // A close that does not arrive is a connection that should be
-                // gone and is not — an admin kick reporting success while the
+                // gone and is not: an admin kick reporting success while the
                 // player keeps playing.
                 | Self::Close { .. }
                 // And the whole point of this one is that it is the answer to a
@@ -230,7 +230,7 @@ impl ShardMsg {
 /// a bounded queue, because bounding it is the whole backpressure mechanism:
 /// the room holds finite memory under a mass release precisely because that
 /// queue can refuse. Membership changes go through an unbounded one, because
-/// there is no useful way to refuse them — see [`ShardMsg::is_control`].
+/// there is no useful way to refuse them. See [`ShardMsg::is_control`].
 ///
 /// Unbounded is safe here in a way it would not be for frames: control traffic
 /// is bounded by connection *churn* rather than by broadcast volume, each
@@ -278,7 +278,7 @@ impl Shards {
     /// Never awaits, on either inbox: the actor blocking on a shard would
     /// reintroduce exactly the head-of-line stall shards exist to prevent.
     /// Control messages take the unbounded queue so that "never awaits" does
-    /// not have to mean "may be discarded" — which it did, and which cost a
+    /// not have to mean "may be discarded", which it did, and which cost a
     /// live room 7 MiB of its outbound budget permanently.
     pub fn tell(&self, conn: ConnId, msg: ShardMsg) {
         if msg.is_control() {
@@ -293,7 +293,7 @@ impl Shards {
             // slot's send index as it sends, so a discarded `ReceivedItems`
             // leaves the room believing that slot holds items it never
             // received, and the client has no way to notice. Closing is safe
-            // where dropping is not, because the protocol resumes —
+            // where dropping is not, because the protocol resumes:
             // `Connect` resends `checked_locations` in full and replays the
             // item queue from zero. See `budget.rs`.
             crate::metrics::record_shard_overflow();
@@ -313,7 +313,7 @@ impl Shards {
     /// The message travels **uncompressed**: each shard compresses it at most
     /// once, covering all of its own deflate connections. That is O(shards)
     /// compressions rather than O(connections), and it keeps the work off the
-    /// actor — measured at ~175µs for a full 140-packet chunk, which across a
+    /// actor: measured at ~175µs for a full 140-packet chunk, which across a
     /// mass release would be half a second of mailbox stall.
     pub fn broadcast(&self, to: Recipients, msg: Outgoing, tag: Option<OutTag>) {
         for (index, tx) in self.txs.iter().enumerate() {
@@ -349,8 +349,8 @@ async fn run_shard(
     let mut by_slot: HashMap<SlotKey, Vec<ConnId>> = HashMap::new();
     // One compressor per negotiated window size, shareable across every
     // connection using that size precisely because `server_no_context_takeover`
-    // makes it stateless. In practice this holds exactly one entry — a client
-    // capping our window below the default is rare — so the linear scan is
+    // makes it stateless. In practice this holds exactly one entry (a client
+    // capping our window below the default is rare) so the linear scan is
     // cheaper than hashing, and it is bounded at the seven legal sizes.
     let mut deflaters: Vec<(u8, Deflater)> = Vec::new();
     // One generator per shard, seeded from the shard index so two shards do not
@@ -363,8 +363,8 @@ async fn run_shard(
 
     loop {
         // **Membership first, deliberately.** A shard that is behind on frames
-        // is still expected to know who is connected — that is what it is being
-        // asked about — and every ordering the room depends on wants it this
+        // is still expected to know who is connected (that is what it is being
+        // asked about) and every ordering the room depends on wants it this
         // way round: the transport must know a connection is authenticated
         // before the join broadcast it belongs in, and must have its filter
         // before anything filterable reaches it.
@@ -436,14 +436,14 @@ async fn run_shard(
                 if let Some(m) = members.get_mut(&conn) {
                     // **Where the two halves of the deflate question meet.**
                     // Whether a connection negotiated permessage-deflate is
-                    // settled during the handshake, before `Connect` — so the
-                    // game is not known yet — and the game arrives later, known
+                    // settled during the handshake, before `Connect` (so the
+                    // game is not known yet) and the game arrives later, known
                     // only to the room. `Member` is the one place holding both.
                     //
                     // On the `None -> Some` transition only, which is exactly
                     // "this connection authenticated": it fires once per
-                    // connection, and a `ConnectUpdate` — which trackers send
-                    // routinely — is `Some -> Some` and does not count again.
+                    // connection, and a `ConnectUpdate` (which trackers send
+                    // routinely) is `Some -> Some` and does not count again.
                     if m.slot.is_none()
                         && let Some(key) = slot
                     {
@@ -571,7 +571,7 @@ async fn run_shard(
             ShardMsg::Close { conn, reason } => {
                 if let Some(m) = members.get(&conn) {
                     // An admin kick most often lands on a client that is
-                    // already struggling — which is exactly when a queued close
+                    // already struggling, which is exactly when a queued close
                     // would be dropped and the kick would report success while
                     // the client stayed connected.
                     close_member(m, reason);
@@ -589,7 +589,7 @@ async fn run_shard(
                 }
                 // **Once per population, not once per dropped broadcast.**
                 // A shard whose queue is full drops a broadcast per attempt,
-                // and every one of them lands here — on the *unbounded* control
+                // and every one of them lands here, on the *unbounded* control
                 // queue, which is selected ahead of frames. Without the guard
                 // the shard spends a full `O(members)` sweep per drop, in
                 // preference to draining the queue that overflowed, re-closing
@@ -599,7 +599,7 @@ async fn run_shard(
                 // to congestion was competing with its own recovery.
                 //
                 // `swept` is cleared by `Add` and by nothing else, which is
-                // exactly right — a sweep closed everyone who was here when it
+                // exactly right: a sweep closed everyone who was here when it
                 // ran, so the only thing that can make another one necessary is
                 // somebody new arriving.
                 None if swept => {}
@@ -630,7 +630,7 @@ async fn run_shard(
 /// Whether this recipient's filter drops this frame.
 ///
 /// `None` for any of the three means deliver: an untagged frame is one no rule
-/// can name — everything carrying progression, among others — a member with no
+/// can name (everything carrying progression, among others), a member with no
 /// filter takes everything, and a connection with no slot yet is nobody's
 /// filter to apply. All are the common case and cost one comparison.
 fn filtered(
@@ -656,7 +656,7 @@ fn filtered(
 /// `deflated` memoizes across the recipients of one broadcast, so a shard with
 /// 800 deflate connections compresses once rather than 800 times. That memo is
 /// only sound because `server_no_context_takeover` makes the output a pure
-/// function of `(payload, window bits)` — with context takeover every
+/// function of `(payload, window bits)`: with context takeover every
 /// connection's compressor would be at a different point in its own stream.
 ///
 /// Keyed on the window size, because that is the other half of the input.
@@ -696,9 +696,9 @@ enum Delivery {
     /// The client is not keeping up. **Carries which bound bit**, because
     /// "over its own share", "the room is out of budget" and "its writer's
     /// queue is full" have completely different fixes and used to be logged
-    /// identically — which cost three wrong diagnoses in a row on a live room.
+    /// identically, which cost three wrong diagnoses in a row on a live room.
     Behind(&'static str),
-    /// The writer task has already exited, so this connection is over — the
+    /// The writer task has already exited, so this connection is over: the
     /// peer hung up, or it was closed. Nothing is owed to it and nothing is
     /// wrong with it; the shard has simply not seen its `Remove` yet.
     Gone,
@@ -709,7 +709,7 @@ enum Delivery {
 /// **Dropping the frame and carrying on is not an option**, which is the subtle
 /// part. `send_new_items` advances a slot's `send_index` as it sends, so a
 /// discarded `ReceivedItems` leaves the server believing a client holds items it
-/// never received — and the client cannot tell. Closing instead is safe because
+/// never received, and the client cannot tell. Closing instead is safe because
 /// the protocol is resumable: `Connect` resends `checked_locations` in full and
 /// replays the item queue from index zero, so a lagged client reconnects into
 /// correct state. Only chat scrollback is lost, which any disconnect loses.
@@ -749,13 +749,13 @@ fn deliver(member: &Member, frame: Bytes, budget: &Budget) -> Delivery {
 /// ordinary disconnect passes through here: the writer task drops `out_rx` the
 /// moment the peer hangs up, and any broadcast between then and the actor's
 /// `Remove` arriving finds a closed channel. Counting those made
-/// `lag_disconnects` — documented as "should be zero in a healthy room" — climb
+/// `lag_disconnects` (documented as "should be zero in a healthy room") climb
 /// once per disconnect, and put an `INFO` line accusing a client of being too
 /// slow into the log for what was a clean goodbye. On a room with reconnect
 /// churn that is the whole log.
 ///
 /// The flag is reused because the effect on the shard is identical: send it
-/// nothing further and wait for `Remove`. There is nothing to close — the
+/// nothing further and wait for `Remove`. There is nothing to close: the
 /// writer is what closed.
 fn mark_gone(members: &mut HashMap<ConnId, Member>, gone: &[ConnId]) {
     for conn in gone {
@@ -779,7 +779,7 @@ fn mark_lagged(members: &mut HashMap<ConnId, Member>, lagged: &[(ConnId, &'stati
             crate::metrics::record_lag_disconnect();
             tracing::info!(%conn, reason = why, "dropping a connection that cannot keep up");
             // Out of band, unconditionally. This connection is lagged, so its
-            // writer is by definition behind — queuing the close would put it
+            // writer is by definition behind: queuing the close would put it
             // after work that is not moving. See `force_close`.
             force_close(m, "too slow");
         }
@@ -841,7 +841,7 @@ mod tests {
     ///
     /// A shard whose inbox is full refuses every broadcast that follows, and
     /// each refusal asks it to close everyone it owns. But the first sweep
-    /// already did that, so the rest are pure cost — and expensive cost: they
+    /// already did that, so the rest are pure cost, and expensive cost: they
     /// arrive on the *unbounded* control queue, which `run_shard` selects ahead
     /// of frames, so the shard spends an `O(members)` walk per drop in
     /// preference to draining the queue that overflowed, re-closing connections
@@ -895,7 +895,7 @@ mod tests {
     ///
     /// This is the half that makes it safe. A guard that latched would leave a
     /// connection that arrived after the sweep still receiving frames the shard
-    /// had already given up on — silently out of sync, which is the exact state
+    /// had already given up on: silently out of sync, which is the exact state
     /// the sweep exists to prevent. `Add` is what clears it, and `Add` is the
     /// only thing that can.
     #[tokio::test]
@@ -922,7 +922,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(crate::metrics::shard_sweeps() - sweeps, 1);
 
-        // A reconnect, which is exactly what an overflow provokes — the shed
+        // A reconnect, which is exactly what an overflow provokes: the shed
         // connections all come back at once.
         let second = ConnId(1);
         let (tx, mut out_rx, close_tx, mut close_rx) = member_channels();
@@ -979,7 +979,7 @@ mod tests {
         };
         // `held` is *returned*, not merely bound: a receiver dropped here would
         // close the channel, and `try_send` would then fail for the wrong
-        // reason entirely — "this connection is gone" rather than "this
+        // reason entirely: "this connection is gone" rather than "this
         // connection is behind". Those are the two cases these tests exist to
         // tell apart.
         (member, close_rx, held)
@@ -991,7 +991,7 @@ mod tests {
     /// constant *to the byte* for over half an hour, across two complete load
     /// runs, through stretches where one client was connected, and while 19 MB
     /// of traffic flowed. It arrived in steps, during a run that
-    /// lag-disconnected 165 of 200 connections — which is exactly when a
+    /// lag-disconnected 165 of 200 connections, which is exactly when a
     /// shard's mailbox is under enough pressure to refuse one.
     ///
     /// The same shape as the `fetch_sub` wrap from the other side: a budget
@@ -1043,7 +1043,7 @@ mod tests {
             );
         }
         // The removal that hands those bytes back, asked for at the worst
-        // moment — which is the moment it is always asked for, because a mass
+        // moment, which is the moment it is always asked for, because a mass
         // lag-disconnect is what fills the queue in the first place.
         shards.tell(conn, ShardMsg::Remove { conn });
 
@@ -1066,7 +1066,7 @@ mod tests {
     /// way to notice. It would play a different game until it happened to
     /// reconnect. Closing is safe where dropping is not, because `Connect`
     /// resends `checked_locations` in full and replays the item queue from
-    /// zero — see `budget.rs`.
+    /// zero. See `budget.rs`.
     ///
     /// Before this, the frame was discarded and nothing else happened at all.
     #[tokio::test]
@@ -1129,7 +1129,7 @@ mod tests {
     /// The bug in one assertion.
     ///
     /// A lagged connection's close must not be queued, because the queue is
-    /// either full or — more often — accepting work its writer will never get
+    /// either full or, more often, accepting work its writer will never get
     /// through. Either way the client is never told, and the room forgets a
     /// socket that stays open.
     #[test]
@@ -1150,7 +1150,7 @@ mod tests {
 
     /// **The subtle half, and the one the cluster actually hit.**
     ///
-    /// The queue here has plenty of room, so a queued close would be accepted —
+    /// The queue here has plenty of room, so a queued close would be accepted,
     /// and would then wait behind frames whose `write_all` is blocked against a
     /// peer that stopped reading. Accepting is not delivering. A lagged
     /// connection must therefore skip the queue *even when the queue looks
@@ -1194,8 +1194,8 @@ mod tests {
     /// broadcast between then and the actor's `Remove` finds a closed channel.
     /// Reading that as "this client cannot keep up" accused every departing
     /// player of being too slow: on the dev cluster a room with reconnect churn
-    /// logged one such line per disconnect and drove `lag_disconnects` — which
-    /// the metric's own help text says should be zero in a healthy room —
+    /// logged one such line per disconnect and drove `lag_disconnects`, which
+    /// the metric's own help text says should be zero in a healthy room,
     /// straight up, hiding the real congestion it exists to report.
     #[test]
     fn a_closed_writer_is_not_a_lagging_client() {
@@ -1238,7 +1238,7 @@ mod tests {
         );
     }
 
-    /// The other half of the distinction — a *full* queue really is a client
+    /// The other half of the distinction: a *full* queue really is a client
     /// that is not keeping up, and must still be treated as one.
     #[test]
     fn a_full_writer_queue_is_still_a_lagging_client() {

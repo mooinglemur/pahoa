@@ -25,7 +25,7 @@ const UPGRADE: &[u8] = b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket
 /// record length, then the handshake header.
 const CLIENT_HELLO: &[u8] = &[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc];
 
-/// An ordinary request — a person with `curl`, a probe, a browser — as opposed
+/// An ordinary request (a person with `curl`, a probe, a browser) as opposed
 /// to [`UPGRADE`]. The two are refused differently and that is the point.
 const PLAIN_GET: &[u8] = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
@@ -169,7 +169,7 @@ async fn a_wss_client_upgrades_and_is_greeted() {
 /// **pahoa's own WebSocket client, over TLS, negotiating deflate.**
 ///
 /// The test above uses `tokio-tungstenite`, which is fine for proving the room
-/// answers — but tungstenite has no permessage-deflate at all and rejects any
+/// answers, but tungstenite has no permessage-deflate at all and rejects any
 /// frame with RSV1 set, so it cannot exercise the one thing this client exists
 /// for. Until `Client` became generic over its stream it opened its own
 /// `TcpStream`, which meant the load driver could reach a plaintext room and
@@ -269,7 +269,7 @@ async fn a_plaintext_http_request_is_refused_with_426() {
 /// retries as `wss://`. A room behind an ordinary TLS terminator produces alert
 /// bytes, so the retry fires and the player never notices.
 ///
-/// A well-formed `426` defeats it — `websockets` parses that happily and raises
+/// A well-formed `426` defeats it: `websockets` parses that happily and raises
 /// `InvalidStatusCode`, which is not the branch that retries. Sending the
 /// correct status therefore stranded clients that the reference's accidental
 /// behavior would have connected, which is how this was found: Universal

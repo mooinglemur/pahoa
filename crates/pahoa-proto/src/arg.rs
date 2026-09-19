@@ -9,10 +9,10 @@
 //! - **It answers `InvalidPacket` and reads the next frame.** `Say` with a
 //!   non-string `text`, `Get` with a `keys` that is not a list, `Bounce` with a
 //!   malformed filter, `Connect` with a `password` that is neither a string nor
-//!   null — each is a guarded `if` with its own message
+//!   null: each is a guarded `if` with its own message
 //!   (`MultiServer.py:1904-1907`, `:2176-2180`, `:2246-2250`, `:2185-2211`).
-//! - **It raises, and the socket dies.** Anything indexed unguarded —
-//!   `args['name']`, `args['version']`, `args["locations"]` — throws `KeyError`
+//! - **It raises, and the socket dies.** Anything indexed unguarded
+//!   (`args['name']`, `args['version']`, `args["locations"]`) throws `KeyError`
 //!   or `TypeError` out of the read loop (`MultiServer.py:900-917`).
 //!
 //! A `#[derive(Deserialize)]` field can only produce the second. `serde` fails
@@ -26,7 +26,7 @@
 //!
 //! [`Arg<T>`] never fails to deserialize. A value of the wrong type arrives as
 //! [`Arg::Wrong`] and a `#[serde(default)]` absence as [`Arg::Missing`], so the
-//! handler decides — next to the reference's own guard, which is already there
+//! handler decides, next to the reference's own guard, which is already there
 //! for the values that did parse.
 //!
 //! **Leaving `Arg` off a field is therefore the way to say "the reference
@@ -64,7 +64,7 @@ impl<T> Arg<T> {
         }
     }
 
-    /// Absent *or* the wrong type — the shape of a guard written
+    /// Absent *or* the wrong type: the shape of a guard written
     /// `"keys" not in args or type(args["keys"]) != list`, which is most of
     /// them.
     pub fn is_bad(&self) -> bool {
@@ -127,7 +127,7 @@ mod tests {
     }
 
     /// A null is a value, not an absence: `Arg<Option<T>>` accepts it, and a
-    /// bare `Arg<T>` calls it wrong. The reference draws the same line —
+    /// bare `Arg<T>` calls it wrong. The reference draws the same line:
     /// `type(args['password']) not in [str, NoneType]` admits null, while
     /// `args['name']` merely fails to match any slot.
     #[test]

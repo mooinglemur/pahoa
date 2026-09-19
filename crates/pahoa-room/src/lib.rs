@@ -3,7 +3,7 @@
 //! Deliberately transport-agnostic: it consumes decoded [`pahoa_proto::ClientPacket`]s
 //! and emits [`pahoa_proto::ServerPacket`]s through an [`EffectSink`], with no
 //! sockets, no runtime and no clock of its own. That is what lets the whole of
-//! the game logic — including a 400k-location release across 2000 slots — run in
+//! the game logic, including a 400k-location release across 2000 slots, run in
 //! a synchronous unit test, and lets the concurrency model change without
 //! touching a single game rule.
 

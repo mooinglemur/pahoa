@@ -6,7 +6,7 @@
 //!
 //! The number matters because of where the work happens. The actor owns `Room`
 //! and awaits only its mailbox, so any millisecond spent building a reply is a
-//! millisecond no other client's packet is processed — and `GetDataPackage`
+//! millisecond no other client's packet is processed, and `GetDataPackage`
 //! needs no authentication, so any connection can ask for it repeatedly.
 
 mod common;
@@ -54,7 +54,7 @@ fn a_full_datapackage_reply_stays_off_the_critical_path() {
     );
     let elapsed = started.elapsed();
 
-    // Encoding is on the actor too — `Dispatcher::send` serializes inline —
+    // Encoding is on the actor too (`Dispatcher::send` serializes inline)
     // so the honest cost is both phases, not just the handler.
     let encoding = Instant::now();
     let bytes = encoded_size(&sink, conn, &room);
@@ -68,14 +68,14 @@ fn a_full_datapackage_reply_stays_off_the_critical_path() {
     assert!(bytes > 0, "a reply should have been produced");
 
     // The reply is rendered once at construction, so the handler should be a
-    // refcount bump — measured at ~4 µs against 4.6 ms when it cloned every
+    // refcount bump: measured at ~4 µs against 4.6 ms when it cloned every
     // name table and serialized them per request. The bound is generous
     // because this runs on whatever CI happens to be; it is set to catch a
     // return to per-request building, not to police microseconds.
     assert!(
         elapsed < std::time::Duration::from_micros(500),
         "the handler took {elapsed:?}, which suggests it is rebuilding the \
-         package per request again — the actor is blocked for that long, once \
+         package per request again; the actor is blocked for that long, once \
          per request, for anyone who can open a socket"
     );
 
